@@ -1,0 +1,771 @@
+/**
+ * The processing engine (runs inside a Web Worker). Wires the independent
+ * modules together in the documented order and owns every GPU resource:
+ *
+ *   Input/Decoder → RAW Development → Scene Analysis (reduced image) →
+ *   Semantic Segmentation → Depth Estimation → Mask/Depth Refinement →
+ *   Image statistics → Automatic Decision Engine → [preview] →
+ *   Neural Restoration (SCUNet, NAFNet; tiled, only where needed) →
+ *   Exposure/Tone → Camera Color → Semantic/Depth → Depth of Field → Output
+ *
+ * Deviation from the reference order (documented in docs/PIPELINE.md): the
+ * tiled neural denoise/restoration runs after the first preview. The analysis
+ * networks see a ≤768 px area-averaged image in which sensor noise is already
+ * averaged away, so running them on the denoised image would not change
+ * their output — but it would delay the first preview by the full cost of
+ * SCUNet on a phone.
+ */
+import { Gpu } from "../gpu/gpu.ts";
+import { halvesToFloats } from "../gpu/half.ts";
+import { decodeFile } from "../decode/decode.ts";
+import type { DecodedImage } from "../decode/types.ts";
+import { develop, type WorkingImage } from "../raw/develop.ts";
+import { Neural, MODELS } from "../neural/ort.ts";
+import { analyseScene, type SceneMaps } from "../neural/scene.ts";
+import { runTiled } from "../neural/tiles.ts";
+import { denoiseGPU } from "../restore/denoise.ts";
+import { downsample, guideSize, refine, releaseRefined, type RefinedMaps } from "../refine/refine.ts";
+import { blurReport, lumPercentiles, measureBlocks, measureRegions, noiseProfile } from "../analysis/analysis.ts";
+import type { AnalysisReport } from "../analysis/types.ts";
+import { decide, type DecisionResult } from "../decision/engine.ts";
+import { autoFocus } from "../decision/focus.ts";
+import { depthZones } from "../decision/zones.ts";
+import type { Params } from "../decision/params.ts";
+import { Renderer, type RenderSource } from "../render/renderer.ts";
+import { wbMatrix, neutralToTempTint } from "../color/wb.ts";
+import { parseCube } from "../render/looks.ts";
+import { neutralProfile, normalizeProfile, type LookProfile } from "../looks/profile.ts";
+import { analyseColors, type ColorStats } from "../looks/palette.ts";
+import { matchProfile, profileFromReference, type RegionColors } from "../looks/reference.ts";
+import { GROUPS, type Group } from "../neural/scene.ts";
+import { canEncodeHeic, encodeHeic, encodeJpeg, encodeLinearDng, encodeTiff16 } from "../output/encoders.ts";
+import { Profiler } from "./profiler.ts";
+import type { Capabilities, ExportFormat, FromWorker, Summary } from "./protocol.ts";
+import type { CameraColor } from "../color/dng.ts";
+
+type Post = (m: FromWorker, transfer?: Transferable[]) => void;
+
+interface Session {
+  name: string;
+  decoded: DecodedImage;
+  work: WorkingImage;
+  denoised: GPUTexture; // === work.tex until neural restoration ran
+  gain: number;
+  scene: SceneMaps;
+  maps: RefinedMaps;
+  report: AnalysisReport;
+  decision: DecisionResult;
+  params: Params;
+  /** Preview proxy. `owned` is false when it aliases the working textures (image ≤ preview size). */
+  proxy?: { base: GPUTexture; denoised: GPUTexture; w: number; h: number; owned: boolean };
+  /** Quarter-pixel proxy used while a slider is being dragged. */
+  draft?: { base: GPUTexture; denoised: GPUTexture; w: number; h: number };
+  distCPU?: { w: number; h: number; data: Float32Array };
+  lightLinear: [number, number, number];
+}
+
+/** Default blur strength whenever depth of field is switched on (scene-independent, by preference). */
+const DEFAULT_DOF_STRENGTH = 0.5;
+
+/** Long edge of the image the analysis networks see. */
+const ANALYSIS_LONG = 1036;
+
+const isMobile = () => /iPhone|iPad|iPod|Android/i.test(globalThis.navigator?.userAgent ?? "") || ((globalThis.navigator as Navigator & { maxTouchPoints?: number })?.maxTouchPoints ?? 0) > 1;
+
+export class Engine {
+  private gpu!: Gpu;
+  private neural!: Neural;
+  private renderer!: Renderer;
+  private post: Post;
+  private s?: Session;
+  private previewLong = isMobile() ? 1600 : 2048;
+  private view: 0 | 1 | 2 | 4 | 5 = 0;
+  private region = 0;
+  private before = false;
+  private generation = 0;
+  private profiler = new Profiler();
+
+  constructor(post: Post) { this.post = post; }
+
+  /**
+   * One serial queue for all GPU work on the session. Opening a photo,
+   * restoration, export, previews and look thumbnails create and destroy
+   * textures; running any two at once let a render submit a texture another
+   * job had just destroyed ("Destroyed texture used in a submit").
+   */
+  private chain: Promise<unknown> = Promise.resolve();
+  exclusive<T>(f: () => Promise<T>): Promise<T> {
+    const r = this.chain.then(f, f);
+    this.chain = r.catch(() => {});
+    return r;
+  }
+  private renderQueued = false;
+  private queuedDraft = false;
+  /** Schedules a preview render; bursts of slider changes coalesce into one
+   * render with the latest parameters (a final request overrides a draft). */
+  requestRender(final = true, draft = false) {
+    if (!this.s) return;
+    this.queuedDraft = draft;
+    if (this.renderQueued) return;
+    this.renderQueued = true;
+    void this.exclusive(async () => {
+      this.renderQueued = false;
+      await this.renderNow(final, this.queuedDraft);
+    }).catch((e) => this.post({ type: "error", message: e instanceof Error ? e.message : String(e) }));
+  }
+
+  /** Depth range of the highlighted zone (view 5; `region` holds the zone index). */
+  private zoneRange(): [number, number] | undefined {
+    const e = this.s?.decision.dofSuggestion.zoneEdges;
+    if (this.view !== 5 || !e) return undefined;
+    const i = Math.min(4, Math.max(0, this.region));
+    return [i === 0 ? -1 : e[i], i === 4 ? 2 : e[i + 1]];
+  }
+
+  /** Half-size (quarter-pixel) copy of the preview proxy, created on first drag. */
+  private async draftSource(): Promise<RenderSource> {
+    const s = this.s!;
+    const px = s.proxy!;
+    if (!s.draft) {
+      const w = Math.max(1, Math.round(px.w / 2)), h = Math.max(1, Math.round(px.h / 2));
+      const base = await downsample(this.gpu, px.base, px.w, px.h, w, h, false, 1, "draft.base");
+      const dn = px.denoised === px.base ? base : await downsample(this.gpu, px.denoised, px.w, px.h, w, h, false, 1, "draft.denoised");
+      s.draft = { base, denoised: dn, w, h };
+    }
+    const d = s.draft;
+    return { base: d.base, denoised: d.denoised, width: d.w, height: d.h, fullWidth: s.work.width };
+  }
+
+  async init(base: string, forceCpu = false): Promise<Capabilities> {
+    const gpu = forceCpu ? undefined : await Gpu.create();
+    if (!gpu) {
+      throw new Error("WebGPU is not available in this browser. On iPhone, use Safari on iOS 26 or later (Settings → Apps → Safari → Advanced → Feature Flags → WebGPU on older versions).");
+    }
+    this.gpu = gpu;
+    gpu.onError = (m) => this.log("GPU error: " + m);
+    gpu.onLost = (m) => this.post({ type: "gpu-lost", reason: m });
+    this.renderer = new Renderer(gpu);
+    this.neural = await Neural.create(gpu, base);
+    this.neural.onProgress = (id, loaded, total) => this.post({ type: "progress", stage: `download ${id}`, frac: loaded / total, detail: `${(loaded / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB` });
+    const heic = await canEncodeHeic();
+    return {
+      webgpu: true,
+      f16: gpu.info.f16,
+      backend: this.neural.backend,
+      gpu: `${gpu.info.vendor} ${gpu.info.architecture}`.trim(),
+      heicEncode: heic,
+      crossOriginIsolated: (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true,
+      threads: globalThis.navigator?.hardwareConcurrency ?? 1,
+    };
+  }
+
+  looks() { return this.renderer.looks().map((l) => ({ id: l.id, name: l.name, description: l.description })); }
+
+  private log(text: string) { this.post({ type: "log", text }); }
+  private progress(stage: string, detail?: string, frac?: number) { this.post({ type: "progress", stage, detail, frac }); }
+
+  private closeSession() {
+    const s = this.s;
+    if (!s) return;
+    const g = this.gpu;
+    if (s.denoised !== s.work.tex) g.release(s.denoised);
+    g.release(s.work.tex);
+    this.releaseProxy(s);
+    releaseRefined(g, s.maps);
+    this.renderer.releaseTargets();
+    this.dropThumb();
+    try { s.decoded.close(); } catch { /* already closed */ }
+    this.s = undefined;
+  }
+
+  async open(file: File, resolution: "auto" | "full" | "half", autoExposure = false, autoDof = false) {
+    const gen = ++this.generation;
+    this.closeSession();
+    const P = new Profiler(this.gpu);
+    this.profiler = P;
+    const gpu = this.gpu;
+    this.progress("decode", file.name);
+    // The file bytes are only needed by the decoder (which copies them): no
+    // reference is kept here, so 30–80 MB can be collected during development.
+    const decoded = await P.time("decode", async () => decodeFile(new Uint8Array(await file.arrayBuffer()), file.name, file.type), (d) => `${d.format} via ${d.source.kind === "rgb" ? d.source.decoder : "LibRaw"}`);
+    for (const [k, v] of Object.entries(decoded.timings)) this.log(`  ${k}: ${v.toFixed(0)} ms`);
+
+    // Working resolution: iPhone memory decides, not desktop assumptions.
+    const src = decoded.source;
+    const mp = (src.width * src.height) / 1e6;
+    let factor = 1;
+    if (src.kind !== "rgb") {
+      if (resolution === "half") factor = 2;
+      else if (resolution === "auto") factor = isMobile() && mp > 16 ? 2 : 1;
+      const maxDim = gpu.info.maxTextureDimension2D;
+      while (Math.max(src.width, src.height) / factor > maxDim) factor++;
+    }
+    this.progress("develop", `${src.width}×${src.height}${factor > 1 ? ` → 1/${factor}` : ""}`);
+    const work = await P.time("raw development", () => develop(gpu, decoded, { factor }), (w) => `${w.width}×${w.height}`);
+    work.log.forEach((l) => this.log(l));
+    // The sensor data now lives on the GPU; free the decoder's wasm heap. The
+    // raw view points into that heap, so it must be dropped as well — otherwise
+    // the whole LibRaw memory (≈150 MB for 12 MP, ≈460 MB for 48 MP) stays
+    // alive for as long as the photo is open.
+    decoded.close();
+    decoded.close = () => {};
+    if (decoded.source.kind !== "rgb") decoded.source.data = new Uint16Array(0);
+    if (gen !== this.generation) return;
+
+    // --- reduced analysis image + exposure normalisation gain ------------------
+    this.progress("analysis image");
+    // The networks see a ~1036 px image: segmentation slides 512 px windows over
+    // it and depth adds high-resolution detail tiles to a global pass. Still a
+    // reduced image — never the 12/48 MP original.
+    const aScale = Math.min(1, ANALYSIS_LONG / Math.max(work.width, work.height));
+    const gw = Math.max(16, Math.round(work.width * aScale)), gh = Math.max(16, Math.round(work.height * aScale));
+    const lin = await downsample(gpu, work.tex, work.width, work.height, gw, gh, false, 1, "analysis.lin");
+    const linHalf = new Uint16Array(await gpu.readTexture(lin, 0, 0, gw, gh, 8));
+    gpu.release(lin);
+    const linF = halvesToFloats(linHalf);
+    const gain = exposureGain(linF);
+    const analysisRgba = new Float32Array(gw * gh * 4);
+    for (let i = 0; i < gw * gh * 4; i += 4) {
+      for (let c = 0; c < 3; c++) {
+        const v = Math.min(1, Math.max(0, linF[i + c] * gain));
+        analysisRgba[i + c] = v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+      }
+      analysisRgba[i + 3] = 1;
+    }
+    this.log(`analysis image ${gw}×${gh}; normalisation gain ${gain.toFixed(3)} (${Math.log2(gain).toFixed(2)} EV)`);
+
+    // --- semantic segmentation + depth (reduced image only) ------------------------
+    const scene = await P.time("segmentation + depth", () => analyseScene(this.neural, { rgba: analysisRgba, width: gw, height: gh }, (s) => this.progress(s)), (s) => Object.entries(s.timings).map(([k, v]) => `${k} ${v.toFixed(0)}ms`).join(", "));
+    if (import.meta.env.DEV) {
+      // Dev only: dump the analysis image and distance map (PGM) for offline inspection.
+      const pgm = (w: number, h: number, v: (i: number) => number) => {
+        const head = new TextEncoder().encode(`P5 ${w} ${h} 255\n`);
+        const out = new Uint8Array(head.length + w * h);
+        out.set(head);
+        for (let k = 0; k < w * h; k++) out[head.length + k] = Math.max(0, Math.min(255, Math.round(v(k) * 255)));
+        return out;
+      };
+      const d = scene.depth;
+      void fetch("/__debug/save?name=depth.pgm", { method: "POST", body: pgm(d.width, d.height, (k) => d.dist[k]) });
+      void fetch("/__debug/save?name=analysis.pgm", { method: "POST", body: pgm(gw, gh, (k) => analysisRgba[k * 4 + 1]) });
+    }
+    scene.log.forEach((l) => this.log(l));
+    if (gen !== this.generation) return;
+
+    // --- refinement ---------------------------------------------------------------
+    this.progress("refine masks");
+    const maps = await P.time("mask/depth refinement", () => refine(gpu, work.tex, work.width, work.height, gain, scene), (m) => `guide ${m.w}×${m.h}, r=${m.params.maskRadius}`);
+
+    // --- statistics -------------------------------------------------------------------
+    this.progress("statistics");
+    const report = await P.time("image statistics", async () => {
+      const b0 = await measureBlocks(gpu, work.tex, work.width, work.height, gain, 0.02);
+      const noise = noiseProfile(b0);
+      const thr = Math.max(0.02, 8 * noise.mid);
+      const blocks = thr > 0.0201 ? await measureBlocks(gpu, work.tex, work.width, work.height, gain, thr) : b0;
+      const blur = blurReport(blocks, noise);
+      const reg = await measureRegions(gpu, maps, gain);
+      const r: AnalysisReport = {
+        width: work.width, height: work.height, gain, referred: work.referred,
+        isProRaw: src.kind !== "rgb" && src.isProRaw, iso: decoded.meta.iso,
+        global: reg.regions.global, groups: reg.regions as AnalysisReport["groups"],
+        histLum: reg.histLum, histRGB: reg.histRGB, atmosphere: reg.atmosphere, noise, blur, blocks,
+        lum: lumPercentiles(reg.histLum), timings: {},
+      };
+      return r;
+    }, (r) => `noise σ ${(r.noise.mid * 255).toFixed(2)}/255, blur ${r.blur.median.toFixed(2)}px`);
+    this.log(`noise bins (y: σ/255 luma, chroma, blocks): ` + report.noise.bins.map((b) => `${b.y.toFixed(2)}: ${(b.sigma * 255).toFixed(2)}, ${(b.sigmaC * 255).toFixed(2)}, ${b.blocks}`).join(" | "));
+    this.log(`regions: ` + Object.entries(report.groups).filter(([, g]) => g.area > 0.01).map(([k, g]) => `${k} ${(g.area * 100).toFixed(0)}% ${g.meanEV.toFixed(2)}EV C${g.chroma.toFixed(3)} d${g.dist.toFixed(2)}`).join("; "));
+    this.log(`noise σ (encoded, /255): mid ${(report.noise.mid * 255).toFixed(2)}, shadows ${(report.noise.shadow * 255).toFixed(2)}, chroma ${(report.noise.chroma * 255).toFixed(2)}; blur median ${report.blur.median.toFixed(2)} px over ${report.blur.edgeBlocks} edge blocks`);
+
+    // --- decisions ----------------------------------------------------------------------
+    const colorInput = src.kind !== "rgb" ? src.color : undefined;
+    const decision = await P.time("decision engine", () => decide({
+      report,
+      camera: work.camera,
+      referred: work.referred,
+      isProRaw: report.isProRaw,
+      iso: decoded.meta.iso,
+      autoExposure,
+      solveNeutral: colorInput ? (n) => neutralToTempTint(colorInput, n) : undefined,
+    }));
+    const params = structuredClone(decision.params);
+    // Atmospheric light: dark-channel estimate is in the analysis encoding → linear working.
+    const A = decision.params.dehaze.light.map((v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)) / gain) as [number, number, number];
+
+    const s: Session = { name: file.name, decoded, work, denoised: work.tex, gain, scene, maps, report, decision, params, lightLinear: A };
+    this.s = s;
+    await this.cacheDistance();
+    // Automatic focus: subject from refined depth + segmentation + composition.
+    const af = autoFocus(s.distCPU!, scene.seg);
+    decision.dofSuggestion = { justified: af.justified, focus: af.focus, strength: af.strength, reason: af.reason, x: af.x, y: af.y };
+    // Depth zones by natural breaks of this photo's depth (boundaries fall in the
+    // gaps between layers). Initial blur per zone follows the automatic focus
+    // curve at the zone's mean distance, so switching to zones is seamless.
+    {
+      const zones = depthZones(s.distCPU!, scene.seg, 5);
+      const smooth = (a: number, b: number, x: number) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+      const curve = (c: number) => Math.max(smooth(0, 0.55, c - af.focus), 0.6 * smooth(0, 0.4, af.focus - c));
+      decision.dofSuggestion.zoneEdges = [0, ...zones.slice(1).map((z) => z.lo), 1];
+      decision.dofSuggestion.zones = zones.map((z) => ({ share: z.share, label: z.label, lo: z.lo, hi: z.hi }));
+      for (const p of [decision.params, params]) {
+        p.dof.zoneBounds = zones.slice(1).map((z) => z.lo);
+        p.dof.zones = zones.map((z) => Math.round(curve(z.center) * 100) / 100);
+        p.dof.mode = "focus";
+      }
+      this.log("depth zones (natural breaks): " + zones.map((z, i) => `${i + 1}: ${z.lo.toFixed(2)}–${z.hi.toFixed(2)} ${Math.round(z.share * 100)}% ${z.label}`).join(" | "));
+    }
+    // Keep the decision trace consistent with what auto focus found.
+    const dofNote = decision.decisions.find((d) => d.id === "dof");
+    if (dofNote) { dofNote.value = af.justified ? "justified" : "not justified"; dofNote.reason = `auto focus at distance ${af.focus.toFixed(2)}: ${af.reason}`; }
+    for (const p of [decision.params, params]) {
+      p.dof = { ...p.dof, focus: af.focus, strength: DEFAULT_DOF_STRENGTH, points: [] };
+      if (autoDof && af.justified) p.enable = { ...p.enable, dof: true };
+    }
+    this.log(`auto focus: distance ${af.focus.toFixed(2)} at (${af.x.toFixed(2)}, ${af.y.toFixed(2)}) — ${af.justified ? "blur justified" : "no blur"}: ${af.reason}${autoDof && af.justified ? " — applied (Auto depth of field)" : ""}`);
+    this.post({ type: "analysis", summary: this.summary(file.name), decisions: decision.decisions, auto: decision.params, params, dof: decision.dofSuggestion, exposureSuggestion: decision.exposureSuggestion });
+    this.post({ type: "profile", stages: P.stages });
+
+    // --- first preview (before neural restoration) --------------------------------------
+    await P.time("preview proxy", () => this.makeProxy());
+    await this.renderNow(false);
+    this.post({ type: "profile", stages: P.stages });
+    if (gen !== this.generation) return;
+
+    // --- neural restoration (tiled, only where needed) -------------------------------------
+    await this.restore(gen);
+    if (gen !== this.generation) return;
+    await P.time("preview proxy (restored)", () => this.makeProxy());
+    await this.renderNow(true);
+    this.post({ type: "profile", stages: P.stages });
+  }
+
+  /** Runs SCUNet/NAFNet on demand (user request), overriding the automatic plan. */
+  async forceRestore(which: { scunet: boolean; nafnet: boolean }) {
+    const s = this.s;
+    if (!s) return;
+    const auto = s.decision.plan;
+    if (isMobile() && which.scunet) { this.log("SCUNet is desktop-only (too heavy for phone memory)"); return; }
+    const plan = {
+      denoise: false,
+      scunet: which.scunet,
+      nafnet: which.nafnet,
+      denoiseTile: () => 1,
+      // Forced restoration still follows the measured blur map, with a floor so every tile is tried.
+      deblurTile: (x: number, y: number, n: number) => Math.max(0.5, auto.deblurTile(x, y, n)),
+    };
+    if (s.denoised !== s.work.tex) { this.gpu.release(s.denoised); s.denoised = s.work.tex; }
+    if (which.scunet && s.params.denoise.luma === 0 && s.params.denoise.chroma === 0) s.params = { ...s.params, denoise: { ...s.params.denoise, luma: 0.6, chroma: 0.6 } };
+    await this.restore(this.generation, plan);
+    await this.profiler.time("preview proxy (restored)", () => this.makeProxy());
+    this.post({ type: "params", params: s.params });
+    await this.renderNow(true);
+    this.post({ type: "profile", stages: this.profiler.stages });
+  }
+
+  private async restore(gen: number, override?: DecisionResult["plan"]) {
+    const s = this.s!;
+    const gpu = this.gpu;
+    const P = this.profiler;
+    const plan = { ...(override ?? s.decision.plan) };
+    const { width: W, height: H } = s.work;
+    // Phones: the ~17M-parameter restoration networks can exhaust memory and
+    // crash the tab, so they never run automatically there.
+    if (!override && isMobile() && plan.nafnet) { plan.nafnet = false; this.log("NAFNet restoration skipped automatically on this device (memory); use the button to run it"); }
+    if (!plan.denoise && !plan.scunet && !plan.nafnet) { this.log("neural restoration: not needed for this photograph"); return; }
+    let target = s.work.tex;
+    if (plan.denoise && !plan.scunet) {
+      this.progress("denoise", "GPU");
+      target = await P.time("GPU denoise", () => denoiseGPU(gpu, s.work.tex, W, H, s.gain, s.report.noise), () => `${W}×${H}`);
+      this.log(`GPU denoise: full frame, noise-adaptive (σ mid ${(s.report.noise.mid * 255).toFixed(2)}/255)`);
+    }
+    if (plan.scunet) {
+      this.progress("denoise (SCUNet)", "loading model");
+      const session = await P.time("SCUNet load", () => this.neural.session(MODELS.scunet, this.neural.backend === "webgpu"));
+      const out = gpu.tex("denoised", W, H, "rgba16float");
+      const st = await P.time("SCUNet tiles", () => runTiled(gpu, this.neural, session, s.work.tex, out, W, H, {
+        gain: s.gain,
+        plan: (_c, _r, x, y) => ({ strength: plan.denoiseTile(x, y, 256) }),
+        onTile: (d, t) => this.progress("denoise (SCUNet)", `tile ${d}/${t}`, d / t),
+        shouldCancel: () => gen !== this.generation,
+      }), (r) => `${r.run}/${r.tiles} tiles run, ${r.msPerTile.toFixed(0)} ms/tile`);
+      await session.release();
+      this.log(`SCUNet: ${st.run} of ${st.tiles} tiles processed (${st.skipped} clean tiles skipped), ${st.msPerTile.toFixed(0)} ms per tile on ${this.neural.backend}`);
+      target = out;
+    }
+    if (plan.nafnet) {
+      if (target === s.work.tex) {
+        target = gpu.tex("denoised", W, H, "rgba16float");
+        await gpu.run("copy", (enc) => enc.copyTextureToTexture({ texture: s.work.tex }, { texture: target }, { width: W, height: H }));
+      }
+      this.progress("restore (NAFNet)", "loading model");
+      const session = await P.time("NAFNet load", () => this.neural.session(MODELS.nafnet, this.neural.backend === "webgpu"));
+      const st = await P.time("NAFNet tiles", () => runTiled(gpu, this.neural, session, target, target, W, H, {
+        gain: s.gain,
+        plan: (_c, _r, x, y) => ({ strength: plan.deblurTile(x, y, 256) }),
+        // NAFNet-GoPro diverges on sharp, sharpened content: reject such tiles.
+        sanity: { maxMeanDiff: 0.08, maxDeviation: 0.75 },
+        onTile: (d, t) => this.progress("restore (NAFNet)", `tile ${d}/${t}`, d / t),
+        shouldCancel: () => gen !== this.generation,
+      }), (r) => `${r.run}/${r.tiles} tiles, ${r.rejected} rejected`);
+      await session.release();
+      this.log(`NAFNet: ${st.run} of ${st.tiles} tiles restored, ${st.rejected} rejected by the sanity gate`);
+    }
+    s.denoised = target;
+    this.dropThumb(); // look previews must see the restored image
+  }
+
+  private async makeProxy() {
+    const s = this.s!;
+    const gpu = this.gpu;
+    const { width: W, height: H } = s.work;
+    const k = Math.min(1, this.previewLong / Math.max(W, H));
+    const w = Math.max(1, Math.round(W * k)), h = Math.max(1, Math.round(H * k));
+    this.releaseProxy(s);
+    // Image no larger than the preview: render the working textures directly (never freed here).
+    if (k === 1) { s.proxy = { base: s.work.tex, denoised: s.denoised, w, h, owned: false }; return; }
+    const base = await downsample(gpu, s.work.tex, W, H, w, h, false, 1, "proxy.base");
+    const dn = s.denoised === s.work.tex ? base : await downsample(gpu, s.denoised, W, H, w, h, false, 1, "proxy.denoised");
+    s.proxy = { base, denoised: dn, w, h, owned: true };
+  }
+
+  private releaseProxy(s: Session) {
+    const d = s.draft;
+    s.draft = undefined;
+    if (d) { if (d.denoised !== d.base) this.gpu.release(d.denoised); this.gpu.release(d.base); }
+    const p = s.proxy;
+    s.proxy = undefined;
+    if (!p || !p.owned) return;
+    if (p.denoised !== p.base) this.gpu.release(p.denoised);
+    this.gpu.release(p.base);
+  }
+
+  private renderSource(full: boolean): RenderSource {
+    const s = this.s!;
+    if (full || !s.proxy) return { base: s.work.tex, denoised: s.denoised, width: s.work.width, height: s.work.height, fullWidth: s.work.width };
+    return { base: s.proxy.base, denoised: s.proxy.denoised, width: s.proxy.w, height: s.proxy.h, fullWidth: s.work.width };
+  }
+
+  private effectiveParams(): Params {
+    const s = this.s!;
+    if (!this.before) return s.params;
+    // "Before": camera rendering only — exposure/WB from the camera, tone curve, nothing adaptive.
+    const p = structuredClone(s.params);
+    const e = p.enable;
+    e.denoise = false; e.deblur = false; e.localTone = false; e.semantic = false; e.dehaze = false; e.sharpen = false; e.dof = false; e.curves = false;
+    p.exposure = 0;
+    p.wb = { temp: s.work.camera?.temp ?? 6504, tint: s.work.camera?.tint ?? 0 };
+    p.tone = { highlights: 0, shadows: 0, whites: 0, blacks: 0, contrast: 0, rolloff: 0.5 };
+    p.color = { saturation: 0, vibrance: 0 };
+    p.profile = neutralProfile();
+    return p;
+  }
+
+  private wbFor(p: Params): number[] {
+    const s = this.s!;
+    const src = s.decoded.source;
+    return wbMatrix(src.kind !== "rgb" ? src.color : undefined, s.work.camera, p.wb.temp, p.wb.tint);
+  }
+
+  /** Renders the preview now. Call only from inside `exclusive` (or via requestRender). */
+  async renderNow(final: boolean, draft = false) {
+    const s = this.s;
+    if (!s) return;
+    const t0 = performance.now();
+    const p = this.effectiveParams();
+    const src = draft && s.proxy ? await this.draftSource() : this.renderSource(false);
+    const dof = p.enable.dof && p.dof.strength > 0;
+    const r = await this.renderer.render(src, s.maps, p, { wb: this.wbFor(p), gain: s.gain, lightLinear: s.lightLinear, output: "p38", debugView: this.view, region: this.region, zoneRange: this.zoneRange() }, dof);
+    const data = await this.gpu.readTexture(r.tex, 0, 0, src.width, src.height, 4);
+    this.post({ type: "preview", width: src.width, height: src.height, data, space: "p3", final, ms: performance.now() - t0 }, [data]);
+  }
+
+  setParams(p: Params, draft = false) {
+    if (!this.s) return;
+    // Profiles can come from older saved sessions or imports: fill any missing fields.
+    this.s.params = { ...p, profile: normalizeProfile(p.profile) };
+    this.requestRender(!draft, draft);
+  }
+
+  setView(view: 0 | 1 | 2 | 4 | 5, before = false, region = 0) {
+    this.view = view;
+    this.region = region;
+    this.before = before;
+    this.requestRender(true);
+  }
+
+  setPreviewSize(long: number) {
+    this.previewLong = Math.max(512, Math.min(4096, Math.round(long)));
+  }
+
+  /** Keeps a CPU copy of the refined distance map for tap-to-focus. */
+  private async cacheDistance() {
+    const s = this.s!;
+    const m = s.maps;
+    const raw = new Float32Array(await this.gpu.readTexture(m.masks[2], 0, 0, m.w, m.h, 16));
+    const d = new Float32Array(m.w * m.h);
+    for (let i = 0; i < d.length; i++) d[i] = raw[i * 4 + 3];
+    s.distCPU = { w: m.w, h: m.h, data: d };
+  }
+
+  focusAt(x: number, y: number): number | undefined {
+    const d = this.s?.distCPU;
+    if (!d) return undefined;
+    // Median over a small neighbourhood: a tap is imprecise on a phone.
+    const cx = Math.round(x * (d.w - 1)), cy = Math.round(y * (d.h - 1));
+    const v: number[] = [];
+    for (let j = -3; j <= 3; j++) for (let i = -3; i <= 3; i++) {
+      const xx = Math.min(d.w - 1, Math.max(0, cx + i)), yy = Math.min(d.h - 1, Math.max(0, cy + j));
+      v.push(d.data[yy * d.w + xx]);
+    }
+    v.sort((a, b) => a - b);
+    return v[v.length >> 1];
+  }
+
+  importLook(name: string, text: string) {
+    this.renderer.addLook(parseCube(text, name));
+    return this.looks();
+  }
+
+  async export(format: ExportFormat, quality: number, space: "srgb" | "p3", stripRows = 512): Promise<{ blob: Blob; name: string; ms: number }> {
+    const s = this.s;
+    if (!s) throw new Error("No photo open");
+    const t0 = performance.now();
+    const gpu = this.gpu;
+    const src = this.renderSource(true);
+    const p = s.params;
+    const W = src.width, H = src.height;
+    const base = s.name.replace(/\.[^.]+$/, "");
+    const P = this.profiler;
+    const o = { wb: this.wbFor(p), gain: s.gain, lightLinear: s.lightLinear };
+    const dof = p.enable.dof && p.dof.strength > 0;
+    // Full-resolution exports render in strips: peak extra GPU memory stays at a
+    // few tens of MB instead of several full-frame textures.
+    const STRIP = Math.max(64, Math.round(stripRows));
+    const strips = async (each: (y0: number, rows: number) => Promise<void>) => {
+      for (let y0 = 0; y0 < H; y0 += STRIP) {
+        this.progress("export", `rendering ${Math.round((y0 / H) * 100)}%`, y0 / H);
+        await each(y0, Math.min(STRIP, H - y0));
+      }
+    };
+    try {
+      if (format === "dng") {
+        const f = new Float32Array(W * H * 4);
+        await P.time("export render (linear)", () => strips(async (y0, rows) => {
+          const r = await this.renderer.renderLinear(src, s.maps, p, { ...o, output: "p3f16" }, { y0, rows });
+          await this.readHalfRows(r.tex, r.top, W, rows, f.subarray(y0 * W * 4, (y0 + rows) * W * 4));
+        }));
+        this.progress("export", "writing DNG");
+        const blob = await P.time("encode DNG", () => encodeLinearDng(f, W, H, s.decoded.meta));
+        this.post({ type: "profile", stages: P.stages });
+        return { blob, name: `${base}-processed-linear.dng`, ms: performance.now() - t0 };
+      }
+      if (format === "tiff16") {
+        const f = new Float32Array(W * H * 4);
+        await P.time("export render (16-bit)", () => strips(async (y0, rows) => {
+          const r = await this.renderer.render(src, s.maps, p, { ...o, output: "p3f16" }, dof, { y0, rows });
+          await this.readHalfRows(r.tex, r.top, W, rows, f.subarray(y0 * W * 4, (y0 + rows) * W * 4));
+        }));
+        this.progress("export", "writing TIFF");
+        const blob = await P.time("encode TIFF", () => encodeTiff16(f, W, H, s.decoded.meta));
+        this.post({ type: "profile", stages: P.stages });
+        return { blob, name: `${base}-edit.tif`, ms: performance.now() - t0 };
+      }
+      const rgba = new Uint8ClampedArray(W * H * 4);
+      await P.time("export render", () => strips(async (y0, rows) => {
+        const r = await this.renderer.render(src, s.maps, p, { ...o, output: space === "p3" ? "p38" : "srgb8" }, dof, { y0, rows });
+        rgba.set(new Uint8Array(await gpu.readTexture(r.tex, 0, r.top, W, rows, 4)), y0 * W * 4);
+      }), () => `${W}×${H} in ${Math.ceil(H / STRIP)} strips`);
+      this.progress("export", `encoding ${format.toUpperCase()}`);
+      const blob = await P.time(`encode ${format}`, () => format === "heic" ? encodeHeic(rgba, W, H, space, quality) : encodeJpeg(rgba, W, H, space, quality, s.decoded.meta));
+      this.post({ type: "profile", stages: P.stages });
+      return { blob, name: `${base}-edit.${format === "heic" ? "heic" : "jpg"}`, ms: performance.now() - t0 };
+    } finally {
+      // Strip targets are export-sized; the next preview re-creates its own.
+      this.renderer.releaseTargets();
+    }
+  }
+
+  private async readHalfRows(tex: GPUTexture, top: number, W: number, rows: number, out: Float32Array<ArrayBuffer>) {
+    const half = new Uint16Array(await this.gpu.readTexture(tex, 0, top, W, rows, 8));
+    halvesToFloats(half, out);
+  }
+
+
+
+  private summary(name: string): Summary {
+    const s = this.s!;
+    const m = s.decoded.meta;
+    const src = s.decoded.source;
+    const meta: Record<string, string | number> = {};
+    if (m.make) meta.camera = `${m.make} ${m.model ?? ""}`.trim();
+    if (m.iso) meta.ISO = m.iso;
+    if (m.exposureTime) meta.shutter = m.exposureTime >= 1 ? `${m.exposureTime}s` : `1/${Math.round(1 / m.exposureTime)}s`;
+    if (m.fNumber) meta.aperture = `f/${m.fNumber.toFixed(1)}`;
+    if (m.focalLength) meta.focal = `${m.focalLength.toFixed(1)}mm${m.focalLength35 ? ` (${m.focalLength35}mm eq.)` : ""}`;
+    if (s.work.camera) { meta["as-shot WB"] = `${Math.round(s.work.camera.temp)}K / ${s.work.camera.tint.toFixed(1)}`; meta["baseline exposure"] = `${s.work.camera.baselineExposure.toFixed(2)} EV`; }
+    return {
+      file: name,
+      format: s.decoded.format,
+      source: src.kind === "rgb" ? `display-referred RGB (${src.decoder})` : src.isProRaw ? "Apple ProRAW (LinearRaw)" : src.kind === "bayer" ? "Bayer RAW" : "LinearRaw DNG",
+      width: src.width,
+      height: src.height,
+      working: { width: s.work.width, height: s.work.height, factor: s.work.factor },
+      meta,
+      coverage: Object.fromEntries(Object.entries(s.scene.coverage).map(([k, v]) => [k, Math.round(v * 1000) / 10])),
+    };
+  }
+
+  profile() { return this.profiler.stages; }
+
+  // ------------------------------------------------------------------ looks
+
+  private thumb?: { base: GPUTexture; denoised: GPUTexture; w: number; h: number; long: number };
+
+  private dropThumb() {
+    const t = this.thumb;
+    this.thumb = undefined;
+    if (t) this.gpu.release(t.base, t.denoised === t.base ? undefined : t.denoised);
+  }
+
+  private async ensureThumb(long: number) {
+    const s = this.s!;
+    if (this.thumb && this.thumb.long === long) return this.thumb;
+    this.dropThumb();
+    const { width: W, height: H } = s.work;
+    const k = Math.min(1, long / Math.max(W, H));
+    const w = Math.max(8, Math.round(W * k)), h = Math.max(8, Math.round(H * k));
+    const base = await downsample(this.gpu, s.work.tex, W, H, w, h, false, 1, "thumb.base");
+    const dn = s.denoised === s.work.tex ? base : await downsample(this.gpu, s.denoised, W, H, w, h, false, 1, "thumb.dn");
+    this.thumb = { base, denoised: dn, w, h, long };
+    return this.thumb;
+  }
+
+  /** Renders the current photo at thumbnail size through each profile (same GPU path as the preview). */
+  async thumbnails(profiles: LookProfile[], long: number) {
+    const s = this.s;
+    if (!s) return [];
+    const t = await this.ensureThumb(long);
+    const src: RenderSource = { base: t.base, denoised: t.denoised, width: t.w, height: t.h, fullWidth: s.work.width };
+    const items: Array<{ id: string; width: number; height: number; data: ArrayBuffer }> = [];
+    const t0 = performance.now();
+    for (const raw of profiles) {
+      const prof = normalizeProfile(raw);
+      const p: Params = { ...s.params, profile: prof, enable: { ...s.params.enable, dof: false, sharpen: false, lut: true } };
+      const r = await this.renderer.render(src, s.maps, p, { wb: this.wbFor(p), gain: s.gain, lightLinear: s.lightLinear, output: "p38" }, false);
+      items.push({ id: prof.id, width: t.w, height: t.h, data: await this.gpu.readTexture(r.tex, 0, 0, t.w, t.h, 4) });
+    }
+    this.log(`look previews: ${profiles.length} profiles at ${t.w}×${t.h} in ${(performance.now() - t0).toFixed(0)} ms`);
+    return items;
+  }
+
+  /** The technical rendering (no creative profile) at a small size, P3-encoded RGBA8. */
+  private async technicalPixels(long = 384) {
+    const s = this.s!;
+    const t = await this.ensureThumb(long);
+    const p: Params = { ...s.params, profile: neutralProfile(), enable: { ...s.params.enable, dof: false, lut: false } };
+    const r = await this.renderer.render({ base: t.base, denoised: t.denoised, width: t.w, height: t.h, fullWidth: s.work.width }, s.maps, p, { wb: this.wbFor(p), gain: s.gain, lightLinear: s.lightLinear, output: "p38", dither: false }, false);
+    const data = new Uint8Array(await this.gpu.readTexture(r.tex, 0, 0, t.w, t.h, 4));
+    return { data, w: t.w, h: t.h };
+  }
+
+  /** Weight = 1 − P(people) − P(sky): the global look statistics exclude regions that are matched (sky) or protected (people) separately. */
+  private static generalWeights(seg: SceneMaps["seg"], w: number, h: number): Float32Array {
+    const p = Engine.groupWeights(seg, w, h, GROUPS.indexOf("person"));
+    const s = Engine.groupWeights(seg, w, h, GROUPS.indexOf("sky"));
+    for (let i = 0; i < p.length; i++) p[i] = Math.max(0.02, 1 - p[i] - s[i]);
+    return p;
+  }
+
+  /** Per-pixel weights of a semantic group, sampled from network-resolution probabilities. */
+  private static groupWeights(seg: SceneMaps["seg"], w: number, h: number, g: number, invert = false): Float32Array {
+    const out = new Float32Array(w * h);
+    const plane = seg.width * seg.height;
+    for (let y = 0; y < h; y++) {
+      const sy = Math.min(seg.height - 1, Math.floor(((y + 0.5) / h) * seg.height));
+      for (let x = 0; x < w; x++) {
+        const sx = Math.min(seg.width - 1, Math.floor(((x + 0.5) / w) * seg.width));
+        const v = seg.probs[g * plane + sy * seg.width + sx];
+        out[y * w + x] = invert ? 1 - v : v;
+      }
+    }
+    return out;
+  }
+
+  private static regionColors(rgba: Uint8Array, w: number, h: number, seg: SceneMaps["seg"]): RegionColors {
+    const out: RegionColors = {};
+    for (const g of ["sky", "vegetation", "water", "building", "terrain", "ground"] as Group[]) {
+      const gi = GROUPS.indexOf(g);
+      const wts = Engine.groupWeights(seg, w, h, gi);
+      let mass = 0;
+      for (const v of wts) mass += v;
+      if (mass / (w * h) < 0.02) continue;
+      const st = analyseColors(rgba, wts, 3);
+      out[g] = { ...st, n: Math.round(mass) };
+    }
+    return out;
+  }
+
+  async palette(): Promise<ColorStats> {
+    const s = this.s;
+    if (!s) throw new Error("No photo open");
+    const px = await this.technicalPixels(384);
+    return analyseColors(px.data, undefined, 7);
+  }
+
+  /** Reference image → editable profile (create) or a profile matching the current photo toward it (match). */
+  async reference(file: File, mode: "create" | "match", amount: number): Promise<{ profile: LookProfile; reference: ColorStats; message: string }> {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const dec = await decodeFile(bytes, file.name, file.type);
+    try {
+      if (dec.source.kind !== "rgb") throw new Error("Use a rendered image (JPEG, HEIC, PNG) as the reference, not a RAW file.");
+      const src = dec.source;
+      const k = Math.min(1, 384 / Math.max(src.width, src.height));
+      const w = Math.max(8, Math.round(src.width * k)), h = Math.max(8, Math.round(src.height * k));
+      const cv = new OffscreenCanvas(w, h);
+      const ctx = cv.getContext("2d", { colorSpace: "display-p3" }) as OffscreenCanvasRenderingContext2D;
+      if ("close" in src.pixels) ctx.drawImage(src.pixels, 0, 0, w, h);
+      else {
+        const full = new OffscreenCanvas(src.width, src.height);
+        const fctx = full.getContext("2d", { colorSpace: src.colorSpace === "display-p3" ? "display-p3" : "srgb" }) as OffscreenCanvasRenderingContext2D;
+        fctx.putImageData(new ImageData(new Uint8ClampedArray(src.pixels.data.buffer as ArrayBuffer), src.width, src.height), 0, 0);
+        ctx.drawImage(full, 0, 0, w, h);
+      }
+      const refPx = new Uint8Array(ctx.getImageData(0, 0, w, h, { colorSpace: "display-p3" }).data.buffer);
+      // Segment the reference so regions are compared with the same regions.
+      const f = new Float32Array(w * h * 4);
+      for (let i = 0; i < w * h * 4; i++) f[i] = refPx[i] / 255;
+      const refScene = await analyseScene(this.neural, { rgba: f, width: w, height: h }, (st) => this.progress("reference " + st), false);
+      const refStats = analyseColors(refPx, Engine.generalWeights(refScene.seg, w, h), 7);
+      const refRegions = Engine.regionColors(refPx, w, h, refScene.seg);
+      if (mode === "create" || !this.s) {
+        const profile = profileFromReference(refStats, file.name, refRegions);
+        return { profile, reference: refStats, message: `Profile built from ${file.name}` };
+      }
+      const s = this.s;
+      const px = await this.technicalPixels(384);
+      const srcStats = analyseColors(px.data, Engine.generalWeights(s.scene.seg, px.w, px.h), 7);
+      const srcRegions = Engine.regionColors(px.data, px.w, px.h, s.scene.seg);
+      const profile = matchProfile(srcStats, refStats, file.name, srcRegions, refRegions, amount);
+      return { profile, reference: refStats, message: profile.description ?? "" };
+    } finally {
+      dec.close();
+    }
+  }
+
+  get session() { return this.s; }
+  get wbCamera(): CameraColor | undefined { return this.s?.work.camera; }
+}
+
+/** Gain that puts the 60th-percentile luminance of the analysis image at 0.18 (clamped). */
+function exposureGain(rgba: Float32Array): number {
+  const n = rgba.length / 4;
+  const ys = new Float32Array(n);
+  for (let i = 0; i < n; i++) ys[i] = Math.max(0, 0.2627 * rgba[i * 4] + 0.678 * rgba[i * 4 + 1] + 0.0593 * rgba[i * 4 + 2]);
+  ys.sort();
+  const p60 = ys[Math.floor(n * 0.6)] || 1e-4;
+  const p99 = ys[Math.floor(n * 0.99)] || 1;
+  let k = 0.18 / Math.max(p60, 1e-5);
+  k = Math.min(k, 1.6 / Math.max(p99, 1e-5), 32);
+  return Math.max(0.25, k);
+}

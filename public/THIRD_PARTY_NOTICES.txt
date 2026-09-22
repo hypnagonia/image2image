@@ -1,0 +1,36 @@
+Shikarno — third-party components
+==========================================
+
+All processing runs locally in the browser. Model weights are served from this
+site and cached on the device; photographs are never uploaded.
+
+LibRaw 0.22.2 (compiled to WebAssembly, unpack-only wrapper)
+  https://www.libraw.org — dual licensed LGPL-2.1 / CDDL-1.0 (used under LGPL-2.1).
+  Build script and wrapper source: native/libraw/ in this project; the module can
+  be rebuilt/relinked from those sources.
+
+libheif (libheif-js 1.23.2, WebAssembly) — HEIC fallback decoder
+  https://github.com/strukturag/libheif — LGPL-3.0 (includes libde265, LGPL-3.0).
+
+ONNX Runtime Web 1.30 — MIT License, Copyright (c) Microsoft Corporation.
+
+SCUNet (color, real-world PSNR checkpoint) — Apache License 2.0
+  Kai Zhang et al., "Practical Blind Image Denoising via Swin-Conv-UNet and Data
+  Synthesis", 2022. https://github.com/cszn/SCUNet
+  Converted to ONNX (fp16) by scripts/models/export.py.
+
+NAFNet (GoPro, width 32) — MIT License, Copyright (c) 2022 megvii-model
+  Liangyu Chen et al., "Simple Baselines for Image Restoration", ECCV 2022.
+  https://github.com/megvii-research/NAFNet
+  Weights SHA-256 19394e6155d12ef6371d1d57496f87f0ec88f92bdffa27c0792690722d5d1a5c
+  (identical to the authors' Google Drive release). Converted by scripts/models/export.py.
+
+SegFormer-B0 (ADE20K 512×512) — NVIDIA Source Code License for SegFormer
+  Enze Xie et al., "SegFormer", NeurIPS 2021. https://github.com/NVlabs/SegFormer
+  ONNX conversion: https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-512
+  NOTE: the SegFormer license permits NON-COMMERCIAL (research/evaluation) use only.
+  A commercial deployment must replace this model or obtain a license from NVIDIA.
+
+Depth Anything V2 Small — Apache License 2.0
+  Lihe Yang et al., "Depth Anything V2", 2024. https://github.com/DepthAnything/Depth-Anything-V2
+  ONNX conversion: https://huggingface.co/onnx-community/depth-anything-v2-small

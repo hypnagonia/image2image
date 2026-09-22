@@ -1,0 +1,48 @@
+// Render pass 2 — edge-aware sharpening on display-encoded luma.
+//
+//   detail  = Y − Gaussian(Y, radius)
+//   gate    = smoothstep(thr, 2.5·thr, |detail|)    noise must not be sharpened
+//             × smoothstep(0.5·thr, 3·thr, local range)   nor smooth gradients
+//   Y'      = Y + amount · mult · gate · detail
+//   Y'      clamped to the 3×3 min/max ± a small margin: no overshoot, no halos
+// `mult` is the per-pixel semantic × depth multiplier written by pass 1 (alpha).
+
+struct U { size: vec4<u32>, s: vec4<f32> } // s: amount, radius, threshold, _
+@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var src: texture_2d<f32>;
+@group(0) @binding(2) var dst: texture_storage_2d<rgba16float, write>;
+
+fn ld(p: vec2<i32>) -> vec4<f32> {
+  return textureLoad(src, clamp(p, vec2<i32>(0), vec2<i32>(i32(u.size.x) - 1, i32(u.size.y) - 1)), 0);
+}
+fn Y(p: vec2<i32>) -> f32 { return dot(ld(p).rgb, LUMAP3); }
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= u.size.x || id.y >= u.size.y) { return; }
+  let p = vec2<i32>(id.xy);
+  let c = ld(p);
+  let mult = c.a;
+  let amount = u.s.x * mult;
+  if (amount <= 0.001) { textureStore(dst, p, vec4<f32>(c.rgb, 1.0)); return; }
+  let sigma = max(u.s.y, 0.4);
+  var acc = 0.0; var wsum = 0.0;
+  var mn = 1e9; var mx = -1e9;
+  for (var dy = -2; dy <= 2; dy++) {
+    for (var dx = -2; dx <= 2; dx++) {
+      let y = Y(p + vec2<i32>(dx, dy));
+      let w = exp(-f32(dx * dx + dy * dy) / (2.0 * sigma * sigma));
+      acc += w * y; wsum += w;
+      if (abs(dx) <= 1 && abs(dy) <= 1) { mn = min(mn, y); mx = max(mx, y); }
+    }
+  }
+  let y0 = dot(c.rgb, LUMAP3);
+  let detail = y0 - acc / wsum;
+  let thr = u.s.z;
+  let gate = smoothstep(thr, 2.5 * thr, abs(detail)) * smoothstep(0.5 * thr, 3.0 * thr, mx - mn);
+  var y1 = y0 + amount * gate * detail * 1.6;
+  let margin = 0.012 * amount;
+  y1 = clamp(y1, mn - margin, mx + margin);
+  let outc = clamp(c.rgb + vec3<f32>(y1 - y0), vec3<f32>(0.0), vec3<f32>(1.0));
+  textureStore(dst, p, vec4<f32>(outc, 1.0));
+}

@@ -1,0 +1,103 @@
+/**
+ * Camera colour science, Stage B: tone curve and RGB curves as 1D LUTs.
+ *
+ * toneCurveLUT: scene log2 luminance (−14 … +6 EV) → display-linear luminance.
+ *   A Naka–Rushton (log-logistic) curve anchored so that scene middle grey
+ *   0.18 renders to display 0.18 (≈ 46% sRGB), with a contrast exponent, a
+ *   highlight shoulder whose softness is `rolloff`, and a black floor. It is
+ *   applied to luminance as a ratio, so it never shifts hue.
+ *
+ * curveLUT: the user/automatic point curves (L, R, G, B) on display-encoded
+ *   values, interpolated with a monotone cubic so they cannot overshoot.
+ */
+import type { CurvePoint, Params } from "../decision/params.ts";
+
+export const TONE_LUT_SIZE = 4096;
+export const TONE_EV_MIN = -14;
+export const TONE_EV_RANGE = 20;
+export const CURVE_LUT_SIZE = 1024;
+
+/**
+ * Rendering intent: scene middle grey (0.18) is displayed at MID_OUT. This is a
+ * fixed property of the rendering — the same for every photograph — so the
+ * camera's exposure decides brightness, not a per-image target.
+ */
+export const MID_OUT = 0.23;
+
+export function toneCurve(tone: Params["tone"]) {
+  const c = 1.15 + 0.35 * tone.contrast;
+  // Peak slightly above 1: rolloff = 1 → asymptotic shoulder (softest), 0 → reaches white early.
+  const Yw = 1.0 + 0.3 * (1 - tone.rolloff) * (1 + 0.5 * tone.whites);
+  const mid = 0.18;
+  const kc = Math.pow(mid, c) * (Yw / MID_OUT - 1);
+  const b = tone.blacks;
+  return (Y: number) => {
+    const yc = Math.pow(Math.max(Y, 0), c);
+    let d = Math.min(1, (Yw * yc) / (yc + kc));
+    // Soft toe: deep shadows are compressed toward black, never clipped to it,
+    // so shadow separation survives (d²/(d+t) ≈ d above the toe).
+    const t = 0.0006;
+    d = (d * d) / (d + t) * (1 + t);
+    if (b < 0) {
+      const f = -b * 0.012;
+      d = Math.max(0, d - f) / (1 - f);
+    } else if (b > 0) {
+      const f = b * 0.02;
+      d = f + d * (1 - f);
+    }
+    return Math.min(1, d);
+  };
+}
+
+export function toneCurveLUT(tone: Params["tone"]): Float32Array {
+  const f = toneCurve(tone);
+  const out = new Float32Array(TONE_LUT_SIZE * 4);
+  for (let i = 0; i < TONE_LUT_SIZE; i++) {
+    const ev = TONE_EV_MIN + (i / (TONE_LUT_SIZE - 1)) * TONE_EV_RANGE;
+    const v = f(Math.pow(2, ev));
+    out[i * 4] = v;
+    out[i * 4 + 1] = v; out[i * 4 + 2] = v; out[i * 4 + 3] = 1;
+  }
+  return out;
+}
+
+/** Monotone cubic (Fritsch–Carlson) through sorted points. */
+export function monotoneCurve(points: CurvePoint[]): (x: number) => number {
+  const p = [...points].sort((a, b) => a.x - b.x);
+  const n = p.length;
+  if (n < 2) return (x) => x;
+  const d: number[] = [], m: number[] = new Array(n).fill(0);
+  for (let i = 0; i < n - 1; i++) d.push((p[i + 1].y - p[i].y) / Math.max(1e-9, p[i + 1].x - p[i].x));
+  m[0] = d[0];
+  m[n - 1] = d[n - 2];
+  for (let i = 1; i < n - 1; i++) m[i] = d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2;
+  for (let i = 0; i < n - 1; i++) {
+    if (d[i] === 0) { m[i] = 0; m[i + 1] = 0; continue; }
+    const a = m[i] / d[i], b = m[i + 1] / d[i];
+    const s = a * a + b * b;
+    if (s > 9) { const t = 3 / Math.sqrt(s); m[i] = t * a * d[i]; m[i + 1] = t * b * d[i]; }
+  }
+  return (x: number) => {
+    if (x <= p[0].x) return p[0].y;
+    if (x >= p[n - 1].x) return p[n - 1].y;
+    let i = 0;
+    while (i < n - 2 && x > p[i + 1].x) i++;
+    const h = p[i + 1].x - p[i].x, t = (x - p[i].x) / h;
+    const t2 = t * t, t3 = t2 * t;
+    return (2 * t3 - 3 * t2 + 1) * p[i].y + (t3 - 2 * t2 + t) * h * m[i] + (-2 * t3 + 3 * t2) * p[i + 1].y + (t3 - t2) * h * m[i + 1];
+  };
+}
+
+export function isFlat(points: CurvePoint[]): boolean {
+  return points.every((q) => Math.abs(q.x - q.y) < 1e-4);
+}
+
+export function curveLUT(curves: Params["curves"]): Float32Array {
+  const fs = [curves.l, curves.r, curves.g, curves.b].map(monotoneCurve);
+  const out = new Float32Array(CURVE_LUT_SIZE * 4);
+  for (let i = 0; i < CURVE_LUT_SIZE; i++) {
+    const x = i / (CURVE_LUT_SIZE - 1);
+    for (let c = 0; c < 4; c++) out[i * 4 + c] = Math.min(1, Math.max(0, fs[c](x)));
+  }
+  return out;
+}
