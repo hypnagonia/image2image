@@ -7,3 +7,5 @@ native/cpu/target
 .DS_Store
 .samples
 public/ort
+__pycache__/
+*.pyc
