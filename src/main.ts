@@ -403,7 +403,15 @@ autoDofToggle.onchange = () => {
 const focusBtn = el("button", { class: "btn small", text: t("dof.pick") });
 focusBtn.onclick = () => { focusMode = !focusMode; focusBtn.classList.toggle("primary", focusMode); badge.textContent = focusMode ? t("dof.pickBadge") : ""; badge.classList.toggle("on", focusMode); renderRings(); };
 const autoFocusBtn = el("button", { class: "btn small", text: t("dof.automatic") });
-autoFocusBtn.onclick = () => { if (!params) return; if (dofInfo) params.dof.focus = dofInfo.focus; send({ type: "focus", action: "clear" }); };
+autoFocusBtn.onclick = () => {
+  if (!params) return;
+  // Back to the automatic subject: drop focus points and send the focus with the parameters.
+  params.dof.points = [];
+  if (dofInfo) params.dof.focus = dofInfo.focus;
+  syncControls();
+  pushParams();
+  renderRings();
+};
 const dofReason = el("p", { class: "muted" });
 depthPane.append(
   el("label", { class: "toggle" }, t("dof.autoToggle"), autoDofToggle),

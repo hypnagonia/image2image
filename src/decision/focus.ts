@@ -21,7 +21,8 @@
  *
  * The score map is box-smoothed so a single noisy pixel cannot win, the focus
  * distance is the 30th percentile of distance around the best location (the
- * subject's near surface, not background seen through gaps), and blur is
+ * subject's near surface, not background seen through gaps) — for a person, the
+ * median of the upper half of their own pixels (faces sharp) — and blur is
  * justified only when enough of the frame lies clearly behind that distance.
  */
 import { GROUPS } from "../neural/scene.ts";
@@ -119,7 +120,21 @@ export function autoFocus(
     for (let x = Math.max(0, bx - rr); x <= Math.min(w - 1, bx + rr); x++) vals.push(data[y * w + x]);
   vals.sort((a, b) => a - b);
   // The near part of the neighbourhood: the subject's surface, not the gaps behind it.
-  const focus = vals[Math.floor(vals.length * 0.3)] ?? 0.3;
+  let focus = vals[Math.floor(vals.length * 0.3)] ?? 0.3;
+  if (peopleFirst) {
+    // A person: their own pixels only (not the armrest in front of them), and the
+    // upper half of them near the subject point — faces are what must be sharp.
+    const R2 = Math.round(Math.max(w, h) * 0.15);
+    const pix: Array<[number, number]> = [];
+    for (let y = Math.max(0, by - R2); y <= Math.min(h - 1, by + R2); y++)
+      for (let x = Math.max(0, bx - R2); x <= Math.min(w - 1, bx + R2); x++)
+        if (segAt(x, y, P.person) + segAt(x, y, P.animal) > 0.6) pix.push([y, data[y * w + x]]);
+    if (pix.length > 20) {
+      pix.sort((a, b) => a[0] - b[0]);
+      const upper = pix.slice(0, Math.ceil(pix.length / 2)).map((p) => p[1]).sort((a, b) => a - b);
+      focus = upper[Math.floor(upper.length / 2)];
+    }
+  }
 
   // Justification: how much of the (non-sky) frame is clearly behind the subject,
   // and whether the subject itself is a sensible size.
