@@ -202,7 +202,7 @@ export function decideUpscale(m: QualityMetrics, ctx: QualityContext): ImageQual
   if (mode === "always" && !auto.needsUpscale && auto.code !== "memory") {
     const outMP = auto.megapixels * 4;
     if (outMP > ctx.maxOutputMP || 2 * Math.max(ctx.width, ctx.height) > ctx.maxTextureDimension)
-      return { ...auto, code: "memory", reason: `2× output (${mp1(outMP)} MP) would exceed this device's memory budget (${ctx.maxOutputMP} MP)`, vars: { mp: mp1(outMP) } };
+      return { ...auto, code: "memory", reason: `2× output (${mp1(outMP)} MP) would exceed this device's memory budget (${ctx.maxOutputMP} MP)`, vars: { src: mp1(auto.megapixels), mp: mp1(outMP) } };
     return { ...auto, needsUpscale: true, code: "forced", reason: `requested (automatic decision: ${auto.reason})`, vars: { mp: mp1(auto.megapixels) } };
   }
   return auto;
@@ -230,7 +230,7 @@ function decideAuto(m: QualityMetrics, ctx: QualityContext): ImageQualityReport 
   const run = (code: UpscaleReasonCode, reason: string, vars: Record<string, string | number> = {}): ImageQualityReport => {
     const outMP = mp * 4;
     if (outMP > ctx.maxOutputMP || 2 * Math.max(ctx.width, ctx.height) > ctx.maxTextureDimension)
-      return skip("memory", `2× output (${mp1(outMP)} MP) would exceed this device's memory budget (${ctx.maxOutputMP} MP)`, { mp: mp1(outMP) });
+      return skip("memory", `2× output (${mp1(outMP)} MP) would exceed this device's memory budget (${ctx.maxOutputMP} MP)`, { src: mp1(mp), mp: mp1(outMP) });
     return { ...base, needsUpscale: true, code, reason, vars };
   };
 

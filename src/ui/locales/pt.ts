@@ -48,7 +48,7 @@ export const pt: Dict = {
   "up.r.noise": "o ruído restante só seria ampliado",
   "up.r.no-detail": "pouco detalhe fino para realçar",
   "up.r.reduced": "foto aberta em tamanho reduzido para economizar memória",
-  "up.r.memory": "um resultado de {mp} MP não caberia na memória deste aparelho",
+  "up.r.memory": "a foto já tem {src} MP; 2× daria {mp} MP, mais do que cabe na memória deste aparelho",
   "up.r.below-target": "a imagem tinha só {mp} MP",
   "up.r.soft": "a imagem de {mp} MP estava suave no nível do pixel",
   "up.r.resolution-limited": "a imagem de {mp} MP estava limitada pela resolução",

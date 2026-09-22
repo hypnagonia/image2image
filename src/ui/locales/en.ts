@@ -53,7 +53,7 @@ export const en = {
   "up.r.noise": "remaining noise would only be enlarged",
   "up.r.no-detail": "too little fine detail to enhance",
   "up.r.reduced": "photo opened at reduced size to save memory",
-  "up.r.memory": "a {mp} MP result would not fit in this device's memory",
+  "up.r.memory": "the photo already has {src} MP; 2× would make {mp} MP, more than fits in this device's memory",
   "up.r.below-target": "image contained only {mp} MP",
   "up.r.soft": "{mp} MP image was soft at pixel level",
   "up.r.resolution-limited": "{mp} MP image was limited by its resolution",
