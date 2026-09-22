@@ -180,3 +180,4 @@ body.fs .fs-exit {
 .zone-row label { display: flex; align-items: center; gap: 4px; }
 .zone-info { display: block; font-size: 10.5px; color: var(--muted); }
 .zone-row label span { line-height: 1.15; }
+.up-status { font-size: 15px; line-height: 1.4; margin: 2px 0 10px; }

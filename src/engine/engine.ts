@@ -26,7 +26,7 @@ import { analyseScene, type SceneMaps } from "../neural/scene.ts";
 import { runTiled } from "../neural/tiles.ts";
 import { denoiseGPU } from "../restore/denoise.ts";
 import { UpscaleJob, probeUpscaler } from "../restore/upscale.ts";
-import { decideUpscale, measureQuality, type ImageQualityReport } from "../analysis/quality.ts";
+import { decideUpscale, measureQuality, type ImageQualityReport, type UpscaleMode } from "../analysis/quality.ts";
 import { downsample, guideSize, refine, releaseRefined, type RefinedMaps } from "../refine/refine.ts";
 import { blurReport, lumPercentiles, measureBlocks, measureRegions, noiseProfile } from "../analysis/analysis.ts";
 import type { AnalysisReport } from "../analysis/types.ts";
@@ -188,7 +188,7 @@ export class Engine {
     this.s = undefined;
   }
 
-  async open(file: File, resolution: "auto" | "full" | "half", autoExposure = false, autoDof = false) {
+  async open(file: File, resolution: "auto" | "full" | "half", autoExposure = false, autoDof = false, upscaleMode: UpscaleMode = "auto") {
     const gen = ++this.generation;
     this.closeSession();
     const P = new Profiler(this.gpu);
@@ -350,7 +350,7 @@ export class Engine {
     // Measured on the restored image (after denoise/deblur), before any tone or
     // look. When the source already has enough detail this is the only cost:
     // the upscaling model is never downloaded or loaded.
-    const q = await P.time("quality analysis", () => this.analyseQuality(resolution === "half"), (r) => `${r.megapixels} MP, edge σ ${r.metrics.edgeSigma.toFixed(2)} px, noise ${(r.metrics.noiseSigma * 255).toFixed(2)}/255 → ${r.needsUpscale ? "2×" : "skip"}`);
+    const q = await P.time("quality analysis", () => this.analyseQuality(resolution === "half", upscaleMode), (r) => `${r.megapixels} MP, edge σ ${r.metrics.edgeSigma.toFixed(2)} px, noise ${(r.metrics.noiseSigma * 255).toFixed(2)}/255 → ${r.needsUpscale ? "2×" : "skip"}`);
     await P.time("preview proxy (restored)", () => this.makeProxy());
     await this.renderNow(true);
     this.post({ type: "profile", stages: P.stages });
@@ -359,12 +359,12 @@ export class Engine {
     if (q.needsUpscale) void this.runUpscale(gen);
   }
 
-  private async analyseQuality(reducedByUser: boolean): Promise<ImageQualityReport> {
+  private async analyseQuality(reducedByUser: boolean, mode: UpscaleMode): Promise<ImageQualityReport> {
     const s = this.s!;
     const { width: W, height: H } = s.work;
     const metrics = await measureQuality(this.gpu, s.denoised, W, H, s.gain);
     const q = decideUpscale(metrics, {
-      width: W, height: H, iso: s.decoded.meta.iso, reducedByUser,
+      width: W, height: H, iso: s.decoded.meta.iso, reducedByUser, mode,
       maxOutputMP: UPSCALE_MAX_MP(), maxTextureDimension: this.gpu.info.maxTextureDimension2D,
     });
     s.upscale = { state: q.needsUpscale ? "pending" : "skipped", upscaleApplied: false, upscaleFactor: 1, upscaleReason: q.reason, code: q.code, vars: q.vars, report: q };
@@ -374,6 +374,21 @@ export class Engine {
     this.log(`upscale: ${q.needsUpscale ? "2× planned" : "skipped"} — ${q.reason}`);
     this.post({ type: "upscale", info: s.upscale });
     return q;
+  }
+
+  /** "Upscale 2× now" from the Upscale tab: overrides the decision (never the memory budget). */
+  forceUpscale() {
+    const s = this.s;
+    const info = s?.upscale;
+    if (!s || !info || s.scale !== 1 || info.state === "running" || info.state === "pending") return;
+    const q = decideUpscale(info.report.metrics, {
+      width: s.work.width, height: s.work.height, iso: s.decoded.meta.iso, reducedByUser: false, mode: "always",
+      maxOutputMP: UPSCALE_MAX_MP(), maxTextureDimension: this.gpu.info.maxTextureDimension2D,
+    });
+    s.upscale = { state: q.needsUpscale ? "pending" : "skipped", upscaleApplied: false, upscaleFactor: 1, upscaleReason: q.reason, code: q.code, vars: q.vars, report: q };
+    this.log(`upscale: requested — ${q.needsUpscale ? "2× planned" : "not possible"} (${q.reason})`);
+    this.post({ type: "upscale", info: s.upscale });
+    if (q.needsUpscale) void this.runUpscale(this.generation);
   }
 
   /**

@@ -3,7 +3,7 @@
  * everything else to the engine worker. No pixel processing happens here.
  */
 import "./styles.css";
-import type { Capabilities, ExportFormat, FromWorker, StageProfile, Summary, ToWorker, UpscaleInfo } from "./engine/protocol.ts";
+import type { Capabilities, ExportFormat, FromWorker, StageProfile, Summary, ToWorker, UpscaleInfo, UpscaleMode } from "./engine/protocol.ts";
 import type { Decision, Params } from "./decision/params.ts";
 import { createLookPanel } from "./ui/lookPanel.ts";
 import { createRegionsPanel } from "./ui/regionsPanel.ts";
@@ -84,6 +84,7 @@ const adjustPane = addPane("adjust", t("tab.adjust"));
 const lookPane = addPane("look", t("tab.look"));
 const regionsPane = addPane("regions", t("tab.regions"));
 const depthPane = addPane("depth", t("tab.depth"));
+const upscalePane = addPane("upscale", t("tab.upscale"));
 const exportPane = addPane("export", t("tab.export"));
 const debugPane = addPane("debug", t("tab.debug"));
 showPane("auto");
@@ -133,6 +134,9 @@ let resolution: "auto" | "full" | "half" = "auto";
 let exposureSuggestion = 0;
 let autoExposure = (() => { try { return localStorage.getItem("autoExposure") === "1"; } catch { return false; } })();
 let autoDof = (() => { try { return localStorage.getItem("autoDof") === "1"; } catch { return false; } })();
+let upscaleMode: UpscaleMode = (() => { try { const v = localStorage.getItem("upscaleMode"); return v === "always" || v === "off" ? v : "auto"; } catch { return "auto"; } })();
+/** The open photo (for "back to original size", which reopens it at 1×). */
+let currentFile: File | undefined;
 /** The page died while processing: don't retry automatically — offer a lighter reopen. */
 function offerSafeReopen(file: File, saved?: Params) {
   const box = el("div", { class: "empty" },
@@ -152,9 +156,11 @@ function offerSafeReopen(file: File, saved?: Params) {
 /** Parameters to re-apply once a restored photo has been analysed. */
 let pendingRestore: Params | undefined;
 
-function openFile(f: File, restore?: Params) {
+function openFile(f: File, restore?: Params, upscaleOverride?: UpscaleMode) {
   pendingRestore = restore;
   upscale = undefined;
+  currentFile = f;
+  renderUpscale();
   if (!restore) void rememberPhoto(f);
   markInflight();
   empty.style.display = "none";
@@ -162,7 +168,7 @@ function openFile(f: File, restore?: Params) {
   logLines.length = 0;
   setProgress(t("progress.opening", { file: f.name }));
   busy = true;
-  send({ type: "open", file: f, resolution, autoExposure, autoDof });
+  send({ type: "open", file: f, resolution, autoExposure, autoDof, upscale: upscaleOverride ?? upscaleMode });
 }
 
 // Drag & drop on desktop.
@@ -561,8 +567,58 @@ function upscaleText(u: UpscaleInfo): string {
     case "pending": return t("up.pending");
     case "failed": return t("up.failed");
     case "cancelled": return t("up.cancelled");
-    default: return ["sufficient", "sharp-12", "adequate"].includes(u.code) ? `${t("up.skipSufficient")} (${reason})` : `${t("up.skipped")} — ${reason}`;
+    default:
+      if (u.code === "off") return t("up.offSkip");
+      if (u.code === "forced") return t("up.pending");
+      return ["sufficient", "sharp-12", "adequate"].includes(u.code) ? `${t("up.skipSufficient")} (${reason})` : `${t("up.skipped")} — ${reason}`;
   }
+}
+
+// --------------------------------------------------------------------------- upscale tab
+const upMode = el("select", {},
+  el("option", { value: "auto", text: t("upt.modeAuto") }),
+  el("option", { value: "always", text: t("upt.modeAlways") }),
+  el("option", { value: "off", text: t("upt.modeOff") }));
+upMode.value = upscaleMode;
+upMode.onchange = () => {
+  upscaleMode = upMode.value as UpscaleMode;
+  try { localStorage.setItem("upscaleMode", upscaleMode); } catch { /* private mode */ }
+  renderUpscale();
+};
+const upStatus = el("p", { class: "up-status" });
+const upFacts = el("dl", { class: "kv" });
+const upNow = el("button", { class: "btn primary", text: t("upt.runNow") });
+upNow.onclick = () => { if (upscale) { markInflight(); send({ type: "upscale-now" }); } };
+const upRevert = el("button", { class: "btn", text: t("upt.revert") });
+upRevert.onclick = () => { if (currentFile && params) openFile(currentFile, structuredClone(params), "off"); };
+const upModeNote = el("p", { class: "muted" });
+upscalePane.append(
+  upStatus,
+  el("div", { class: "actions" }, upNow, upRevert),
+  upFacts,
+  el("div", { class: "group-title", text: t("upt.mode") }),
+  el("div", { class: "row" }, el("label", { text: t("upt.forNext") }), upMode, el("span")),
+  upModeNote,
+  el("p", { class: "muted", text: t("upt.about") }),
+);
+
+function renderUpscale() {
+  const u = upscale;
+  upStatus.textContent = u ? upscaleText(u) : currentFile ? t("up.pending") : t("upt.none");
+  upModeNote.textContent = t(upscaleMode === "auto" ? "upt.noteAuto" : upscaleMode === "always" ? "upt.noteAlways" : "upt.noteOff");
+  const idle = !!u && (u.state === "skipped" || u.state === "failed" || u.state === "cancelled");
+  upNow.hidden = !idle || u!.code === "memory";
+  upRevert.hidden = u?.state !== "applied";
+  upFacts.replaceChildren();
+  if (!u) return;
+  const r = u.report, m = r.metrics;
+  const add = (k: string, v: string) => upFacts.append(el("dt", { text: k }), el("dd", { text: v }));
+  add(t("upt.source"), `${r.width}×${r.height} · ${r.megapixels.toFixed(1)} MP`);
+  if (u.state === "applied" && u.width) add(t("upt.result"), `${u.width}×${u.height} · ${((u.width * (u.height ?? 0)) / 1e6).toFixed(1)} MP`);
+  add(t("upt.sharpness"), `${Math.round(r.sharpnessScore * 100)}% · ${t("upt.edge", { px: Number.isFinite(m.edgeSigma) ? m.edgeSigma.toFixed(2) : "—" })}`);
+  add(t("upt.noise"), `${(m.noiseSigma * 255).toFixed(2)} / 255`);
+  add(t("upt.detail"), `${(m.detailDensity * 100).toFixed(1)}%`);
+  add(t("upt.blur"), r.severeBlur ? t("upt.yes") : t("upt.no"));
 }
 
 function renderAuto() {
@@ -661,6 +717,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       else if (!busy) markCompleted();
       if (m.info.state !== "running" && m.info.state !== "pending" && !busy) setProgress(undefined);
       renderAuto();
+      renderUpscale();
       break;
     case "gpu-lost":
       // A lost GPU device cannot be revived in place; restart the page — the session restores itself.

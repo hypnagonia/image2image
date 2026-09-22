@@ -28,7 +28,10 @@ async function handle(m: ToWorker) {
       break;
     }
     case "open":
-      await engine.open(m.file, m.resolution, m.autoExposure, m.autoDof);
+      await engine.open(m.file, m.resolution, m.autoExposure, m.autoDof, m.upscale);
+      break;
+    case "upscale-now":
+      engine.forceUpscale();
       break;
     case "focus": {
       const s = engine.session;

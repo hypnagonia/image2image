@@ -86,3 +86,13 @@ test("the display transform around the upscaler is exactly invertible below its 
   // Mid grey lands in the mid-tones a display-referred model expects.
   assert.ok(toDisplay(0.18) > 0.35 && toDisplay(0.18) < 0.5);
 });
+
+test("modes: off never upscales, always overrides quality reasons but not memory", () => {
+  const sharp12 = decideUpscale(base, ctx(4032, 3024, { mode: "always" }));
+  assert.equal(sharp12.needsUpscale, true);
+  assert.equal(sharp12.code, "forced");
+  assert.equal(decideUpscale(base, ctx(2000, 1500, { mode: "off" })).needsUpscale, false);
+  assert.equal(decideUpscale(base, ctx(2000, 1500, { mode: "off" })).code, "off");
+  assert.equal(decideUpscale(base, ctx(4032, 3024, { mode: "always", maxOutputMP: 16 })).code, "memory");
+  assert.equal(decideUpscale({ ...base, edgeSigma: 3.4 }, ctx(2000, 1500, { mode: "always" })).needsUpscale, true);
+});

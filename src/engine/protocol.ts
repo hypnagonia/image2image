@@ -1,7 +1,8 @@
 import type { Decision, Params } from "../decision/params.ts";
 import type { LookProfile } from "../looks/profile.ts";
 import type { ColorStats } from "../looks/palette.ts";
-import type { ImageQualityReport, UpscaleReasonCode } from "../analysis/quality.ts";
+import type { ImageQualityReport, UpscaleMode, UpscaleReasonCode } from "../analysis/quality.ts";
+export type { UpscaleMode };
 
 export type ExportFormat = "jpeg" | "heic" | "tiff16" | "dng";
 
@@ -52,7 +53,8 @@ export interface UpscaleInfo {
 
 export type ToWorker =
   | { type: "init"; base: string; forceCpu?: boolean }
-  | { type: "open"; file: File; resolution: "auto" | "full" | "half"; autoExposure: boolean; autoDof: boolean }
+  | { type: "open"; file: File; resolution: "auto" | "full" | "half"; autoExposure: boolean; autoDof: boolean; upscale: UpscaleMode }
+  | { type: "upscale-now" }
   | { type: "params"; params: Params; draft?: boolean }
   | { type: "view"; view: 0 | 1 | 2 | 4 | 5; before?: boolean; region?: number }
   | { type: "focus"; action: "toggle"; x: number; y: number }

@@ -47,7 +47,10 @@ export interface QualityMetrics {
 
 export type UpscaleReasonCode =
   | "sufficient" | "sharp-12" | "adequate" | "severe-blur" | "noise" | "no-detail"
-  | "reduced" | "memory" | "below-target" | "soft" | "resolution-limited";
+  | "reduced" | "memory" | "below-target" | "soft" | "resolution-limited" | "off" | "forced";
+
+/** User setting: automatic decision, always 2× (memory permitting), or never. */
+export type UpscaleMode = "auto" | "always" | "off";
 
 export interface ImageQualityReport {
   width: number;
@@ -78,6 +81,8 @@ export interface QualityContext {
   maxOutputMP: number;
   maxTextureDimension: number;
   targetMP?: number;
+  /** "always" overrides every quality reason (never the memory budget); "off" never upscales. */
+  mode?: UpscaleMode;
 }
 
 const PATCH = 256;
@@ -191,6 +196,19 @@ const mp1 = (v: number) => (Math.round(v * 10) / 10).toFixed(1);
  * the noise and detail requirements; it can never enable upscaling.
  */
 export function decideUpscale(m: QualityMetrics, ctx: QualityContext): ImageQualityReport {
+  const auto = decideAuto(m, ctx);
+  const mode = ctx.mode ?? "auto";
+  if (mode === "off") return { ...auto, needsUpscale: false, code: "off", reason: "upscaling is switched off", vars: {} };
+  if (mode === "always" && !auto.needsUpscale && auto.code !== "memory") {
+    const outMP = auto.megapixels * 4;
+    if (outMP > ctx.maxOutputMP || 2 * Math.max(ctx.width, ctx.height) > ctx.maxTextureDimension)
+      return { ...auto, code: "memory", reason: `2× output (${mp1(outMP)} MP) would exceed this device's memory budget (${ctx.maxOutputMP} MP)`, vars: { mp: mp1(outMP) } };
+    return { ...auto, needsUpscale: true, code: "forced", reason: `requested (automatic decision: ${auto.reason})`, vars: { mp: mp1(auto.megapixels) } };
+  }
+  return auto;
+}
+
+function decideAuto(m: QualityMetrics, ctx: QualityContext): ImageQualityReport {
   const target = ctx.targetMP ?? TARGET_MP;
   const mp = (ctx.width * ctx.height) / 1e6;
   const iso = ctx.iso ?? 0;
