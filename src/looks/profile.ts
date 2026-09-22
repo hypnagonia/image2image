@@ -44,6 +44,45 @@ export const MAX_ANCHORS = 6;
 const flatHue = (): Pt[] => [[0, 0.5], [1, 0.5]];
 export interface SemanticLook { hue: number; sat: number; lum: number; protect: number }
 
+/**
+ * Spatial refinement of the look (all 0 … 1; 1 = the subtle upper bound, not
+ * "maximum effect"). Applied after the global palette, weighted by the soft
+ * semantic masks and continuous depth, and bounded — it refines the grade, it
+ * never replaces it. `skin` is protection: skin keeps ~35% of the palette and
+ * ~15% of every local correction, with a hue/saturation guard.
+ */
+export interface SpatialLook {
+  semantic: { skin: number; sky: number; foliage: number; urban: number; emissive: number };
+  depth: {
+    foreground: number;
+    background: number;
+    distant: number;
+    backgroundCooling: number;
+    backgroundSaturation: number;
+    backgroundContrast: number;
+  };
+}
+
+/** Spatial refinement defaults by category: none for the technical looks, subtle for creative ones. */
+export function defaultSpatial(category: Category): SpatialLook {
+  const off = category === "neutral";
+  const f = (v: number) => (off ? 0 : v);
+  const night = category === "night";
+  const landscape = category === "landscape";
+  const portrait = category === "portrait-neutral";
+  return {
+    semantic: { skin: 1, sky: f(landscape ? 0.8 : 0.6), foliage: f(landscape ? 0.8 : 0.6), urban: f(category === "architecture" ? 0.8 : 0.5), emissive: f(night ? 1 : 0.8) },
+    depth: {
+      foreground: f(portrait ? 0.7 : 0.5),
+      background: f(portrait ? 0.7 : 0.5),
+      distant: f(landscape ? 0.7 : night ? 0.2 : 0.4),
+      backgroundCooling: f(category === "warm cinematic" ? 0.3 : 0.5),
+      backgroundSaturation: f(0.5),
+      backgroundContrast: f(0.5),
+    },
+  };
+}
+
 export interface LookProfile {
   id: string;
   name: string;
@@ -95,6 +134,8 @@ export interface LookProfile {
    * saturation (`focus`).
    */
   palette: { anchors: PaletteAnchor[]; pull: number; focus: number; width: number };
+  /** Semantic- and depth-aware refinement of this look (see SpatialLook). */
+  spatial: SpatialLook;
   intensity: number;
 }
 
@@ -119,6 +160,7 @@ export function neutralProfile(): LookProfile {
     depth: {},
     hueCurves: { hue: flatHue(), sat: flatHue(), lum: flatHue() },
     palette: { anchors: [], pull: 0, focus: 0, width: 40 },
+    spatial: defaultSpatial("neutral"),
     intensity: 1,
   };
 }
@@ -142,6 +184,10 @@ export function makeProfile(p: DeepPartial<LookProfile> & { id: string; name: st
     depth: (p.depth as LookProfile["depth"]) ?? {},
     hueCurves: { ...n.hueCurves, ...(p.hueCurves as object) },
     palette: { ...n.palette, ...(p.palette as object), anchors: ((p.palette?.anchors as PaletteAnchor[]) ?? []).slice(0, MAX_ANCHORS) },
+    spatial: (() => {
+      const d = defaultSpatial((p.category ?? "custom") as Category);
+      return { semantic: { ...d.semantic, ...(p.spatial?.semantic as object) }, depth: { ...d.depth, ...(p.spatial?.depth as object) } };
+    })(),
     intensity: p.intensity ?? 1,
   };
 }
@@ -222,6 +268,20 @@ export function parseProfile(text: string): LookProfile {
         .map((a: any) => ({ hue: num(a?.hue, 0, 360, 0), sat: num(a?.sat, 0, 2, 1), weight: num(a?.weight, 0, 1, 1) })),
       pull: num(j.palette?.pull, 0, 1, 0), focus: num(j.palette?.focus, 0, 1, 0), width: num(j.palette?.width, 10, 90, 40),
     },
+    // Profiles saved before spatial refinement existed get their category's defaults.
+    spatial: (() => {
+      const def = defaultSpatial(cat);
+      const ss = j.spatial?.semantic ?? {}, sd = j.spatial?.depth ?? {};
+      const sem = def.semantic, dep = def.depth;
+      return {
+        semantic: { skin: num(ss.skin, 0, 1, sem.skin), sky: num(ss.sky, 0, 1, sem.sky), foliage: num(ss.foliage, 0, 1, sem.foliage), urban: num(ss.urban, 0, 1, sem.urban), emissive: num(ss.emissive, 0, 1, sem.emissive) },
+        depth: {
+          foreground: num(sd.foreground, 0, 1, dep.foreground), background: num(sd.background, 0, 1, dep.background), distant: num(sd.distant, 0, 1, dep.distant),
+          backgroundCooling: num(sd.backgroundCooling, 0, 1, dep.backgroundCooling), backgroundSaturation: num(sd.backgroundSaturation, 0, 1, dep.backgroundSaturation),
+          backgroundContrast: num(sd.backgroundContrast, 0, 1, dep.backgroundContrast),
+        },
+      };
+    })(),
     intensity: num(j.intensity, 0, 1, 1),
   };
 }
@@ -237,7 +297,7 @@ export function normalizeProfile(p: LookProfile): LookProfile {
 export const PROFILE_CURVE_SIZE = 1024;
 export const DEPTH_CURVE_SIZE = 64;
 /** vec4 count of the profile uniform block (keep in sync with render_tone.wgsl `Prof`). */
-export const PROFILE_VEC4S = 4 + 8 + 3 + 11 + 1 + MAX_ANCHORS;
+export const PROFILE_VEC4S = 4 + 8 + 3 + 11 + 1 + MAX_ANCHORS + 3;
 
 const smooth = (e0: number, e1: number, x: number) => { const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
 
@@ -379,10 +439,13 @@ export function profileUniforms(p: LookProfile, enabled: boolean, lutOn: boolean
     const [a, b] = balanceToAB(z);
     v4(a, b, 0, 0);
   }
-  // 15..25: semantic rules per group
+  // 15..25: semantic rules per group. With skin protection on, the person group's
+  // old blanket "protect" is superseded (it would protect skin twice and clothes fully).
+  const sp = p.spatial;
   for (const g of GROUPS) {
     const sg = p.semantic[g];
-    v4(sg ? (sg.hue * Math.PI) / 180 : 0, sg?.sat ?? 0, sg?.lum ?? 0, sg?.protect ?? 0);
+    const protect = g === "person" && sp.semantic.skin > 0 ? 0 : sg?.protect ?? 0;
+    v4(sg ? (sg.hue * Math.PI) / 180 : 0, sg?.sat ?? 0, sg?.lum ?? 0, protect);
   }
   // 26: palette (anchor count, pull, focus, width rad); 27..32: anchors (hue rad, chroma ×, weight, _)
   const pal = p.palette;
@@ -392,6 +455,12 @@ export function profileUniforms(p: LookProfile, enabled: boolean, lutOn: boolean
     const a = anchors[i];
     v4(a ? (a.hue * Math.PI) / 180 : 0, a?.sat ?? 1, a?.weight ?? 0, 0);
   }
+  // 33..35: spatial refinement — (skin, sky, foliage, urban), (emissive, foreground,
+  // background contrast, background saturation), (background cooling, distant, _, _)
+  const ss = sp.semantic, sd = sp.depth;
+  v4(ss.skin, ss.sky, ss.foliage, ss.urban);
+  v4(ss.emissive, sd.foreground, sd.background * sd.backgroundContrast, sd.background * sd.backgroundSaturation);
+  v4(sd.background * sd.backgroundCooling, sd.distant, 0, 0);
   return u;
 }
 

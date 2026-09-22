@@ -277,6 +277,8 @@ export function createLookPanel(root: HTMLElement, ctx: Ctx) {
   let semGroup: Group = "sky";
   let depthParam: keyof LookProfile["depth"] = "saturation";
 
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+
   /** Colour balance shown as hue angle + amount, stored as RGB offsets. */
   function balanceRows(zone: "shadows" | "midtones" | "highlights") {
     const get = (p: LookProfile) => { const [a, b] = balanceToAB(p.colorBalance[zone]); return { h: ((Math.atan2(b, a) * 180) / Math.PI + 360) % 360, m: Math.hypot(a, b) }; };
@@ -415,6 +417,11 @@ export function createLookPanel(root: HTMLElement, ctx: Ctx) {
       num(t("ed.near"), () => dc[0], setDepth(0), dlo, dhi, dst, (v) => v.toFixed(3)),
       num(t("ed.middle"), () => dc[1], setDepth(1), dlo, dhi, dst, (v) => v.toFixed(3)),
       num(t("ed.far"), () => dc[2], setDepth(2), dlo, dhi, dst, (v) => v.toFixed(3)),
+      el("div", { class: "group-title", text: t("ed.spatial") }),
+      ...(["skin", "sky", "foliage", "urban", "emissive"] as const).map((k) =>
+        num(t(`ed.sp.${k}`), (q) => q.spatial.semantic[k], (q, v) => (q.spatial.semantic[k] = v), 0, 1, 0.01, pct)),
+      ...(["foreground", "background", "distant", "backgroundCooling", "backgroundSaturation", "backgroundContrast"] as const).map((k) =>
+        num(t(`ed.sp.${k}`), (q) => q.spatial.depth[k], (q, v) => (q.spatial.depth[k] = v), 0, 1, 0.01, pct)),
       el("div", { class: "actions" }, exportBtn, deleteBtn),
     );
   }

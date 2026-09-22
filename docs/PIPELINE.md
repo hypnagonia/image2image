@@ -172,9 +172,59 @@ stacking); user adjustments stay in the technical layer.
   "hueCurves": { "hue": [[0,0.5],[1,0.5]], "sat": [[0,0.5],[1,0.5]], "lum": [[0,0.5],[1,0.5]] },  // x = OkLab hue/360, periodic; 0.5 = no change
   "palette": { "anchors": [{ "hue": 68, "sat": 1.1, "weight": 1 }, { "hue": 200, "sat": 1, "weight": 1 }],
                "pull": 0.55, "focus": 0.5, "width": 38 },
+  "spatial": { "semantic": { "skin": 1, "sky": 0.6, "foliage": 0.6, "urban": 0.5, "emissive": 0.8 },
+               "depth": { "foreground": 0.5, "background": 0.5, "distant": 0.4, "backgroundCooling": 0.3,
+                          "backgroundSaturation": 0.5, "backgroundContrast": 0.5 } },   // 0…1, see below
   "intensity": 1
 }
 ```
+
+### Spatial refinement (semantic- and depth-aware grading)
+
+The global palette (tone curve → RGB curves → hue shaping → saturation →
+palette → colour balance → 3D LUT) is always applied first; the existing
+semantic masks and depth map then *refine* it inside the same pass
+(`apply_profile` in `render_tone.wgsl`). Nothing new is inferred: the masks
+are the SegFormer probabilities after guided-filter refinement and
+joint-bilateral upsampling against the pixel (soft 0…1, edge-aware, no
+halos), depth is the refined continuous distance. Both are sampled in
+normalised image coordinates, so they stay aligned in strip exports and after
+the optional 2× upscale (the app has no crop stage). All corrections are
+bounded OkLab edits and pass through the profile's intensity blend, so the
+palette stays dominant; `spatial` values of 1 are the subtle upper bound.
+
+Priority: **skin → semantic objects → global palette → depth.**
+
+* **Skin**: person mask × a skin-colour likelihood of the technical colour
+  (OkLab hue ≈ 25–80°, moderate chroma) — faces and hands rather than
+  clothes. Skin keeps ~35% of the palette and ~15% of every local correction;
+  a guard then limits its hue departure to ±7°, chroma to +12% and lightness
+  to −0.05…+0.04 (no teal/green/magenta skin, no blown skin highlights).
+  Depth corrections (the profile's depth curves and the depth refinement)
+  never reach skin, so a person farther away is not cooled, darkened or
+  desaturated. It supersedes the old per-look "protect" on the person group.
+* **Sky**: high chroma compressed above C ≈ 0.09, a small lean on the
+  palette's highlight balance (warm palettes warm, teal palettes cool),
+  bright skies rolled off (−15% contrast above L ≈ 0.78).
+* **Foliage**: strong greens −20% chroma at most; harsh yellow-greens nudged
+  ≤ 4° toward film greens.
+* **Buildings / roads**: near-neutral surfaces have palette casts pulled back
+  halfway to the technical colour (which keeps the real lighting), −8% chroma,
+  a hair cooler.
+* **Lights**: bright, strongly coloured pixels in the technical render keep
+  their hue and chroma through the palette (no semantic class needed).
+* **Depth** (continuous, never on skin or sky): foreground +5% contrast and a
+  touch warmer (not for cold palettes); background −8% contrast, −12%
+  saturation, slightly cooler; far distance ≤ 10% atmospheric haze (lifted
+  blacks, lower contrast and colour). Local contrast/texture by depth was
+  already part of local tone mapping (near/far multipliers).
+* Defaults come from the category (`defaultSpatial`): all off for Neutral,
+  subtle for creative looks; profiles saved earlier get them on load.
+* Measured on the maple landscape with "Teal & Warm": mean change 2/255, max
+  13/255 against the same look without refinement, concentrated in the
+  background; the difference map has no mask edges except the real horizon.
+* Not applicable here: the app has no halation, bloom, grain or vignette
+  stages, so no optical effect is depth-modulated.
 
 * **Rainbow curves** (hue → hue ±60°, hue → saturation ×0–2, hue → luminance
   ±0.25 L) are periodic cubic curves sampled into a 360-texel table.

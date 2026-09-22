@@ -53,3 +53,25 @@ test("periodic hue curve: flat, interpolating, wrapping", () => {
   const t = hueCurveTable(p);
   assert.ok(Math.abs(t[0]) < 1e-9 && Math.abs(t[1] - 1) < 1e-9, "neutral table");
 });
+
+test("spatial refinement: category defaults, old profiles upgraded, values clamped", async () => {
+  const { parseProfile, makeProfile, neutralProfile, profileUniforms, PROFILE_VEC4S } = await import("../src/looks/profile.ts");
+  // The technical look never refines; creative looks do, subtly.
+  assert.equal(neutralProfile().spatial.depth.background, 0);
+  const cine = makeProfile({ id: "x", name: "x", category: "cool cinematic" });
+  assert.ok(cine.spatial.depth.background > 0 && cine.spatial.semantic.skin === 1);
+  // A profile saved before spatial refinement existed gets its category's defaults.
+  const old = parseProfile(JSON.stringify({ id: "o", name: "o", category: "landscape" }));
+  assert.equal(old.spatial.semantic.sky, 0.8);
+  // Out-of-range values are clamped; explicit values survive a round trip.
+  const p = parseProfile(JSON.stringify({ id: "p", name: "p", category: "custom", spatial: { semantic: { skin: 3, sky: 0.25 }, depth: { distant: -1 } } }));
+  assert.equal(p.spatial.semantic.skin, 1);
+  assert.equal(p.spatial.semantic.sky, 0.25);
+  assert.equal(p.spatial.depth.distant, 0);
+  // Skin protection supersedes the person group's blanket "protect".
+  const q = makeProfile({ id: "q", name: "q", category: "portrait-neutral", semantic: { person: { hue: 0, sat: 0, lum: 0, protect: 0.6 } } });
+  const u = profileUniforms(q, true, false, 33);
+  assert.equal(u.length, PROFILE_VEC4S * 4);
+  const personProtect = u[(15 + 6) * 4 + 3];
+  assert.equal(personProtect, 0);
+});
