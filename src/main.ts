@@ -3,7 +3,7 @@
  * everything else to the engine worker. No pixel processing happens here.
  */
 import "./styles.css";
-import type { Capabilities, ExportFormat, FromWorker, StageProfile, Summary, ToWorker } from "./engine/protocol.ts";
+import type { Capabilities, ExportFormat, FromWorker, StageProfile, Summary, ToWorker, UpscaleInfo } from "./engine/protocol.ts";
 import type { Decision, Params } from "./decision/params.ts";
 import { createLookPanel } from "./ui/lookPanel.ts";
 import { createRegionsPanel } from "./ui/regionsPanel.ts";
@@ -95,6 +95,8 @@ let params: Params | undefined;
 let autoParams: Params | undefined;
 let decisions: Decision[] = [];
 let summary: Summary | undefined;
+/** The automatic 2× stage of the open photo. */
+let upscale: UpscaleInfo | undefined;
 let profile: StageProfile[] = [];
 const logLines: string[] = [];
 let looks: Array<{ id: string; name: string; description: string }> = [];
@@ -152,6 +154,7 @@ let pendingRestore: Params | undefined;
 
 function openFile(f: File, restore?: Params) {
   pendingRestore = restore;
+  upscale = undefined;
   if (!restore) void rememberPhoto(f);
   markInflight();
   empty.style.display = "none";
@@ -549,6 +552,19 @@ function renderProfile() {
   );
 }
 
+/** One line on the automatic 2× stage: what happened, and one short reason. */
+function upscaleText(u: UpscaleInfo): string {
+  const reason = tOr(`up.r.${u.code}`, u.upscaleReason, u.vars);
+  switch (u.state) {
+    case "applied": return `${t("up.applied")} — ${reason}` + (u.width ? ` (${t("up.size", { w: u.width, h: u.height ?? 0 })})` : "");
+    case "running": return `${t("up.running")} ${reason}`;
+    case "pending": return t("up.pending");
+    case "failed": return t("up.failed");
+    case "cancelled": return t("up.cancelled");
+    default: return ["sufficient", "sharp-12", "adequate"].includes(u.code) ? `${t("up.skipSufficient")} (${reason})` : `${t("up.skipped")} — ${reason}`;
+  }
+}
+
 function renderAuto() {
   const s = summary;
   const kv = el("dl", { class: "kv" });
@@ -558,6 +574,7 @@ function renderAuto() {
     add(t("auto.size"), `${s.width}×${s.height}` + (s.working.factor > 1 ? ` (${t("auto.working", { w: s.working.width, h: s.working.height })})` : ""));
     for (const [k, v] of Object.entries(s.meta)) add(k, v);
     add(t("auto.regions"), Object.entries(s.coverage).filter(([, v]) => v >= 1).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${tOr(`group.${k}`, k).toLowerCase()} ${v}%`).join(", "));
+    if (upscale) add(t("auto.detail"), upscaleText(upscale));
   }
   const list = el("div", { class: "decisions" }, ...decisions.map((d) => {
     const v = Array.isArray(d.value) ? d.value.join(" / ") : String(d.value);
@@ -635,6 +652,15 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
         logLines.push(`restoring ${r.file.name} after a reload of this tab`);
         openFile(r.file, r.params);
       });
+      break;
+    case "upscale":
+      upscale = m.info;
+      // While the 2× stage runs the tab holds its largest buffers: keep the crash
+      // guard armed so a memory kill leads to the safe reopen, not a loop.
+      if (m.info.state === "running") markInflight();
+      else if (!busy) markCompleted();
+      if (m.info.state !== "running" && m.info.state !== "pending" && !busy) setProgress(undefined);
+      renderAuto();
       break;
     case "gpu-lost":
       // A lost GPU device cannot be revived in place; restart the page — the session restores itself.

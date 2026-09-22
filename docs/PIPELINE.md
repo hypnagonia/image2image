@@ -12,6 +12,8 @@ leave the device; models are served from this site and cached locally.
 | Input/Decoder | `src/decode/` (LibRaw 0.22.2 → wasm in `native/libraw`, libheif-js, native `createImageBitmap`) | file bytes → sensor integers + DNG metadata, or display RGB |
 | RAW Development | `src/raw/develop.ts`, `develop.wgsl`, `src/color/dng.ts` | sensor data → linear Rec.2020 working texture (strip-wise upload) |
 | Neural Restoration | `src/neural/tiles.ts`, `tile_*.wgsl` (SCUNet, NAFNet) | working texture → denoised/restored texture (tiled, only where needed) |
+| Image Quality Analysis | `src/analysis/quality.ts` | restored texture → sharpness / noise / detail metrics and the 2× decision |
+| Upscaling (optional) | `src/restore/upscale.ts`, `display.ts` (Swin2SR lightweight ×2) | restored texture W×H → working texture 2W×2H (tiled, only when needed) |
 | Scene Analysis | `src/analysis/`, `blocks.wgsl`, `stats.wgsl` | textures → `AnalysisReport` (noise profile, blur map, per-region stats, histograms) |
 | Semantic Segmentation | `src/neural/scene.ts` (SegFormer-B0 ADE20K → 11 groups) | ~1036 px analysis image, 512 px sliding window (25% overlap, feathered logits) → soft group probabilities at ¼ resolution |
 | Depth Estimation | `src/neural/scene.ts` (Depth Anything V2 Small) | global 518 px pass for layout + 4 overlapping full-resolution tiles (least-squares aligned, fine detail only) → relative distance at ~1036 px; depth ramps at person/animal/vehicle outlines snapped to the segmentation outline |
@@ -39,6 +41,7 @@ DNG/ProRAW/HEIC → decode (LibRaw / native / libheif)
 → image statistics (GPU) → decision engine
 → [first preview]
 → SCUNet (tiles with measured visible noise) → NAFNet (tiles measured as blurred)
+→ image quality analysis → optional 2× upscale (Swin2SR; the new working image)
 → render: denoise blend → white balance → depth-aware dehaze → exposure
   → local tone mapping → tone curve (display rendering) → user curves
   → technical colour (vibrance/saturation, semantic hue fixes)
@@ -67,6 +70,53 @@ DNG/ProRAW/HEIC → decode (LibRaw / native / libheif)
    `I = J·t + A·(1−t)` holds for scene-linear radiance only.
 5. **3D LUT inside the look profile** (creative layer), never as part of the
    technical rendering.
+6. **No crop, grain, halation, bloom or vignette stages exist** — the upscale
+   stage sits where it would in a film pipeline: after denoise/restoration and
+   before everything creative. Because every render stage (tone, look,
+   semantic, dehaze, sharpening, depth of field, export) runs per pixel on the
+   working image, replacing the working image by its 2× version puts all of
+   them at output resolution; masks and depth are sampled in normalised
+   coordinates, so they stay aligned.
+
+## Optional 2× upscale
+
+Runs only when the analysis says it helps; otherwise the model is never
+downloaded or loaded, and the render path is unchanged (analysis is read-only,
+~50 ms for 12 MP: a 4×3 grid of native-resolution 256 px patches).
+
+* **Measurements** (encoded luma, `src/analysis/quality.ts`): Immerkær noise
+  σ (lower quartile over patches), noise-corrected Laplacian variance and
+  Tenengrad, edge width σ from the Laplacian/gradient energy ratio on edge
+  pixels per 32 px block (sharpest quartile — a sharp subject before bokeh is
+  not "blurred"), detail density. Unit-tested on synthetic blurred edges
+  (0.8/1.6/3 px read back within ~5%).
+* **Decision** (deterministic, conservative; target = 12 MP export):
+  user-reduced size → skip · severe blur (sharpest quartile ≥ 3 px) → skip ·
+  ≥ 16 MP → skip · residual noise above ~2/255 → skip (never upscale noise) ·
+  too little real detail → skip · 12–16 MP → only if soft (edge σ ≳ 1.7 px) ·
+  8–12 MP → if soft or resolution-limited (detail down to single pixels) ·
+  < 8 MP → yes · and never beyond the device budget (2× output ≤ 16 MP on
+  phones, 48 MP on desktop). ISO only tightens the noise/detail limits.
+* **Colour around the model**: linear × gain → extended Reinhard (white 4) →
+  sRGB curve → Swin2SR → exact inverse; highlights near the white keep the
+  original data (bilinear). No look is applied before the network.
+* **Tiles**: 256 px (fixed graph), 24 px overlap, feathered partition of
+  unity in output space; a rolling CPU strip of 512 output rows, flushed to the
+  texture as rows complete. Seams measured at 1.02–1.03× the gradient of
+  neighbouring rows/columns (i.e. none).
+* **Runs in slices** of ~250 ms on the engine's serial queue after the final
+  preview, so the photo stays editable; the 2× image replaces the working
+  image atomically at the end (restoration is baked into it).
+* **Model**: Swin2SR lightweight ×2 (Apache-2.0) converted by
+  `scripts/models/swin2sr.py` — fixed 256×256 input, shape logic folded
+  (19 113 → 1 955 nodes), shared attention mask stored once in fp16: 15 MB.
+  ~1 s per tile on an Apple-silicon desktop GPU (WebGPU EP); phones are
+  several times slower. Each new session is self-tested on a probe tile; on
+  failure the stage retries on WASM, and if that fails too the photo simply
+  continues at 1× ("unavailable" in the Auto tab).
+* The decision and metrics are kept on the session (`upscaleApplied`,
+  `upscaleFactor`, `upscaleReason`, `qualityMetrics`) and shown as one line in
+  the Auto tab.
 
 ## Colour
 
@@ -179,6 +229,9 @@ region can be highlighted on the photo.
   joint-bilaterally upsampled per pixel at render time.
 * SCUNet/NAFNet tiles run only where needed; tile tensors stay on the GPU
   (ONNX Runtime shares the engine's `GPUDevice` through an adapter shim).
+* The 2× upscale is limited to a 16 MP result on phones, keeps the crash
+  guard armed while it runs (a memory kill leads to "Reopen at half size",
+  which never upscales), and holds one 256 px tile plus a 512-row strip.
 * Every GPU allocation is tracked; the Debug tab shows time, live and peak GPU
   memory per stage — use it on a real iPhone before adding stages.
 * If Safari evicts the tab or the GPU is reset, the photo (kept in the Origin

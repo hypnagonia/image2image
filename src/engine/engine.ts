@@ -6,6 +6,7 @@
  *   Semantic Segmentation → Depth Estimation → Mask/Depth Refinement →
  *   Image statistics → Automatic Decision Engine → [preview] →
  *   Neural Restoration (SCUNet, NAFNet; tiled, only where needed) →
+ *   Image quality analysis → optional 2× upscale (Swin2SR, only when needed) →
  *   Exposure/Tone → Camera Color → Semantic/Depth → Depth of Field → Output
  *
  * Deviation from the reference order (documented in docs/PIPELINE.md): the
@@ -24,6 +25,8 @@ import { Neural, MODELS } from "../neural/ort.ts";
 import { analyseScene, type SceneMaps } from "../neural/scene.ts";
 import { runTiled } from "../neural/tiles.ts";
 import { denoiseGPU } from "../restore/denoise.ts";
+import { UpscaleJob, probeUpscaler } from "../restore/upscale.ts";
+import { decideUpscale, measureQuality, type ImageQualityReport } from "../analysis/quality.ts";
 import { downsample, guideSize, refine, releaseRefined, type RefinedMaps } from "../refine/refine.ts";
 import { blurReport, lumPercentiles, measureBlocks, measureRegions, noiseProfile } from "../analysis/analysis.ts";
 import type { AnalysisReport } from "../analysis/types.ts";
@@ -40,7 +43,7 @@ import { matchProfile, profileFromReference, type RegionColors } from "../looks/
 import { GROUPS, type Group } from "../neural/scene.ts";
 import { canEncodeHeic, encodeHeic, encodeJpeg, encodeLinearDng, encodeTiff16 } from "../output/encoders.ts";
 import { Profiler } from "./profiler.ts";
-import type { Capabilities, ExportFormat, FromWorker, Summary } from "./protocol.ts";
+import type { Capabilities, ExportFormat, FromWorker, Summary, UpscaleInfo } from "./protocol.ts";
 import type { CameraColor } from "../color/dng.ts";
 
 type Post = (m: FromWorker, transfer?: Transferable[]) => void;
@@ -62,10 +65,17 @@ interface Session {
   draft?: { base: GPUTexture; denoised: GPUTexture; w: number; h: number };
   distCPU?: { w: number; h: number; data: Float32Array };
   lightLinear: [number, number, number];
+  /** Working pixels per original working pixel along each axis: 2 after upscaling. */
+  scale: 1 | 2;
+  /** The quality analysis and what the upscale stage did with it. */
+  upscale?: UpscaleInfo;
 }
 
 /** Default blur strength whenever depth of field is switched on (scene-independent, by preference). */
 const DEFAULT_DOF_STRENGTH = 0.5;
+
+/** Largest working image (MP) the 2× stage may produce: a 2× texture must fit next to everything else. */
+const UPSCALE_MAX_MP = () => (isMobile() ? 16 : 48);
 
 /** Long edge of the image the analysis networks see. */
 const ANALYSIS_LONG = 1036;
@@ -293,7 +303,7 @@ export class Engine {
     // Atmospheric light: dark-channel estimate is in the analysis encoding → linear working.
     const A = decision.params.dehaze.light.map((v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)) / gain) as [number, number, number];
 
-    const s: Session = { name: file.name, decoded, work, denoised: work.tex, gain, scene, maps, report, decision, params, lightLinear: A };
+    const s: Session = { name: file.name, decoded, work, denoised: work.tex, gain, scene, maps, report, decision, params, lightLinear: A, scale: 1 };
     this.s = s;
     await this.cacheDistance();
     // Automatic focus: subject from refined depth + segmentation + composition.
@@ -335,9 +345,136 @@ export class Engine {
     // --- neural restoration (tiled, only where needed) -------------------------------------
     await this.restore(gen);
     if (gen !== this.generation) return;
+
+    // --- image quality → optional 2× upscale ----------------------------------------------
+    // Measured on the restored image (after denoise/deblur), before any tone or
+    // look. When the source already has enough detail this is the only cost:
+    // the upscaling model is never downloaded or loaded.
+    const q = await P.time("quality analysis", () => this.analyseQuality(resolution === "half"), (r) => `${r.megapixels} MP, edge σ ${r.metrics.edgeSigma.toFixed(2)} px, noise ${(r.metrics.noiseSigma * 255).toFixed(2)}/255 → ${r.needsUpscale ? "2×" : "skip"}`);
     await P.time("preview proxy (restored)", () => this.makeProxy());
     await this.renderNow(true);
     this.post({ type: "profile", stages: P.stages });
+    // The upscale runs as its own queued job in short slices (see runUpscale), so
+    // the photo is fully editable while it works.
+    if (q.needsUpscale) void this.runUpscale(gen);
+  }
+
+  private async analyseQuality(reducedByUser: boolean): Promise<ImageQualityReport> {
+    const s = this.s!;
+    const { width: W, height: H } = s.work;
+    const metrics = await measureQuality(this.gpu, s.denoised, W, H, s.gain);
+    const q = decideUpscale(metrics, {
+      width: W, height: H, iso: s.decoded.meta.iso, reducedByUser,
+      maxOutputMP: UPSCALE_MAX_MP(), maxTextureDimension: this.gpu.info.maxTextureDimension2D,
+    });
+    s.upscale = { state: q.needsUpscale ? "pending" : "skipped", upscaleApplied: false, upscaleFactor: 1, upscaleReason: q.reason, code: q.code, vars: q.vars, report: q };
+    const m = q.metrics;
+    this.log(`quality: ${q.megapixels} MP; sharpness ${q.sharpnessScore.toFixed(2)} (edge σ ${m.edgeSigma.toFixed(2)} px sharpest quartile, ${m.edgeSigmaMedian.toFixed(2)} px median, ${m.edgeBlocks} edge blocks in ${m.patches} patches); ` +
+      `noise ${(m.noiseSigma * 255).toFixed(2)}/255 (score ${q.noiseScore.toFixed(2)}); detail ${(m.detailDensity * 100).toFixed(1)}%; Laplacian var ${m.laplacianVar.toExponential(2)}; Tenengrad ${m.tenengrad.toExponential(2)}`);
+    this.log(`upscale: ${q.needsUpscale ? "2× planned" : "skipped"} — ${q.reason}`);
+    this.post({ type: "upscale", info: s.upscale });
+    return q;
+  }
+
+  /**
+   * 2× upscale of the restored working image, as a chain of short exclusive
+   * jobs: each slice runs tiles for ~250 ms, then preview renders and other
+   * requests queued meanwhile get their turn. The result replaces the working
+   * image atomically at the end, so every later stage (tone, look, semantic,
+   * sharpening, depth of field, export) runs at the new resolution. Any
+   * failure leaves the photo exactly as it was.
+   */
+  private async runUpscale(gen: number) {
+    const s = this.s;
+    if (!s?.upscale) return;
+    const src = s.denoised;
+    const { width: W, height: H } = s.work;
+    const P = this.profiler;
+    const info = s.upscale;
+    const post = () => this.post({ type: "upscale", info });
+    info.state = "running";
+    post();
+    let session: Awaited<ReturnType<Neural["session"]>> | undefined;
+    let job: UpscaleJob | undefined;
+    let backend = this.neural.backend;
+    const t0 = performance.now();
+    try {
+      this.progress("detail enhancement", "loading model");
+      // Load, then self-test on one probe tile: WebGPU first, WASM if either fails.
+      const open = async (b: typeof backend) => {
+        const ses = await this.neural.session(MODELS.swin2sr, false, b);
+        const bad = await probeUpscaler(ses);
+        if (bad) { await ses.release(); throw new Error(bad); }
+        return ses;
+      };
+      try {
+        session = await open(backend);
+      } catch (e) {
+        if (backend !== "webgpu") throw e;
+        this.log(`Swin2SR on WebGPU failed (${e instanceof Error ? e.message : e}); retrying on WASM`);
+        backend = "wasm";
+        session = await open("wasm");
+      }
+      const live = () => gen === this.generation && this.s === s && s.denoised === src;
+      for (let first = true; ; first = false) {
+        const done = await this.exclusive(async () => {
+          if (!live()) throw new Error("cancelled");
+          if (!job) job = new UpscaleJob(this.gpu, session!, src, W, H, s.gain);
+          try {
+            return await job.step(first ? 0 : 250);
+          } catch (e) {
+            // A WebGPU failure mid-run: redo the whole image on WASM rather than give up.
+            if (backend !== "webgpu") throw e;
+            this.log(`Swin2SR WebGPU inference failed (${e instanceof Error ? e.message : e}); retrying on WASM`);
+            job.release();
+            await session!.release();
+            backend = "wasm";
+            session = await this.neural.session(MODELS.swin2sr, false, "wasm");
+            job = new UpscaleJob(this.gpu, session, src, W, H, s.gain);
+            return false;
+          }
+        });
+        const pr = job!.progress;
+        this.progress("detail enhancement", `tile ${pr.done}/${pr.total}`, pr.done / pr.total);
+        if (done) break;
+      }
+      await this.exclusive(async () => {
+        if (!live()) throw new Error("cancelled");
+        const out = job!.out;
+        const tiles = job!.total;
+        const netMs = job!.progress.msPerTile;
+        job!.finish();
+        job = undefined;
+        // Swap in the 2× image: it is both base and restored image (restoration is baked in).
+        if (s.denoised !== s.work.tex) this.gpu.release(s.denoised);
+        this.gpu.release(s.work.tex);
+        s.work = { ...s.work, tex: out, width: 2 * W, height: 2 * H };
+        s.denoised = out;
+        s.scale = 2;
+        this.dropThumb();
+        P.add("2× upscale (Swin2SR)", performance.now() - t0, `${W}×${H} → ${2 * W}×${2 * H} on ${backend}, ${tiles} tiles`);
+        Object.assign(info, { state: "applied", upscaleApplied: true, upscaleFactor: 2, width: 2 * W, height: 2 * H });
+        this.log(`upscale: 2× applied on ${backend} in ${((performance.now() - t0) / 1000).toFixed(1)} s — ${W}×${H} → ${2 * W}×${2 * H}, ${tiles} tiles, network ${netMs.toFixed(0)} ms/tile`);
+        await this.makeProxy();
+        await this.renderNow(true);
+        post();
+        this.post({ type: "profile", stages: P.stages });
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      job?.release();
+      if (msg === "cancelled") {
+        this.log("upscale: cancelled (photo changed or restoration re-run)");
+        Object.assign(info, { state: "cancelled" });
+      } else {
+        // Never fail the photo because of the optional stage: keep the 1× image.
+        this.log(`upscale: failed (${msg}) — continuing without it`);
+        Object.assign(info, { state: "failed", upscaleReason: `${info.upscaleReason}; model could not run: ${msg}` });
+      }
+      if (this.s === s) post();
+    } finally {
+      await session?.release().catch(() => {});
+    }
   }
 
   /** Runs SCUNet/NAFNet on demand (user request), overriding the automatic plan. */
@@ -352,7 +489,7 @@ export class Engine {
       nafnet: which.nafnet,
       denoiseTile: () => 1,
       // Forced restoration still follows the measured blur map, with a floor so every tile is tried.
-      deblurTile: (x: number, y: number, n: number) => Math.max(0.5, auto.deblurTile(x, y, n)),
+      deblurTile: (x: number, y: number, n: number) => Math.max(0.5, auto.deblurTile(x / s.scale, y / s.scale, n / s.scale)),
     };
     if (s.denoised !== s.work.tex) { this.gpu.release(s.denoised); s.denoised = s.work.tex; }
     if (which.scunet && s.params.denoise.luma === 0 && s.params.denoise.chroma === 0) s.params = { ...s.params, denoise: { ...s.params.denoise, luma: 0.6, chroma: 0.6 } };

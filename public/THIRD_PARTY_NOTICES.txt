@@ -25,6 +25,13 @@ NAFNet (GoPro, width 32) — MIT License, Copyright (c) 2022 megvii-model
   Weights SHA-256 19394e6155d12ef6371d1d57496f87f0ec88f92bdffa27c0792690722d5d1a5c
   (identical to the authors' Google Drive release). Converted by scripts/models/export.py.
 
+Swin2SR lightweight ×2 (optional 2× upscale) — Apache License 2.0
+  Marcos V. Conde et al., "Swin2SR: SwinV2 Transformer for Compressed Image
+  Super-Resolution and Restoration", ECCV Workshops 2022. https://github.com/mv-lab/swin2sr
+  Weights: https://huggingface.co/caidas/swin2SR-lightweight-x2-64 (ONNX export:
+  https://huggingface.co/Xenova/swin2SR-lightweight-x2-64); fixed-size, folded
+  graph produced by scripts/models/swin2sr.py.
+
 SegFormer-B0 (ADE20K 512×512) — NVIDIA Source Code License for SegFormer
   Enze Xie et al., "SegFormer", NeurIPS 2021. https://github.com/NVlabs/SegFormer
   ONNX conversion: https://huggingface.co/Xenova/segformer-b0-finetuned-ade-512-512

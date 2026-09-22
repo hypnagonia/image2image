@@ -1,6 +1,7 @@
 import type { Decision, Params } from "../decision/params.ts";
 import type { LookProfile } from "../looks/profile.ts";
 import type { ColorStats } from "../looks/palette.ts";
+import type { ImageQualityReport, UpscaleReasonCode } from "../analysis/quality.ts";
 
 export type ExportFormat = "jpeg" | "heic" | "tiff16" | "dng";
 
@@ -34,6 +35,21 @@ export interface Summary {
   coverage: Record<string, number>;
 }
 
+/** The upscale stage's decision and outcome (kept on the session, mirrored to the UI). */
+export interface UpscaleInfo {
+  state: "skipped" | "pending" | "running" | "applied" | "failed" | "cancelled";
+  upscaleApplied: boolean;
+  upscaleFactor: 1 | 2;
+  upscaleReason: string;
+  code: UpscaleReasonCode;
+  vars: Record<string, string | number>;
+  /** Analyzer measurements (qualityMetrics) and scores. */
+  report: ImageQualityReport;
+  /** Working size after upscaling. */
+  width?: number;
+  height?: number;
+}
+
 export type ToWorker =
   | { type: "init"; base: string; forceCpu?: boolean }
   | { type: "open"; file: File; resolution: "auto" | "full" | "half"; autoExposure: boolean; autoDof: boolean }
@@ -63,4 +79,5 @@ export type FromWorker =
   | { type: "palette"; stats: ColorStats }
   | { type: "lookProfile"; profile: LookProfile; reference: ColorStats; message: string }
   | { type: "gpu-lost"; reason: string }
+  | { type: "upscale"; info: UpscaleInfo }
   | { type: "error"; message: string; stage?: string };

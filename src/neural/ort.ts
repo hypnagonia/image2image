@@ -15,7 +15,7 @@ import type { Gpu } from "../gpu/gpu.ts";
 export type Backend = "webgpu" | "wasm";
 
 export interface ModelSpec {
-  id: "scunet" | "nafnet" | "segformer" | "depth";
+  id: "scunet" | "nafnet" | "segformer" | "depth" | "swin2sr";
   /** File for WebGPU with shader-f16. */
   f16: string;
   /** File for everything else. */
@@ -29,6 +29,9 @@ export const MODELS: Record<ModelSpec["id"], ModelSpec> = {
   nafnet: { id: "nafnet", f16: "nafnet.fp16.onnx", f32: "nafnet.fp32w16.onnx", bytes: 35e6 },
   segformer: { id: "segformer", f16: "segformer-b0-ade.fp16.onnx", f32: "segformer-b0-ade.fp32.onnx", bytes: 8e6 },
   depth: { id: "depth", f16: "depth-anything-v2-small.q4f16.onnx", f32: "depth-anything-v2-small.q4.onnx", bytes: 20e6 },
+  // Fixed 256×256 input, shape logic folded (see scripts/models/swin2sr.py). fp32 on every
+  // backend: an fp16 graph ran ~25% faster but produced a 2-pixel checkerboard on ORT WebGPU.
+  swin2sr: { id: "swin2sr", f16: "swin2sr-lightweight-x2.onnx", f32: "swin2sr-lightweight-x2.onnx", bytes: 15.3e6 },
 };
 
 const CACHE = "image-improver2-models-v1";
@@ -80,18 +83,27 @@ export class Neural {
     return new Neural("wasm", false, false, base);
   }
 
-  modelFile(spec: ModelSpec): string {
-    return this.backend === "webgpu" && this.f16 ? spec.f16 : spec.f32;
+  modelFile(spec: ModelSpec, backend: Backend = this.backend): string {
+    return backend === "webgpu" && this.f16 ? spec.f16 : spec.f32;
   }
 
-  async fetchModel(spec: ModelSpec): Promise<Uint8Array> {
-    const url = this.base + "models/" + this.modelFile(spec);
+  async fetchModel(spec: ModelSpec, backend: Backend = this.backend): Promise<Uint8Array> {
+    const url = this.base + "models/" + this.modelFile(spec, backend);
+    // A model is binary and at least a sizeable fraction of its expected size; an
+    // HTML page (a dev-server or SPA fallback answering 200) must never be cached
+    // as a model — it would fail to parse on every later visit.
+    const plausible = (n: number) => n >= spec.bytes * 0.3;
     let cache: Cache | undefined;
     try { cache = await caches.open(CACHE); } catch { /* private mode */ }
     const hit = await cache?.match(url);
-    if (hit) return new Uint8Array(await hit.arrayBuffer());
+    if (hit) {
+      const b = new Uint8Array(await hit.arrayBuffer());
+      if (plausible(b.byteLength)) return b;
+      await cache?.delete(url);
+    }
     const res = await fetch(url);
     if (!res.ok || !res.body) throw new Error(`Could not download ${spec.id} model (${res.status})`);
+    if ((res.headers.get("content-type") ?? "").includes("text/html")) throw new Error(`Could not download ${spec.id} model (got a web page instead)`);
     const total = Number(res.headers.get("content-length")) || spec.bytes;
     const reader = res.body.getReader();
     const chunks: Uint8Array[] = [];
@@ -106,18 +118,20 @@ export class Neural {
     const out = new Uint8Array(loaded);
     let o = 0;
     for (const c of chunks) { out.set(c, o); o += c.byteLength; }
+    if (!plausible(loaded)) throw new Error(`Could not download ${spec.id} model (${loaded} bytes)`);
     try { await cache?.put(url, new Response(out.slice(), { headers: { "content-type": "application/octet-stream" } })); } catch { /* quota */ }
     return out;
   }
 
-  async session(spec: ModelSpec, gpuOutput: boolean): Promise<ort.InferenceSession> {
-    const bytes = await this.fetchModel(spec);
+  /** `backend` forces WASM for one model (fallback when its WebGPU session fails). */
+  async session(spec: ModelSpec, gpuOutput: boolean, backend: Backend = this.backend): Promise<ort.InferenceSession> {
+    const bytes = await this.fetchModel(spec, backend);
     const opts: ort.InferenceSession.SessionOptions = {
-      executionProviders: this.backend === "webgpu" ? ["webgpu"] : ["wasm"],
+      executionProviders: backend === "webgpu" ? ["webgpu"] : ["wasm"],
       graphOptimizationLevel: "all",
-      enableMemPattern: this.backend === "wasm",
+      enableMemPattern: backend === "wasm",
     };
-    if (this.backend === "webgpu" && gpuOutput) opts.preferredOutputLocation = "gpu-buffer";
+    if (backend === "webgpu" && gpuOutput) opts.preferredOutputLocation = "gpu-buffer";
     return ort.InferenceSession.create(bytes, opts);
   }
 }
