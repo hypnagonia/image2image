@@ -18,6 +18,7 @@ import { defaultParams, neutralSemantic, type Decision, type Params } from "./pa
 import type { AnalysisReport, RegionStats } from "../analysis/types.ts";
 import { noiseAt, BLUR_THRESHOLD } from "../analysis/analysis.ts";
 import { lchOf } from "../color/oklab.ts";
+import { checkBlacks } from "./blacks.ts";
 import type { CameraColor } from "../color/dng.ts";
 import { mulVec, inverse } from "../color/mat3.ts";
 
@@ -196,8 +197,21 @@ export function decide(ctx: EngineContext): DecisionResult {
   note("tone.shadows", p.tone.shadows, `p5 at ${loEV.toFixed(2)} EV after exposure; shadow noise σ ${(shNoise * 255).toFixed(2)}/255 caps the lift at ${(noiseCap * 100).toFixed(0)}%`,
     { p5EV: r2(loEV), shadowNoise255: r2(shNoise * 255), dim: r2(dim) });
 
-  p.tone.blacks = r2(clamp(-(R.global.clipLo - 0.002) * 20, -0.3, 0) + (R.global.clipLo < 0.0005 && loEV > -6 ? -0.08 : 0));
-  note("tone.blacks", p.tone.blacks, `${(R.global.clipLo * 100).toFixed(2)}% of pixels already at black`, { clipLo: r3(R.global.clipLo) });
+  // Blacks: measured on the rendering, not on the input histogram — what matters
+  // is whether the darkest tones come out black or milky grey. The local tone
+  // stage lifts deep shadows by ≈ 2 EV × tone.shadows, so that is included.
+  const liftEV = p.tone.shadows * 2;
+  const deepEV = Math.log2(R.lum.p001) + evAdj;
+  const lowEV2 = Math.log2(R.lum.p01) + evAdj;
+  const bk = checkBlacks(p.tone, deepEV, lowEV2, liftEV, R.global.clipLo);
+  p.tone.blacks = bk.blacks;
+  note("tone.blacks", p.tone.blacks,
+    !bk.hasTrueBlack
+      ? `nothing here is truly black: the darkest 0.1% is only ${(-deepEV).toFixed(1)} EV below white (dark material, open shade or haze); blacks left alone`
+      : bk.blacks === 0
+        ? `blacks are solid: darkest 0.1% renders at ${bk.deepBefore.toFixed(0)}/255`
+        : `darkest 0.1% rendered at ${bk.deepBefore.toFixed(0)}/255 (milky); black point deepened to reach ${bk.deepAfter.toFixed(0)}/255, darkest 1% kept at ${bk.lowAfter.toFixed(0)}/255`,
+    { deepEV: r2(deepEV), deep255: r2(bk.deepBefore), low255: r2(bk.lowBefore), after255: r2(bk.deepAfter), clipLo: r3(R.global.clipLo) });
   p.tone.whites = 0;
   // Global contrast: flat scenes (low log-spread) get a little more, contrasty ones none.
   const spread = R.global.sdEV;

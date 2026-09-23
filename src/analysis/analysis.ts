@@ -212,5 +212,5 @@ export function lumPercentiles(hist: number[]): AnalysisReport["lum"] {
     }
     return Math.pow(2, 4);
   };
-  return { p01: at(0.01), p05: at(0.05), p50: at(0.5), p95: at(0.95), p99: at(0.99), p999: at(0.999) };
+  return { p001: at(0.001), p01: at(0.01), p05: at(0.05), p50: at(0.5), p95: at(0.95), p99: at(0.99), p999: at(0.999) };
 }

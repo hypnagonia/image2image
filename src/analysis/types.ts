@@ -70,6 +70,6 @@ export interface AnalysisReport {
   blur: BlurReport;
   blocks: BlockGrid;
   /** Percentiles of scene luminance (linear). */
-  lum: { p01: number; p05: number; p50: number; p95: number; p99: number; p999: number };
+  lum: { p001: number; p01: number; p05: number; p50: number; p95: number; p99: number; p999: number };
   timings: Record<string, number>;
 }

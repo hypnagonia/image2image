@@ -148,6 +148,23 @@ sharp, sharpened content — measured, see `scripts/models/export.py`); dehaze
 needs distant regions whose dark channel is raised relative to near ones and
 whose local contrast is lower, and is capped so atmosphere never disappears.
 
+### Black point
+
+Whether black renders as black is a property of the *rendering*, not of the
+input histogram, so the engine pushes the scene's darkest tones through the
+tone curve it is about to use (`src/decision/blacks.ts`): the darkest 0.1% and
+1%, plus the ≈ 2 EV × `tone.shadows` the local tone stage lifts them by, read
+out as display code values.
+
+* A scene "has black" when its darkest 0.1% sits ≥ 8.5 EV below white (shadow
+  material) or the source already clips to black. Haze, fog and open shade do
+  not, and are left alone — inventing black there would only destroy them.
+* If it has black and the darkest 0.1% still renders above code 5 (milky), the
+  black point is deepened just enough to land it near code 2, while the
+  darkest 1% must stay at or above code 4 so shadow separation survives.
+* The decision trace states the measurement either way ("blacks are solid:
+  darkest 0.1% renders at 3/255").
+
 ## Look profiles
 
 A profile is JSON (`src/looks/profile.ts`, schema below) plus an optional
