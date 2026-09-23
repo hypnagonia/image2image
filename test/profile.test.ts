@@ -75,3 +75,28 @@ test("spatial refinement: category defaults, old profiles upgraded, values clamp
   const personProtect = u[(15 + 6) * 4 + 3];
   assert.equal(personProtect, 0);
 });
+
+test("colour shaping: lightness→saturation table and opponent separation", async () => {
+  const { parseProfile, makeProfile, neutralProfile, hueCurveTable, HUE_CURVE_SIZE, profileUniforms, PROFILE_VEC4S } = await import("../src/looks/profile.ts");
+  // Defaults are neutral: the second table row is a flat ×1.
+  const tab = hueCurveTable(neutralProfile());
+  assert.equal(tab.length, HUE_CURVE_SIZE * 2 * 4);
+  for (const i of [0, 90, 200, HUE_CURVE_SIZE - 1]) assert.ok(Math.abs(tab[(HUE_CURVE_SIZE + i) * 4] - 1) < 1e-6);
+  // A curve that keeps mid-tones and calms highlights is sampled over lightness.
+  const p = makeProfile({ id: "f", name: "f", satByLum: [[0, 0.4], [0.5, 0.6], [1, 0.3]] });
+  const t2 = hueCurveTable(p);
+  const at = (l: number) => t2[(HUE_CURVE_SIZE + Math.round(l * (HUE_CURVE_SIZE - 1))) * 4];
+  assert.ok(at(0.5) > at(0) && at(0.5) > at(1), `mid ${at(0.5)} vs ${at(0)} / ${at(1)}`);
+  assert.ok(Math.abs(at(0.5) - 1.2) < 0.02);
+  // Opponent axis and amount reach the uniform block; values are clamped on import.
+  const q = parseProfile(JSON.stringify({ id: "o", name: "o", opponent: { axis: 90, amount: 5 } }));
+  assert.equal(q.opponent.amount, 1);
+  const u = profileUniforms(q, true, false, 33);
+  assert.equal(u.length, PROFILE_VEC4S * 4);
+  const o = 33 * 4;
+  assert.ok(Math.abs(u[o] - Math.cos(Math.PI / 2)) < 1e-6 && Math.abs(u[o + 1] - 1) < 1e-6 && u[o + 2] === 1);
+  // An old profile without these fields stays neutral.
+  const old = parseProfile(JSON.stringify({ id: "x", name: "x" }));
+  assert.equal(old.opponent.amount, 0);
+  assert.deepEqual(old.satByLum, [[0, 0.5], [1, 0.5]]);
+});

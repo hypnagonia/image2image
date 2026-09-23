@@ -134,6 +134,19 @@ export interface LookProfile {
    * saturation (`focus`).
    */
   palette: { anchors: PaletteAnchor[]; pull: number; focus: number; width: number };
+  /**
+   * Luminance → saturation: x = displayed lightness (OkLab L, 0…1), y = 0.5 is
+   * "no change", 1 = ×2. Rich mid-tones with calmer highlights and shadows are
+   * a film trait; this is the control for it.
+   */
+  satByLum: Pt[];
+  /**
+   * Opponent (warm ↔ cool) separation. `axis` is the OkLab hue of the warm
+   * pole in degrees (its opposite is the cool pole); `amount` > 0 stretches
+   * colour along that axis and compresses it across, so warm and cool pull
+   * apart without hues being rotated; < 0 brings them together.
+   */
+  opponent: { axis: number; amount: number };
   /** Semantic- and depth-aware refinement of this look (see SpatialLook). */
   spatial: SpatialLook;
   intensity: number;
@@ -160,6 +173,8 @@ export function neutralProfile(): LookProfile {
     depth: {},
     hueCurves: { hue: flatHue(), sat: flatHue(), lum: flatHue() },
     palette: { anchors: [], pull: 0, focus: 0, width: 40 },
+    satByLum: flatHue(),
+    opponent: { axis: 65, amount: 0 },
     spatial: defaultSpatial("neutral"),
     intensity: 1,
   };
@@ -184,6 +199,8 @@ export function makeProfile(p: DeepPartial<LookProfile> & { id: string; name: st
     depth: (p.depth as LookProfile["depth"]) ?? {},
     hueCurves: { ...n.hueCurves, ...(p.hueCurves as object) },
     palette: { ...n.palette, ...(p.palette as object), anchors: ((p.palette?.anchors as PaletteAnchor[]) ?? []).slice(0, MAX_ANCHORS) },
+    satByLum: (p.satByLum as Pt[]) ?? flatHue(),
+    opponent: { ...n.opponent, ...(p.opponent as object) },
     spatial: (() => {
       const d = defaultSpatial((p.category ?? "custom") as Category);
       return { semantic: { ...d.semantic, ...(p.spatial?.semantic as object) }, depth: { ...d.depth, ...(p.spatial?.depth as object) } };
@@ -268,6 +285,8 @@ export function parseProfile(text: string): LookProfile {
         .map((a: any) => ({ hue: num(a?.hue, 0, 360, 0), sat: num(a?.sat, 0, 2, 1), weight: num(a?.weight, 0, 1, 1) })),
       pull: num(j.palette?.pull, 0, 1, 0), focus: num(j.palette?.focus, 0, 1, 0), width: num(j.palette?.width, 10, 90, 40),
     },
+    satByLum: pts(j.satByLum) ?? flatHue(),
+    opponent: { axis: num(j.opponent?.axis, 0, 359, 65), amount: num(j.opponent?.amount, -1, 1, 0) },
     // Profiles saved before spatial refinement existed get their category's defaults.
     spatial: (() => {
       const def = defaultSpatial(cat);
@@ -297,7 +316,7 @@ export function normalizeProfile(p: LookProfile): LookProfile {
 export const PROFILE_CURVE_SIZE = 1024;
 export const DEPTH_CURVE_SIZE = 64;
 /** vec4 count of the profile uniform block (keep in sync with render_tone.wgsl `Prof`). */
-export const PROFILE_VEC4S = 4 + 8 + 3 + 11 + 1 + MAX_ANCHORS + 3;
+export const PROFILE_VEC4S = 4 + 8 + 3 + 11 + 1 + MAX_ANCHORS + 3 + 1;
 
 const smooth = (e0: number, e1: number, x: number) => { const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
 
@@ -387,16 +406,21 @@ export function periodicCurve(points: Pt[]): (x: number) => number {
 
 export const HUE_CURVE_SIZE = 360;
 
-/** 360×1 table: (hue shift rad, chroma factor, L shift, 0) per OkLab hue degree. */
+/**
+ * 360×2 table. Row 0, per OkLab hue degree: (hue shift rad, chroma factor,
+ * L shift, 0). Row 1, per displayed lightness (x = L): (chroma factor, 0, 0, 0).
+ */
 export function hueCurveTable(p: LookProfile): Float32Array {
   const fh = periodicCurve(p.hueCurves.hue), fs = periodicCurve(p.hueCurves.sat), fl = periodicCurve(p.hueCurves.lum);
-  const out = new Float32Array(HUE_CURVE_SIZE * 4);
+  const fsl = monotoneCurve(p.satByLum.map(([x, y]) => ({ x, y })));
+  const out = new Float32Array(HUE_CURVE_SIZE * 2 * 4);
   for (let i = 0; i < HUE_CURVE_SIZE; i++) {
     const x = i / HUE_CURVE_SIZE;
     out[i * 4] = ((fh(x) - 0.5) * 2 * 60 * Math.PI) / 180;
     out[i * 4 + 1] = fs(x) * 2;
     out[i * 4 + 2] = (fl(x) - 0.5) * 0.5;
     out[i * 4 + 3] = 0;
+    out[(HUE_CURVE_SIZE + i) * 4] = Math.max(0, fsl(i / (HUE_CURVE_SIZE - 1)) * 2);
   }
   return out;
 }
@@ -455,7 +479,9 @@ export function profileUniforms(p: LookProfile, enabled: boolean, lutOn: boolean
     const a = anchors[i];
     v4(a ? (a.hue * Math.PI) / 180 : 0, a?.sat ?? 1, a?.weight ?? 0, 0);
   }
-  // 33..35: spatial refinement — (skin, sky, foliage, urban), (emissive, foreground,
+  // 33: opponent separation (cos, sin of the warm pole, amount)
+  v4(Math.cos((p.opponent.axis * Math.PI) / 180), Math.sin((p.opponent.axis * Math.PI) / 180), p.opponent.amount, 0);
+  // 34..36: spatial refinement — (skin, sky, foliage, urban), (emissive, foreground,
   // background contrast, background saturation), (background cooling, distant, _, _)
   const ss = sp.semantic, sd = sp.depth;
   v4(ss.skin, ss.sky, ss.foliage, ss.urban);

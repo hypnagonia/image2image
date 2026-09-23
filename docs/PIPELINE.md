@@ -170,6 +170,8 @@ stacking); user adjustments stay in the technical layer.
   "semantic": { "person": { "hue": 0, "sat": 0, "lum": 0, "protect": 0.65 } },
   "depth": { "saturation": [0.06, 0, -0.18], "haze": [0, 0.02, 0.08] },   // near, middle, far
   "hueCurves": { "hue": [[0,0.5],[1,0.5]], "sat": [[0,0.5],[1,0.5]], "lum": [[0,0.5],[1,0.5]] },  // x = OkLab hue/360, periodic; 0.5 = no change
+  "satByLum": [[0,0.5],[1,0.5]],                      // x = OkLab lightness; 0.5 = no change, 1 = ×2
+  "opponent": { "axis": 65, "amount": 0.25 },         // warm pole (OkLab hue°), warm↔cool separation −1…1
   "palette": { "anchors": [{ "hue": 68, "sat": 1.1, "weight": 1 }, { "hue": 200, "sat": 1, "weight": 1 }],
                "pull": 0.55, "focus": 0.5, "width": 38 },
   "spatial": { "semantic": { "skin": 1, "sky": 0.6, "foliage": 0.6, "urban": 0.5, "emissive": 0.8 },
@@ -226,8 +228,20 @@ Priority: **skin → semantic objects → global palette → depth.**
 * Not applicable here: the app has no halation, bloom, grain or vignette
   stages, so no optical effect is depth-modulated.
 
+* **Creative colour order.** The 3D LUT is the *base look*: it runs right after
+  the profile's tone and RGB curves, and everything after it shapes that
+  result — perceptual hue curves → selective colour (8 hue ranges) → opponent
+  separation → saturation response and luminance→saturation → palette
+  restriction → colour balance. All of it is OkLab, so hue moves never change
+  perceived lightness by themselves.
 * **Rainbow curves** (hue → hue ±60°, hue → saturation ×0–2, hue → luminance
-  ±0.25 L) are periodic cubic curves sampled into a 360-texel table.
+  ±0.25 L) are periodic cubic curves sampled into a 360-texel table; a second
+  row of the same table holds **luminance → saturation** (x = OkLab L, ×0–2),
+  the film trait of rich mid-tones with calmer shadows and highlights.
+* **Opponent separation** stretches colour along the warm↔cool axis (`axis` =
+  the warm pole's OkLab hue) and compresses it across that axis: ±35% / ∓25%
+  at amount 1. Unlike palette anchors it does not rotate hues, so teal/orange
+  separation grows without colours snapping to a target hue.
 * **Palette restriction** (a film's colour script, category "cinema palette"):
   each hue is pulled toward the anchors by a closeness-weighted average of its
   offsets (a hue between two anchors drifts toward both instead of snapping),

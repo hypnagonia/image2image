@@ -23,14 +23,16 @@ export function rainbowGradient(): string {
 }
 
 export type Pt = [number, number];
+export type Mode = "curve" | "rainbow" | "level";
 
 export class CurveEditor {
   readonly el: HTMLCanvasElement;
   private pts: Pt[] = [[0, 0], [1, 1]];
   private color = "#ece9e3";
   private drag = -1;
-  /** Rainbow mode: x is the hue circle (periodic), y = 0.5 is "no change". */
-  private rainbow = false;
+  /** curve: plain 0…1 point curve. rainbow: x is the hue circle (periodic), y = 0.5 is "no change".
+   *  level: x is lightness (black → white), y = 0.5 is "no change". */
+  private mode: Mode = "curve";
   onChange?: (pts: Pt[]) => void;
 
   constructor(size = 220) {
@@ -46,12 +48,13 @@ export class CurveEditor {
     this.el.addEventListener("pointercancel", () => this.up());
   }
 
-  set(pts: Pt[], color: string, rainbow = false) {
+  set(pts: Pt[], color: string, mode: Mode = "curve") {
     this.pts = pts.map((p) => [p[0], p[1]] as Pt).sort((a, b) => a[0] - b[0]);
     this.color = color;
-    this.rainbow = rainbow;
-    this.el.style.height = rainbow ? Math.round(parseInt(this.el.style.width) * 0.6) + "px" : this.el.style.width;
-    this.el.height = rainbow ? Math.round(this.el.width * 0.6) : this.el.width;
+    this.mode = mode;
+    const wide = mode !== "curve";
+    this.el.style.height = wide ? Math.round(parseInt(this.el.style.width) * 0.6) + "px" : this.el.style.width;
+    this.el.height = wide ? Math.round(this.el.width * 0.6) : this.el.width;
     this.draw();
   }
 
@@ -89,7 +92,7 @@ export class CurveEditor {
       const yy = Math.min(1, Math.max(0, y));
       this.pts[i] = [this.pts[i][0], yy];
       // The hue circle wraps: red at 0 and red at 1 are the same colour.
-      if (this.rainbow) { this.pts[0] = [0, yy]; this.pts[last] = [1, yy]; }
+      if (this.mode === "rainbow") { this.pts[0] = [0, yy]; this.pts[last] = [1, yy]; }
     } else {
       const lo = this.pts[i - 1][0] + 0.02, hi = this.pts[i + 1][0] - 0.02;
       this.pts[i] = [Math.min(hi, Math.max(lo, x)), Math.min(1, Math.max(0, y))];
@@ -106,7 +109,19 @@ export class CurveEditor {
     const c = this.el.getContext("2d")!;
     const W = this.el.width, H = this.el.height;
     c.clearRect(0, 0, W, H);
-    if (this.rainbow) {
+    if (this.mode === "level") {
+      // Lightness band along the bottom, neutral line at y = 0.5.
+      const g = c.createLinearGradient(0, 0, W, 0);
+      g.addColorStop(0, "#000"); g.addColorStop(1, "#fff");
+      c.fillStyle = g;
+      c.globalAlpha = 0.16; c.fillRect(0, 0, W, H); c.globalAlpha = 1;
+      c.fillRect(0, H - 8 * (W / 220), W, 8 * (W / 220));
+      c.strokeStyle = "rgba(255,255,255,0.35)";
+      c.setLineDash([4, 4]);
+      c.beginPath(); c.moveTo(0, H / 2); c.lineTo(W, H / 2); c.stroke();
+      c.setLineDash([]);
+    }
+    if (this.mode === "rainbow") {
       // Hue band along the bottom, faint wash behind, neutral line at y = 0.5.
       for (let i = 0; i < 90; i++) {
         c.fillStyle = hueColor((i / 90) * 360);
@@ -126,11 +141,11 @@ export class CurveEditor {
       c.beginPath(); c.moveTo((i / 4) * W, 0); c.lineTo((i / 4) * W, H); c.stroke();
       c.beginPath(); c.moveTo(0, (i / 4) * H); c.lineTo(W, (i / 4) * H); c.stroke();
     }
-    if (!this.rainbow) {
+    if (this.mode === "curve") {
       c.strokeStyle = "rgba(255,255,255,0.18)";
       c.beginPath(); c.moveTo(0, H); c.lineTo(W, 0); c.stroke();
     }
-    const f = this.rainbow ? periodicCurve(this.pts) : monotoneCurve(this.pts.map(([x, y]) => ({ x, y })));
+    const f = this.mode === "rainbow" ? periodicCurve(this.pts) : monotoneCurve(this.pts.map(([x, y]) => ({ x, y })));
     c.strokeStyle = this.color;
     c.lineWidth = 2 * (W / 220);
     c.beginPath();

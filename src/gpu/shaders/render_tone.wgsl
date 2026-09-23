@@ -17,12 +17,13 @@
 //   colour        saturation/vibrance + per-region saturation/hue in OkLab
 //   ── end of the technical transform ──
 //   look profile  the creative layer (apply_profile): profile tone curve → RGB
-//                 curves → hue-dependent shaping → saturation response →
-//                 luminance-dependent colour balance → 3D LUT (= the global
-//                 palette) → spatial refinement: semantic (sky, foliage, urban,
-//                 lights) → profile semantic rules → depth curves → depth
-//                 refinement (foreground / background / distance) → intensity
-//                 blend in OkLab → skin guard
+//                 curves → 3D LUT (the base look) → hue shaping and hue curves
+//                 → opponent (warm/cool) separation → saturation response and
+//                 luminance→saturation → palette restriction → colour balance
+//                 → spatial refinement: semantic (sky, foliage, urban, lights)
+//                 → profile semantic rules → depth curves → depth refinement
+//                 (foreground / background / distance) → intensity blend in
+//                 OkLab → skin guard
 //
 // Output: display-encoded Display P3 in rgb; alpha = per-pixel sharpening
 // multiplier (semantic × depth) for the detail pass.
@@ -71,12 +72,13 @@ struct Prof {
   sem: array<vec4<f32>, 11>,  // per semantic group: hue (rad), sat, lum, protect
   pal: vec4<f32>,             // anchor count, pull, focus, width (rad)
   anc: array<vec4<f32>, 6>,   // anchors: hue (rad), chroma ×, weight, _
+  opp: vec4<f32>,             // opponent separation: cos, sin of the warm pole, amount, _
   spa: array<vec4<f32>, 3>,   // spatial: (skin, sky, foliage, urban), (emissive, fg, bg contrast, bg sat), (bg cooling, distant, _, _)
 }
 @group(0) @binding(15) var<uniform> prof: Prof;
 @group(0) @binding(16) var prof_curve: texture_2d<f32>;   // r master tone, g/b/a = R/G/B curves
 @group(0) @binding(17) var depth_tab: texture_2d<f32>;    // 64×2: (sat, contrast, temp, haze), (black)
-@group(0) @binding(18) var hue_tab: texture_2d<f32>;      // 360×1 hue curves: (hue shift rad, chroma ×, L shift)
+@group(0) @binding(18) var hue_tab: texture_2d<f32>;      // 360×2: row 0 hue curves (hue shift rad, chroma ×, L shift), row 1 lightness → chroma ×
 
 const PI = 3.14159265;
 const P3_FROM_SRGB = mat3x3<f32>(
@@ -131,7 +133,14 @@ fn apply_profile(e_tech: vec3<f32>, g: array<f32, 12>, dist: f32) -> vec3<f32> {
   e = vec3<f32>(textureSampleLevel(prof_curve, lsamp, vec2<f32>(e.r, 0.5), 0.0).g,
                 textureSampleLevel(prof_curve, lsamp, vec2<f32>(e.g, 0.5), 0.0).b,
                 textureSampleLevel(prof_curve, lsamp, vec2<f32>(e.b, 0.5), 0.0).a);
-  // 3. hue-dependent shaping: raised-cosine windows around 8 centres, normalised
+  // 3. the base look: the 3D LUT defines the broad palette; everything below
+  //    shapes that result rather than replacing it
+  if (prof.f.z > 0.0) {
+    let n = prof.f.w;
+    let uvw = clamp(e, vec3<f32>(0.0), vec3<f32>(1.0)) * ((n - 1.0) / n) + 0.5 / n;
+    e = mix(e, textureSampleLevel(look, lsamp, uvw, 0.0).rgb, prof.f.z);
+  }
+  // 4. hue-dependent shaping: raised-cosine windows around 8 centres, normalised
   var lab = enc_to_lab(e);
   var C = length(lab.yz);
   var h = atan2(lab.z, lab.y);
@@ -155,13 +164,31 @@ fn apply_profile(e_tech: vec3<f32>, g: array<f32, 12>, dist: f32) -> vec3<f32> {
     C *= mix(1.0, max(hc.y, 0.0), cw);
     lab.x += cw * hc.z;
   }
-  // 4. saturation response: global, per luminance zone, weak-colour boost, high-chroma compression
+  // 5. opponent separation: stretch colour along the warm ↔ cool axis and
+  //    compress it across, so the two poles pull apart without hues rotating
+  if (abs(prof.opp.z) > 1e-4) {
+    let u = prof.opp.xy;
+    let v = vec2<f32>(-u.y, u.x);
+    var ab0 = vec2<f32>(cos(h), sin(h)) * C;
+    let along = dot(ab0, u);
+    let across = dot(ab0, v);
+    ab0 = u * (along * (1.0 + 0.35 * prof.opp.z)) + v * (across * (1.0 - 0.25 * prof.opp.z));
+    C = length(ab0);
+    if (C > 1e-6) { h = atan2(ab0.y, ab0.x); }
+  }
+  // 6. saturation response: global, per luminance zone, weak-colour boost, high-chroma compression
   let z = zones(lab.x);
   C *= prof.sat.x * (z.x * prof.zsat.x + z.y + z.z * prof.zsat.y);
   C *= 1.0 + prof.sat.w * (1.0 - smoothstep(0.0, 0.12, C));
+  // Luminance → saturation (film trait: rich mid-tones, calmer highlights and shadows).
+  {
+    let xl = clamp(lab.x, 0.0, 1.0) * 359.0;
+    let i0 = i32(floor(xl)); let i1 = min(i0 + 1, 359);
+    C *= mix(textureLoad(hue_tab, vec2<i32>(i0, 1), 0).x, textureLoad(hue_tab, vec2<i32>(i1, 1), 0).x, fract(xl));
+  }
   let knee = prof.sat.y;
   if (C > knee && prof.sat.z > 0.0) { let x = C - knee; C = knee + x / (1.0 + prof.sat.z * x / knee); }
-  // 4b. palette restriction: pull hues toward the anchors (closeness-weighted, so a
+  // 6b. palette restriction: pull hues toward the anchors (closeness-weighted, so a
   //     hue between two anchors drifts toward both), desaturate what is far from all
   let na = u32(prof.pal.x);
   if (na > 0u && C > 1e-4) {
@@ -179,18 +206,12 @@ fn apply_profile(e_tech: vec3<f32>, g: array<f32, 12>, dist: f32) -> vec3<f32> {
     if (wsum > 1e-4) { C *= mix(1.0, cmul / wsum, pc * smoothstep(0.0, 0.3, wsum)); }
     C *= 1.0 - prof.pal.z * (1.0 - near);
   }
-  // 5. luminance-dependent colour balance (split toning), fading out toward black and white
+  // 7. luminance-dependent colour balance (split toning), fading out toward black and white
   let edge = smoothstep(0.02, 0.12, lab.x) * (1.0 - smoothstep(0.95, 1.0, lab.x));
   var ab = vec2<f32>(cos(h), sin(h)) * C + edge * (prof.bal[0].xy * z.x + prof.bal[1].xy * z.y + prof.bal[2].xy * z.z);
   e = lab_to_enc(vec3<f32>(lab.x, ab));
-  // 6. 3D LUT
-  if (prof.f.z > 0.0) {
-    let n = prof.f.w;
-    let uvw = clamp(e, vec3<f32>(0.0), vec3<f32>(1.0)) * ((n - 1.0) / n) + 0.5 / n;
-    e = mix(e, textureSampleLevel(look, lsamp, uvw, 0.0).rgb, prof.f.z);
-  }
   lab = enc_to_lab(e);
-  // 6b. semantic refinement of the palette's result (bounded; soft masks)
+  // 8. semantic refinement of the palette's result (bounded; soft masks)
   {
     var Lr = lab.x; var Cr = length(lab.yz); var hr = atan2(lab.z, lab.y);
     let sp0 = prof.spa[0];
@@ -230,7 +251,7 @@ fn apply_profile(e_tech: vec3<f32>, g: array<f32, 12>, dist: f32) -> vec3<f32> {
     }
     lab = vec3<f32>(Lr, ab2);
   }
-  // 7. semantic rules (mask-weighted, soft)
+  // 9. semantic rules (mask-weighted, soft)
   var sh = 0.0; var sat = 0.0; var sl = 0.0; var protect = 0.0; var tot = 1e-4;
   for (var k = 0u; k < 11u; k++) {
     let w = max(gw[k], 0.0);
@@ -243,7 +264,7 @@ fn apply_profile(e_tech: vec3<f32>, g: array<f32, 12>, dist: f32) -> vec3<f32> {
   if (abs(sh) > 1e-5) { let cs = cos(sh); let sn = sin(sh); ab = vec2<f32>(ab.x * cs - ab.y * sn, ab.x * sn + ab.y * cs); }
   ab *= max(0.0, 1.0 + sat);
   var L = lab.x + 0.25 * sl;
-  // 8. depth curves (continuous in distance) — never on skin: a face farther away
+  // 10. depth curves (continuous in distance) — never on skin: a face farther away
   //    must not turn colder, darker or greyer
   let dskin = 1.0 - skin;
   if (prof.zsat.z > 0.5) {
@@ -259,7 +280,7 @@ fn apply_profile(e_tech: vec3<f32>, g: array<f32, 12>, dist: f32) -> vec3<f32> {
     L = lab3.x; ab = lab3.yz;
     L = blk + L * (1.0 - blk);
   }
-  // 8b. depth refinement: continuous foreground / background / distance weights,
+  // 11. depth refinement: continuous foreground / background / distance weights,
   //     never on skin or sky, bounded to a few percent
   {
     let sp1 = prof.spa[1]; let sp2 = prof.spa[2];
@@ -282,11 +303,11 @@ fn apply_profile(e_tech: vec3<f32>, g: array<f32, 12>, dist: f32) -> vec3<f32> {
     let l3 = mix(vec3<f32>(L, ab), vec3<f32>(0.78, prof.haze.x, prof.haze.y), hz);
     L = l3.x; ab = l3.yz;
   }
-  // 9. intensity: blend with the technical result in OkLab (perceptual), minus protected
+  // 12. intensity: blend with the technical result in OkLab (perceptual), minus protected
   //    regions; skin keeps ~35% of the palette — graded, never disconnected from it
   let k = clamp(prof.f.y, 0.0, 1.0) * (1.0 - protect) * (1.0 - 0.65 * skin);
   var res = mix(lab_t, vec3<f32>(L, ab), k);
-  // 10. skin guard: hue within ±7° of the technical skin hue (no green, magenta or teal
+  // 13. skin guard: hue within ±7° of the technical skin hue (no green, magenta or teal
   //     skin), chroma at most +12%, lightness within −0.05 … +0.04 (keeps the rolloff)
   if (skin > 1e-3 && Ct > 0.01) {
     let Cr = length(res.yz);

@@ -100,11 +100,11 @@ export class Renderer {
       if (!this.depthTab) this.depthTab = gpu.tex("profileDepth", DEPTH_CURVE_SIZE, 2, "rgba16float", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
       gpu.device.queue.writeTexture({ texture: this.depthTab }, floatsToHalves(depthTable(prof)), { bytesPerRow: DEPTH_CURVE_SIZE * 8, rowsPerImage: 2 }, { width: DEPTH_CURVE_SIZE, height: 2 });
     }
-    const hk = JSON.stringify(prof.hueCurves);
+    const hk = JSON.stringify([prof.hueCurves, prof.satByLum]); // both live in this table
     if (hk !== this.hueKey) {
       this.hueKey = hk;
-      if (!this.hueTab) this.hueTab = gpu.tex("profileHue", HUE_CURVE_SIZE, 1, "rgba16float", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
-      gpu.device.queue.writeTexture({ texture: this.hueTab }, floatsToHalves(hueCurveTable(prof)), { bytesPerRow: HUE_CURVE_SIZE * 8 }, { width: HUE_CURVE_SIZE, height: 1 });
+      if (!this.hueTab) this.hueTab = gpu.tex("profileHue", HUE_CURVE_SIZE, 2, "rgba16float", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
+      gpu.device.queue.writeTexture({ texture: this.hueTab }, floatsToHalves(hueCurveTable(prof)), { bytesPerRow: HUE_CURVE_SIZE * 8, rowsPerImage: 2 }, { width: HUE_CURVE_SIZE, height: 2 });
     }
     const look = (prof.lut.id && this.looks().find((l) => l.id === prof.lut.id)) || LOOKS[0];
     // Imported tables keep their native size (17/33/65); procedural looks use the profile's size.

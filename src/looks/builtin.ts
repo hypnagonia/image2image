@@ -33,6 +33,7 @@ export const BUILTIN_PROFILES: LookProfile[] = [
     lut: { id: "film-crosstalk", strength: 0.5 },
     depth: { contrast: [0.02, 0, -0.06], haze: [0, 0.02, 0.07] },
     semantic: skin,
+    satByLum: [[0, 0.44], [0.45, 0.56], [1, 0.42]],
   }),
 
   makeProfile({
@@ -55,6 +56,7 @@ export const BUILTIN_PROFILES: LookProfile[] = [
     hsl: { green: { hue: 18, sat: -0.3, lum: -0.05 }, cyan: { hue: 0, sat: 0.1, lum: -0.03 }, blue: { hue: -10, sat: 0.05, lum: -0.03 }, orange: { hue: 0, sat: 0.05, lum: 0.02 } },
     lut: { id: "film-crosstalk", strength: 0.4 },
     semantic: { person: { hue: 0, sat: 0, lum: 0, protect: 0.65 }, water: { hue: -6, sat: 0.08, lum: 0, protect: 0 } },
+    opponent: { axis: 65, amount: 0.25 },
   }),
 
   makeProfile({

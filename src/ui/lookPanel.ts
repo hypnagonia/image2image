@@ -266,11 +266,11 @@ export function createLookPanel(root: HTMLElement, ctx: Ctx) {
     commit();
   };
   const hueEd = new CurveEditor(260);
-  let hueChan: "hue" | "sat" | "lum" = "hue";
+  let hueChan: "hue" | "sat" | "lum" | "satlum" = "hue";
   hueEd.onChange = (pts) => {
     const q = editable();
     if (!q) return;
-    q.hueCurves[hueChan] = pts;
+    if (hueChan === "satlum") q.satByLum = pts; else q.hueCurves[hueChan] = pts;
     commit();
   };
   let hueRange: (typeof HUE_RANGES)[number] = "green";
@@ -353,7 +353,7 @@ export function createLookPanel(root: HTMLElement, ctx: Ctx) {
     if (editor.hidden || !p) return;
     const curvePts = curveChan === "master" ? p.tone.curve : p.rgbCurves[curveChan];
     curveEd.set(curvePts, { master: "#ece9e3", r: "#ff6b6b", g: "#6bdc7a", b: "#6b9bff" }[curveChan]);
-    hueEd.set(p.hueCurves[hueChan], "#ffffff", true);
+    hueEd.set(hueChan === "satlum" ? p.satByLum : p.hueCurves[hueChan], "#ffffff", hueChan === "satlum" ? "level" : "rainbow");
     const dc = (p.depth[depthParam] ?? [0, 0, 0]) as DepthCurve;
     const depthRange: Record<string, [number, number, number]> = { saturation: [-1, 1, 0.01], contrast: [-0.5, 0.5, 0.01], temperature: [-0.05, 0.05, 0.001], haze: [0, 0.6, 0.01], blackLevel: [-0.05, 0.15, 0.001] };
     const [dlo, dhi, dst] = depthRange[depthParam];
@@ -370,6 +370,10 @@ export function createLookPanel(root: HTMLElement, ctx: Ctx) {
     void sg;
     editor.replaceChildren(
       el("div", { class: "row" }, el("label", { text: t("ed.name") }), nameIn, el("span")),
+      el("div", { class: "group-title", text: t("ed.lut") }),
+      el("div", { class: "actions" }, lutSel, sizeSel),
+      num(t("ed.lutStrength"), (q) => q.lut.strength, (q, v) => (q.lut.strength = v), 0, 1, 0.01),
+      el("p", { class: "muted", text: t("ed.lutHint") }),
       el("div", { class: "group-title", text: t("ed.tone") }),
       num(t("ed.contrast"), (q) => q.tone.contrast, (q, v) => (q.tone.contrast = v), -0.5, 0.8, 0.01),
       num(t("ed.blackPoint"), (q) => q.tone.blackPoint, (q, v) => (q.tone.blackPoint = v), -0.05, 0.15, 0.001, (v) => (v * 100).toFixed(1)),
@@ -381,17 +385,21 @@ export function createLookPanel(root: HTMLElement, ctx: Ctx) {
       el("div", { class: "curve-wrap" }, curveEd.el),
       el("p", { class: "muted", text: t("ed.curvesHint") }),
       el("div", { class: "group-title", text: t("ed.rainbow") }),
-      chips(["hue", "sat", "lum"] as const, hueChan, (v) => (hueChan = v)),
+      chips(["hue", "sat", "lum", "satlum"] as const, hueChan, (v) => (hueChan = v)),
       el("div", { class: "curve-wrap" }, hueEd.el),
-      el("p", { class: "muted", text: t("ed.rainbowHint") }),
-      el("div", { class: "group-title", text: t("ed.paletteTitle") }),
-      el("p", { class: "muted", text: t("ed.paletteHint") }),
-      ...paletteRows(p),
+      el("p", { class: "muted", text: t(hueChan === "satlum" ? "ed.satLumHint" : "ed.rainbowHint") }),
       el("div", { class: "group-title", text: t("ed.hsl") }),
       chips(HUE_RANGES, hueRange, (v) => (hueRange = v)),
       num(t("ed.hue"), (q) => q.hsl[hueRange].hue, (q, v) => (q.hsl[hueRange].hue = v), -30, 30, 0.5, (v) => `${v.toFixed(1)}°`),
       num(t("ed.saturation"), (q) => q.hsl[hueRange].sat, (q, v) => (q.hsl[hueRange].sat = v), -1, 1, 0.01),
       num(t("ed.luminance"), (q) => q.hsl[hueRange].lum, (q, v) => (q.hsl[hueRange].lum = v), -0.5, 0.5, 0.01),
+      el("div", { class: "group-title", text: t("ed.opponent") }),
+      hueSlider(t("ed.oppAxis"), (q) => q.opponent.axis, (q, v) => (q.opponent.axis = v)),
+      num(t("ed.oppAmount"), (q) => q.opponent.amount, (q, v) => (q.opponent.amount = v), -1, 1, 0.01),
+      el("p", { class: "muted", text: t("ed.oppHint") }),
+      el("div", { class: "group-title", text: t("ed.paletteTitle") }),
+      el("p", { class: "muted", text: t("ed.paletteHint") }),
+      ...paletteRows(p),
       el("div", { class: "group-title", text: t("ed.balance") }),
       ...balanceRows("shadows"), ...balanceRows("midtones"), ...balanceRows("highlights"),
       el("div", { class: "group-title", text: t("ed.satResponse") }),
@@ -401,9 +409,6 @@ export function createLookPanel(root: HTMLElement, ctx: Ctx) {
       num(t("ed.weak"), (q) => q.saturation.lowBoost, (q, v) => (q.saturation.lowBoost = v), -0.5, 1, 0.01),
       num(t("ed.knee"), (q) => q.saturation.knee, (q, v) => (q.saturation.knee = v), 0.05, 0.4, 0.005, (v) => v.toFixed(3)),
       num(t("ed.compression"), (q) => q.saturation.compression, (q, v) => (q.saturation.compression = v), 0, 3, 0.05),
-      el("div", { class: "group-title", text: t("ed.lut") }),
-      el("div", { class: "actions" }, lutSel, sizeSel),
-      num(t("ed.lutStrength"), (q) => q.lut.strength, (q, v) => (q.lut.strength = v), 0, 1, 0.01),
       el("div", { class: "group-title", text: t("ed.semantic") }),
       chips(GROUPS.filter((g) => g !== "other"), semGroup, (v) => (semGroup = v), (g) => t(`group.${g}`)),
       ...(["hue", "sat", "lum", "protect"] as const).map((k) => {
