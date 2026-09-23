@@ -148,6 +148,9 @@ export const pt: Dict = {
   "adj.scunet": "Redução de ruído neural (SCUNet, lenta)",
   "adj.nafnet": "Restaurar (NAFNet)",
   "adj.reset": "Redefinir tudo para automático",
+  "adj.curves": "Curvas (esta foto)",
+  "adj.curvesHint": "Toque para adicionar um ponto, arraste para mover, arraste para fora da caixa para remover. O visual tem curvas próprias (Visual → Editar visual).",
+  "adj.curvesReset": "Redefinir curvas",
   "adj.networksHint": "As redes neurais rodam automaticamente só onde há ruído ou desfoque medido; estes botões as aplicam no quadro inteiro.",
   "adj.amberHint": "Valores em âmbar são os automáticos. Toque duas vezes em um rótulo para restaurá-lo.",
 

@@ -148,6 +148,9 @@ export const es: Dict = {
   "adj.scunet": "Reducción de ruido neuronal (SCUNet, lenta)",
   "adj.nafnet": "Restaurar (NAFNet)",
   "adj.reset": "Restablecer todo a automático",
+  "adj.curves": "Curvas (esta foto)",
+  "adj.curvesHint": "Toca para añadir un punto, arrastra para moverlo, sácalo del recuadro para borrarlo. El look tiene sus propias curvas (Look → Editar look).",
+  "adj.curvesReset": "Restablecer curvas",
   "adj.networksHint": "Las redes neuronales se aplican automáticamente solo donde se mide ruido o desenfoque; estos botones las aplican a todo el encuadre.",
   "adj.amberHint": "Los valores en ámbar son los automáticos. Toca dos veces una etiqueta para restaurarla.",
 

@@ -8,6 +8,7 @@ import type { Decision, Params } from "./decision/params.ts";
 import { createLookPanel } from "./ui/lookPanel.ts";
 import { createRegionsPanel } from "./ui/regionsPanel.ts";
 import { normalizeProfile } from "./looks/profile.ts";
+import { CurveEditor } from "./ui/curveEditor.ts";
 import { crashedWhileProcessing, lastStage, markCompleted, markInflight, noteStage, rememberParams, rememberPhoto, restorablePhoto } from "./ui/session.ts";
 import { LANGS, LANG_NAMES, lang, setLang, storedLang, t, tOr, type Lang } from "./ui/i18n.ts";
 
@@ -262,6 +263,8 @@ let currentView: 0 | 1 | 2 = 0;
 let pushTimer = 0;
 // While a slider is held, previews render at a quarter of the pixels (drafts);
 // releasing it renders the full preview once.
+/** A curve that changes nothing. */
+const FLAT_CURVE = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
 let dragging = false;
 document.addEventListener("pointerdown", (e) => { if ((e.target as HTMLElement).matches?.('input[type="range"], .curve-editor')) dragging = true; }, true);
 const endDrag = () => { if (!dragging) return; dragging = false; pushParams(); };
@@ -356,6 +359,41 @@ adjustPane.append(
   slider({ path: "depth.near", label: t("adj.nearDetail"), min: 0.5, max: 1.5, step: 0.01 }),
   slider({ path: "depth.far", label: t("adj.farDetail"), min: 0.2, max: 1.5, step: 0.01 }),
 );
+// Curves for this photo (L, R, G, B), independent of the look's own curves.
+const photoCurve = new CurveEditor(220);
+let photoChan: "l" | "r" | "g" | "b" = "l";
+const photoChips = el("div", { class: "chips" });
+const CURVE_COLOURS = { l: "#ece9e3", r: "#ff6b6b", g: "#6bdc7a", b: "#6b9bff" } as const;
+photoCurve.onChange = (pts) => {
+  if (!params) return;
+  params.curves[photoChan] = pts.map(([x, y]) => ({ x, y }));
+  pushParams();
+};
+const curveResetBtn = el("button", { class: "btn small", text: t("adj.curvesReset") });
+curveResetBtn.onclick = () => {
+  if (!params) return;
+  params.curves = { l: [...FLAT_CURVE], r: [...FLAT_CURVE], g: [...FLAT_CURVE], b: [...FLAT_CURVE] };
+  renderPhotoCurve();
+  pushParams();
+};
+function renderPhotoCurve() {
+  photoChips.replaceChildren(...(["l", "r", "g", "b"] as const).map((c) => {
+    const b = el("button", { class: "chip" + (c === photoChan ? " on" : ""), text: t(`chip.${c === "l" ? "master" : c}`) });
+    b.onclick = () => { photoChan = c; renderPhotoCurve(); };
+    return b;
+  }));
+  const pts = params?.curves[photoChan] ?? FLAT_CURVE;
+  photoCurve.set(pts.map((q) => [q.x, q.y] as [number, number]), CURVE_COLOURS[photoChan]);
+}
+adjustPane.append(
+  el("div", { class: "group-title", text: t("adj.curves") }),
+  photoChips,
+  el("div", { class: "curve-wrap" }, photoCurve.el),
+  el("p", { class: "muted", text: t("adj.curvesHint") }),
+  el("div", { class: "actions" }, curveResetBtn),
+);
+renderPhotoCurve();
+
 const dnBtn = el("button", { class: "btn small", text: t("adj.scunet") });
 dnBtn.onclick = () => { if (params) { markInflight(); setProgress(stageText("denoise (SCUNet)")); send({ type: "restore", scunet: true, nafnet: false }); } };
 const isPhone = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || navigator.maxTouchPoints > 1;
@@ -645,6 +683,7 @@ function renderAuto() {
 
 function syncControls() {
   sliders.forEach(refreshSlider);
+  renderPhotoCurve();
   renderLooks();
   renderStageToggles();
   if (params) { dofToggle.checked = params.enable.dof; }

@@ -153,6 +153,9 @@ export const en = {
   "adj.scunet": "Neural denoise (SCUNet, slow)",
   "adj.nafnet": "Run restoration (NAFNet)",
   "adj.reset": "Reset all to automatic",
+  "adj.curves": "Curves (this photo)",
+  "adj.curvesHint": "Tap to add a point, drag to move, drag a point out of the box to remove it. The look has its own curves (Look → Edit look).",
+  "adj.curvesReset": "Reset curves",
   "adj.networksHint": "The networks run automatically only where noise or blur is measured; these buttons run them on the whole frame.",
   "adj.amberHint": "Values in amber are the automatic ones. Double-tap a label to restore it.",
 
