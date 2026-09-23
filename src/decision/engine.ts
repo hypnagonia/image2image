@@ -110,7 +110,12 @@ export function decide(ctx: EngineContext): DecisionResult {
   if (Math.abs(sug) < 0.15) sug = 0;
   exposureSuggestion = Math.round(sug * 100) / 100;
   p.exposure = ctx.autoExposure ? exposureSuggestion : 0;
-  p.local.anchorEV = r2(clamp(keyEV, -7, 0));
+  // Local tone compression pulls the scene toward this anchor, so it must be the
+  // luminance the subject is *displayed* at — the comfortable band — not the
+  // measured key. With an underexposed frame (key well below the band) an
+  // unclamped anchor drags the highlights down toward the dark subject and
+  // barely lifts the shadows: the photograph comes out dim with flat shadows.
+  p.local.anchorEV = r2(clamp(clamp(keyEV + p.exposure, bandLo, bandHi) - p.exposure, -7, 0));
   note("exposure", p.exposure,
     (ctx.autoExposure ? "auto exposure on: " : "camera exposure kept; ") +
     `subject key ${keyEV.toFixed(2)} EV (comfortable band ${bandLo.toFixed(1)}…${bandHi.toFixed(1)} EV)` +
