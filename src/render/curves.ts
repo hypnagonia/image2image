@@ -3,9 +3,9 @@
  *
  * toneCurveLUT: scene log2 luminance (−14 … +6 EV) → display-linear luminance.
  *   A Naka–Rushton (log-logistic) curve anchored so that scene middle grey
- *   0.18 renders to display 0.18 (≈ 46% sRGB), with a contrast exponent, a
- *   highlight shoulder whose softness is `rolloff`, and a black floor. It is
- *   applied to luminance as a ratio, so it never shifts hue.
+ *   0.18 renders at MID_OUT, with a contrast exponent, a highlight shoulder
+ *   whose softness is `rolloff`, and a black floor. It is applied to luminance
+ *   as a ratio, so it never shifts hue.
  *
  * curveLUT: the user/automatic point curves (L, R, G, B) on display-encoded
  *   values, interpolated with a monotone cubic so they cannot overshoot.
@@ -18,14 +18,17 @@ export const TONE_EV_RANGE = 20;
 export const CURVE_LUT_SIZE = 1024;
 
 /**
- * Rendering intent: scene middle grey (0.18) is displayed at MID_OUT. This is a
- * fixed property of the rendering — the same for every photograph — so the
- * camera's exposure decides brightness, not a per-image target.
+ * Rendering intent: scene middle grey (0.18) is displayed at MID_OUT
+ * (display-linear; ≈ 58% sRGB). A fixed property of the rendering — the same
+ * for every photograph — so the camera's exposure decides brightness, not a
+ * per-image target. Calibrated against the camera's own renderings of the same
+ * files (daylight, dim interior, night): the earlier 0.23 with a steeper toe
+ * came out ~0.6 EV darker than the phone across the frame.
  */
-export const MID_OUT = 0.23;
+export const MID_OUT = 0.29;
 
 export function toneCurve(tone: Params["tone"]) {
-  const c = 1.15 + 0.35 * tone.contrast;
+  const c = 1.02 + 0.35 * tone.contrast;
   // Peak slightly above 1: rolloff = 1 → asymptotic shoulder (softest), 0 → reaches white early.
   const Yw = 1.0 + 0.3 * (1 - tone.rolloff) * (1 + 0.5 * tone.whites);
   const mid = 0.18;

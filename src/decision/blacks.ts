@@ -65,8 +65,8 @@ export function checkBlacks(tone: Params["tone"], deepEV0: number, lowEV0: numbe
   // Deepen just enough: scan the (monotone) black point for the value that puts
   // the darkest 0.1% at the target without dropping the darkest 1% below the floor.
   let best = 0;
-  for (let i = 1; i <= 60; i++) {
-    const b = -i * 0.005; // −0.005 … −0.3
+  for (let i = 1; i <= 100; i++) {
+    const b = -i * 0.005; // −0.005 … −0.5
     if (renderCode({ ...tone, blacks: b }, lowEV) < LOW_FLOOR) break;
     best = b;
     if (renderCode({ ...tone, blacks: b }, deepEV) <= DEEP_TARGET) break;

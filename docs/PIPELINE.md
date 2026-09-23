@@ -148,6 +148,23 @@ sharp, sharpened content — measured, see `scripts/models/export.py`); dehaze
 needs distant regions whose dark channel is raised relative to near ones and
 whose local contrast is lower, and is capped so atmosphere never disappears.
 
+### Rendering intent and the local tone anchor
+
+Scene middle grey renders at a fixed display level (`MID_OUT` in
+`src/render/curves.ts`) — the camera's exposure decides brightness, not a
+per-image target. The curve is calibrated against the phone's own renderings of
+the same files: daylight, a dim interior and a night scene land within ≈ 0.2 EV
+of them in the mid-tones, while keeping deeper blacks.
+
+Local tone compression pulls the scene toward `local.anchorEV`, which is the
+luminance the *subject* is displayed at, not its measured key: an underexposed
+frame would otherwise drag its highlights down toward a very dark anchor and
+barely lift its shadows (dim, with flat shadows). The anchor may travel at most
+≈ 1.2 EV from the key, less in dim scenes and not at all in night scenes — a
+night photograph is compressed around its own key, so it stays a night
+photograph (measured: median 49 → 15 / 255 on a night ProRAW, the phone's own
+rendering 2).
+
 ### Black point
 
 Whether black renders as black is a property of the *rendering*, not of the

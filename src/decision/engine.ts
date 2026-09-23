@@ -116,7 +116,12 @@ export function decide(ctx: EngineContext): DecisionResult {
   // measured key. With an underexposed frame (key well below the band) an
   // unclamped anchor drags the highlights down toward the dark subject and
   // barely lifts the shadows: the photograph comes out dim with flat shadows.
-  p.local.anchorEV = r2(clamp(clamp(keyEV + p.exposure, bandLo, bandHi) - p.exposure, -7, 0));
+  // …but only so far. Pulling a night scene's anchor all the way into the band
+  // would lift the whole frame and throw away the night; dim scenes keep their
+  // mood, and a night scene is compressed around its own key.
+  const maxLift = 1.2 * (1 - dim) * (night ? 0 : 1);
+  const displayed = keyEV + p.exposure;
+  p.local.anchorEV = r2(clamp(clamp(clamp(displayed, bandLo, bandHi), displayed - 0.5, displayed + maxLift) - p.exposure, -9, 0));
   note("exposure", p.exposure,
     (ctx.autoExposure ? "auto exposure on: " : "camera exposure kept; ") +
     `subject key ${keyEV.toFixed(2)} EV (comfortable band ${bandLo.toFixed(1)}…${bandHi.toFixed(1)} EV)` +
