@@ -113,26 +113,40 @@ async function developRaw(gpu: Gpu, src: RawSource, orientation: number, opt: De
 
 async function linearize(gpu: Gpu, src: RgbSource): Promise<WorkingImage> {
   const W = src.width, H = src.height;
-  const input = gpu.tex("rgb.input", W, H, "rgba8unorm", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT);
   let primaries = src.colorSpace === "display-p3" ? P3_TO_REC2020 : src.colorSpace === "rec2020" ? IDENTITY : SRGB_TO_REC2020;
+  const wide = !("close" in src.pixels) && src.pixels.data instanceof Uint16Array;
+  const bits = !("close" in src.pixels) ? src.pixels.bits : 8;
+  // 10/16-bit HEIF arrives as integers: rgba16uint keeps them exact (rgba16float
+  // would mean a full-frame conversion on the CPU first).
+  const input = gpu.tex("rgb.input", W, H, wide ? "rgba16uint" : "rgba8unorm",
+    GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT);
   if ("close" in src.pixels) {
     // Ask the browser to colour-manage into Display P3 on upload.
     gpu.device.queue.copyExternalImageToTexture({ source: src.pixels }, { texture: input, colorSpace: "display-p3" }, { width: W, height: H });
     primaries = P3_TO_REC2020;
   } else {
     const px = src.pixels;
-    gpu.device.queue.writeTexture({ texture: input }, px.data as Uint8Array<ArrayBuffer>, { bytesPerRow: W * 4, rowsPerImage: H }, { width: W, height: H });
+    gpu.device.queue.writeTexture({ texture: input }, px.data as Uint8Array<ArrayBuffer>, { bytesPerRow: W * (wide ? 8 : 4), rowsPerImage: H }, { width: W, height: H });
   }
+  // The gain map is one byte per pixel at its own (usually half) size.
+  const g = src.gain;
+  const gainTex = gpu.tex("rgb.gain", g ? g.width : 1, g ? g.height : 1, "r8unorm", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
+  if (g) gpu.device.queue.writeTexture({ texture: gainTex }, g.data as Uint8Array<ArrayBuffer>, { bytesPerRow: g.width, rowsPerImage: g.height }, { width: g.width, height: g.height });
   const tex = gpu.tex("working", W, H, "rgba16float");
-  const u = new Uniforms(32).u32(W, H, 0, 0).mat3(primaries);
+  const u = new Uniforms(40).u32(W, H, 0, (1 << bits) - 1).mat3(primaries).f32(g ? g.headroom : 1, g ? g.width : 1, g ? g.height : 1, g ? 1 : 0);
   await gpu.run("linearize", (enc, temp) => {
     const ub = gpu.uniform(u.bytes());
     temp.push(ub);
-    gpu.dispatch(enc, gpu.pipeline("linearize", linearizeWgsl), [ub, tex.createView(), input.createView()], Math.ceil(W / 16), Math.ceil(H / 16));
+    // Each entry point uses only one of the two source textures; the other
+    // binding is left out (the pipeline layout is derived from the entry point).
+    gpu.dispatch(enc, gpu.pipeline("linearize" + (wide ? ".u16" : ""), linearizeWgsl, wide ? "main_u16" : "main"),
+      [ub, tex.createView(), wide ? undefined : input.createView(), wide ? input.createView() : undefined, gainTex.createView()],
+      Math.ceil(W / 16), Math.ceil(H / 16));
   }, true);
-  gpu.release(input);
+  gpu.release(input, gainTex);
   return {
     tex, width: W, height: H, referred: "display", factor: 1,
-    log: [`${src.decoder === "native" ? "Native" : "libheif"} decode ${W}×${H}, ${src.colorSpace} → linear Rec.2020 (display-referred: no highlight headroom above the encoded white)`],
+    log: [`${src.decoder === "native" ? "Native" : "libheif"} decode ${W}×${H} at ${bits} bit, ${src.colorSpace} → linear Rec.2020` +
+      (g ? `; HDR gain map ${g.width}×${g.height}, headroom ${g.headroom.toFixed(2)}× (+${Math.log2(g.headroom).toFixed(2)} EV)` : " (display-referred: no highlight headroom above the encoded white)")],
   };
 }

@@ -91,6 +91,12 @@ export interface RgbSource {
   pixels: ImageBitmap | { data: Uint8Array | Uint16Array; bits: 8 | 10 | 12 | 16; channels: 3 | 4 };
   colorSpace: "srgb" | "display-p3" | "rec2020";
   decoder: "native" | "libheif";
+  /**
+   * Apple HDR gain map: how far each pixel may rise above display white.
+   * `headroom` is the factor at gain 1 (2 ≈ one stop); the map is usually half
+   * the frame size and is sampled bilinearly.
+   */
+  gain?: { data: Uint8Array; width: number; height: number; headroom: number };
 }
 
 export interface DecodedImage {

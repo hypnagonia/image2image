@@ -165,6 +165,26 @@ night photograph is compressed around its own key, so it stays a night
 photograph (measured: median 49 → 15 / 255 on a night ProRAW, the phone's own
 rendering 2).
 
+### HDR HEIC (10-bit base + Apple gain map)
+
+An iPhone HEIC is a 10-bit image plus an auxiliary gain map that says how far
+each pixel may rise above display white. The browser's own decoder hands out
+neither — it flattens both into 8-bit SDR — so files that carry a gain map go
+through libheif's C API instead (`src/decode/heif.ts`; the JS wrapper that
+ships with libheif-js only offers 8-bit RGBA).
+
+* Detection is a byte scan for `urn:com:apple:photo:2020:aux:hdrgainmap`, so
+  ordinary photographs keep the fast native path and never load libheif.
+* The base image is decoded as 16-bit RGBA at its own depth and uploaded as
+  `rgba16uint` (entry `main_u16` of `linearize.wgsl`); the gain map, usually
+  half size, as `r8unorm`.
+* Headroom comes from Apple's MakerNote (tags 33 and 48, `appleHeadroom` in
+  `src/decode/exif.ts`); the map is applied in linear light as
+  `linear × (1 + (headroom − 1) × gain)`, which is what puts real detail back
+  into a window or a sunset instead of a clipped patch.
+* Measured on an iPhone 13 sunset frame: decode 0.7–1.2 s for 12 MP, headroom
+  2.0× (+1 EV), scene range 9.6 → 10.4 EV, nothing clipped.
+
 ### Black point
 
 Whether black renders as black is a property of the *rendering*, not of the
@@ -341,8 +361,13 @@ region can be highlighted on the photo.
   so and stops. (Safari on iOS 26 has WebGPU.) ONNX inference itself does fall
   back to WASM SIMD.
 * JPEG-XL–compressed DNGs (an iOS option) are not decoded: LibRaw is built
-  without libjxl. Lossless-JPEG ProRAW (the compatible default) works.
-* HEIC gain maps (iOS HDR) are ignored; HEIC input is display-referred.
+  without libjxl. Lossless-JPEG ProRAW (the compatible default) works; such a
+  file is now recognised before LibRaw sees it and reported plainly
+  (`tiffCompressions` in `src/decode/exif.ts`, tag 259 = 52546).
+* A ProRAW DNG also carries Apple's HDR gain map (named in its XMP); only the
+  HEIC path uses it so far.
+* HEIC gain maps are used (see below); the base image is still
+  display-referred, so white balance and sharpening stay conservative for it.
 * Apple's ProfileGainTableMap (ProRAW local tone map) and semantic mattes are
   not used; the engine does its own local tone mapping and segmentation.
 * SegFormer's weights are licensed for non-commercial use only (see

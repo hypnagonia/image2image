@@ -8,7 +8,8 @@
  *   JPEG / PNG / WebP    → native
  */
 import { decodeRaw } from "./libraw.ts";
-import { findHeifExif, findJpegExif, readExif } from "./exif.ts";
+import { appleHdrHeadroom, findHeifExif, findJpegExif, readExif, tiffCompressions } from "./exif.ts";
+import { decodeHeifFull, hasAppleGainMap } from "./heif.ts";
 import type { DecodedImage, PhotoMetadata, RgbSource } from "./types.ts";
 
 export type Sniffed = "tiff" | "heif" | "jpeg" | "png" | "webp" | "unknown";
@@ -30,7 +31,14 @@ export function sniff(b: Uint8Array): Sniffed {
 
 export async function decodeFile(bytes: Uint8Array, name: string, mime: string): Promise<DecodedImage> {
   const kind = sniff(bytes);
-  if (kind === "tiff" || kind === "unknown") return decodeRaw(bytes, name);
+  if (kind === "tiff" || kind === "unknown") {
+    // LibRaw is built without JPEG-XL, so say what is wrong instead of failing
+    // deep inside the unpacker with "could not decode the sensor data".
+    if (tiffCompressions(bytes).includes(52546)) {
+      throw new Error("This DNG is compressed with JPEG-XL (iPhone \u201cProRAW Max\u201d lossy option), which this app cannot decode yet. Shoot ProRAW with lossless compression, or export the photo as HEIC.");
+    }
+    return decodeRaw(bytes, name);
+  }
   if (kind === "heif") return decodeHeif(bytes, mime);
   return decodeNative(bytes, mime, kind === "jpeg" ? "jpeg" : kind === "png" ? "png" : "other");
 }
@@ -58,6 +66,25 @@ async function decodeHeif(bytes: Uint8Array, mime: string): Promise<DecodedImage
   const exif = findHeifExif(bytes);
   const meta = metaFrom(exif);
   const t0 = performance.now();
+  // An Apple HDR photograph carries a gain map and a 10-bit base image, and
+  // the browser's own decoder hands out neither: it flattens both into 8-bit
+  // SDR. Those files go through libheif instead (~1 s for 12 MP); ordinary
+  // photographs keep the fast native path.
+  if (hasAppleGainMap(bytes)) {
+    try {
+      const full = await decodeHeifFull(bytes);
+      const headroom = (exif && appleHdrHeadroom(exif)) || 2;
+      const source: RgbSource = {
+        kind: "rgb", width: full.width, height: full.height,
+        pixels: { data: full.rgba, bits: (full.bits as 8 | 10 | 12 | 16) ?? 16, channels: 4 },
+        colorSpace: "display-p3", decoder: "libheif",
+        gain: full.gain ? { ...full.gain, headroom } : undefined,
+      };
+      return { format: "heic", source, meta, close: () => {}, timings: { "heic.libheif-hdr": performance.now() - t0 } };
+    } catch (e) {
+      console.warn("HDR HEIF decode failed, falling back", e);
+    }
+  }
   try {
     const bmp = await nativeBitmap(bytes, mime || "image/heic");
     const source: RgbSource = { kind: "rgb", width: bmp.width, height: bmp.height, pixels: bmp, colorSpace: "display-p3", decoder: "native" };

@@ -154,3 +154,102 @@ export function findJpegExif(buf: Uint8Array): Uint8Array | undefined {
   }
   return undefined;
 }
+
+/**
+ * HDR headroom of an Apple photograph: the factor by which the gain map may
+ * lift the image above display white. Apple stores two numbers in its
+ * MakerNote (tags 33 and 48) from which the headroom in stops follows; the
+ * relation below is the one Apple's own pipeline uses.
+ */
+export function appleHeadroom(t33: number, t48: number): number {
+  const stops = t33 < 1
+    ? (t48 <= 0.01 ? -20.0 * t48 + 1.8 : -0.101 * t48 + 1.0)
+    : (t48 <= 0.01 ? -70.0 * t48 + 3.0 : -0.303 * t48 + 2.303);
+  return Math.pow(2, Math.max(stops, 0));
+}
+
+/**
+ * Reads the headroom out of an Exif block (Apple MakerNote, tag 0x927c). The
+ * MakerNote is its own little TIFF: a 14-byte header ("Apple iOS\0\0\x01" and
+ * the byte order), then an IFD whose offsets are relative to its own start.
+ */
+export function appleHdrHeadroom(tiff: Uint8Array): number | undefined {
+  if (tiff.length < 8) return undefined;
+  const dv = new DataView(tiff.buffer, tiff.byteOffset, tiff.byteLength);
+  const le = tiff[0] === 0x49;
+  const u16 = (o: number, l = le) => dv.getUint16(o, l);
+  const u32 = (o: number, l = le) => dv.getUint32(o, l);
+  /** Offset and length of the MakerNote, found through IFD0 → Exif IFD. */
+  const findMakerNote = (): { off: number; len: number } | undefined => {
+    const scan = (ifd: number, depth: number): { off: number; len: number } | undefined => {
+      if (ifd <= 0 || ifd + 2 > tiff.length || depth > 2) return undefined;
+      const n = u16(ifd);
+      for (let i = 0; i < n; i++) {
+        const e = ifd + 2 + i * 12;
+        if (e + 12 > tiff.length) break;
+        const tag = u16(e), count = u32(e + 4);
+        if (tag === 0x927c) return { off: u32(e + 8), len: count };
+        if (tag === 0x8769) { const r = scan(u32(e + 8), depth + 1); if (r) return r; }
+      }
+      return undefined;
+    };
+    return scan(u32(4), 0);
+  };
+  const mn = findMakerNote();
+  if (!mn || mn.off + 16 > tiff.length) return undefined;
+  const p = mn.off;
+  if (String.fromCharCode(...tiff.subarray(p, p + 9)) !== "Apple iOS") return undefined;
+  const mle = tiff[p + 12] === 0x49; // "II" or "MM" at the end of the header
+  const q = p + 14;
+  if (q + 2 > tiff.length) return undefined;
+  const n = u16(q, mle);
+  let t33: number | undefined, t48: number | undefined;
+  for (let i = 0; i < n; i++) {
+    const e = q + 2 + i * 12;
+    if (e + 12 > tiff.length) break;
+    const tag = u16(e, mle), type = u16(e + 2, mle);
+    if ((tag !== 33 && tag !== 48) || (type !== 5 && type !== 10)) continue;
+    const at = p + u32(e + 8, mle); // MakerNote offsets are relative to its own start
+    if (at + 8 > tiff.length) continue;
+    const a = type === 10 ? dv.getInt32(at, mle) : u32(at, mle);
+    const b = type === 10 ? dv.getInt32(at + 4, mle) : u32(at + 4, mle);
+    const v = b ? a / b : 0;
+    if (tag === 33) t33 = v; else t48 = v;
+  }
+  return t33 !== undefined && t48 !== undefined ? appleHeadroom(t33, t48) : undefined;
+}
+
+/**
+ * Compression tags (259) of every IFD in a TIFF/DNG, including SubIFDs. Used
+ * to recognise a DNG this build cannot decode before LibRaw fails on it:
+ * 7 = lossless JPEG (Apple ProRAW), 52546 = JPEG-XL (DNG 1.7).
+ */
+export function tiffCompressions(bytes: Uint8Array): number[] {
+  if (bytes.length < 8 || !((bytes[0] === 0x49 && bytes[1] === 0x49) || (bytes[0] === 0x4d && bytes[1] === 0x4d))) return [];
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const le = bytes[0] === 0x49;
+  const u16 = (o: number) => dv.getUint16(o, le);
+  const u32 = (o: number) => dv.getUint32(o, le);
+  const out: number[] = [];
+  const seen = new Set<number>();
+  const walk = (ifd: number, depth: number) => {
+    if (ifd <= 0 || ifd + 2 > bytes.length || depth > 3 || seen.has(ifd)) return;
+    seen.add(ifd);
+    const n = u16(ifd);
+    if (n > 512) return;
+    for (let i = 0; i < n; i++) {
+      const e = ifd + 2 + i * 12;
+      if (e + 12 > bytes.length) break;
+      const tag = u16(e), type = u16(e + 2), count = u32(e + 4);
+      if (tag === 259) out.push(type === 3 ? u16(e + 8) : u32(e + 8));
+      if (tag === 330) { // SubIFDs: one pointer inline, several through an offset
+        if (count === 1) walk(u32(e + 8), depth + 1);
+        else { const at = u32(e + 8); for (let k = 0; k < count && at + k * 4 + 4 <= bytes.length; k++) walk(u32(at + k * 4), depth + 1); }
+      }
+    }
+    const next = ifd + 2 + n * 12;
+    if (next + 4 <= bytes.length) walk(u32(next), depth + 1);
+  };
+  walk(u32(4), 0);
+  return out;
+}
