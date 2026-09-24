@@ -67,6 +67,8 @@ interface Session {
   lightLinear: [number, number, number];
   /** Working pixels per original working pixel along each axis: 2 after upscaling. */
   scale: 1 | 2;
+  /** Apple's skin matte (ProRAW), uploaded once and sampled while rendering. */
+  skin?: GPUTexture;
   /** The quality analysis and what the upscale stage did with it. */
   upscale?: UpscaleInfo;
 }
@@ -179,7 +181,7 @@ export class Engine {
     if (!s) return;
     const g = this.gpu;
     if (s.denoised !== s.work.tex) g.release(s.denoised);
-    g.release(s.work.tex);
+    g.release(s.work.tex, s.skin);
     this.releaseProxy(s);
     releaseRefined(g, s.maps);
     this.renderer.releaseTargets();
@@ -262,6 +264,15 @@ export class Engine {
     // A ProRAW file carries Apple's own sky / skin mattes: sharper edges than
     // the network can produce on a reduced image, and already computed.
     if (decoded.masks?.length) scene.log.push(...applyAppleMattes(scene.seg, decoded.masks));
+    // The skin matte also goes to the GPU: the look's skin protection uses it
+    // directly instead of guessing skin from the person mask and its colour.
+    const skinMatte = decoded.masks?.find((m) => m.kind === "skin");
+    let skinTex: GPUTexture | undefined;
+    if (skinMatte) {
+      skinTex = gpu.tex("apple.skin", skinMatte.width, skinMatte.height, "r8unorm", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
+      gpu.device.queue.writeTexture({ texture: skinTex }, skinMatte.data as Uint8Array<ArrayBuffer>, { bytesPerRow: skinMatte.width, rowsPerImage: skinMatte.height }, { width: skinMatte.width, height: skinMatte.height });
+      this.log(`Apple skin matte ${skinMatte.width}×${skinMatte.height} drives the look's skin protection`);
+    }
     scene.log.forEach((l) => this.log(l));
     if (gen !== this.generation) return;
 
@@ -306,7 +317,7 @@ export class Engine {
     // Atmospheric light: dark-channel estimate is in the analysis encoding → linear working.
     const A = decision.params.dehaze.light.map((v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)) / gain) as [number, number, number];
 
-    const s: Session = { name: file.name, decoded, work, denoised: work.tex, gain, scene, maps, report, decision, params, lightLinear: A, scale: 1 };
+    const s: Session = { name: file.name, decoded, work, denoised: work.tex, gain, scene, maps, report, decision, params, lightLinear: A, scale: 1, skin: skinTex };
     this.s = s;
     await this.cacheDistance();
     // Automatic focus: subject from refined depth + segmentation + composition.
@@ -597,8 +608,8 @@ export class Engine {
 
   private renderSource(full: boolean): RenderSource {
     const s = this.s!;
-    if (full || !s.proxy) return { base: s.work.tex, denoised: s.denoised, width: s.work.width, height: s.work.height, fullWidth: s.work.width };
-    return { base: s.proxy.base, denoised: s.proxy.denoised, width: s.proxy.w, height: s.proxy.h, fullWidth: s.work.width };
+    if (full || !s.proxy) return { base: s.work.tex, denoised: s.denoised, width: s.work.width, height: s.work.height, fullWidth: s.work.width, skin: s.skin };
+    return { base: s.proxy.base, denoised: s.proxy.denoised, width: s.proxy.w, height: s.proxy.h, fullWidth: s.work.width, skin: s.skin };
   }
 
   private effectiveParams(): Params {

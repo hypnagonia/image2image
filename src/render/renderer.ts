@@ -29,6 +29,8 @@ export interface RenderSource {
   height: number;
   /** Width of the full-resolution image (for scaling pixel radii). */
   fullWidth: number;
+  /** Apple's skin matte from a ProRAW file, in image coordinates (optional). */
+  skin?: GPUTexture;
 }
 
 export interface RenderOptions {
@@ -61,6 +63,13 @@ export class Renderer {
   private depthTab?: GPUTexture;
   private depthKey = "";
   private hueTab?: GPUTexture;
+  private skinDummy?: GPUTexture;
+
+  /** A 1×1 "no skin here" texture for photographs without an Apple matte. */
+  private noSkin(): GPUTexture {
+    this.skinDummy ??= this.gpu.tex("skin.none", 1, 1, "r8unorm", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
+    return this.skinDummy;
+  }
   private hueKey = "";
 
   constructor(gpu: Gpu) {
@@ -189,6 +198,7 @@ export class Renderer {
       this.toneLut!.createView(), this.curveLut!.createView(), this.look!.createView({ dimension: "3d" }),
       this.sampler, dst.createView(), distT.createView(),
       profU, this.profCurve!.createView(), this.depthTab!.createView(), this.hueTab!.createView(),
+      (src.skin ?? this.noSkin()).createView(),
     ], Math.ceil(src.width / 8), Math.ceil(th / 8));
   }
 
@@ -314,6 +324,6 @@ export class Renderer {
 
   destroy() {
     this.releaseTargets();
-    this.gpu.release(this.toneLut, this.curveLut, this.look, this.profCurve, this.depthTab, this.hueTab);
+    this.gpu.release(this.toneLut, this.curveLut, this.look, this.profCurve, this.depthTab, this.hueTab, this.skinDummy);
   }
 }

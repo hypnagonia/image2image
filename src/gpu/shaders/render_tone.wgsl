@@ -79,6 +79,8 @@ struct Prof {
 @group(0) @binding(16) var prof_curve: texture_2d<f32>;   // r master tone, g/b/a = R/G/B curves
 @group(0) @binding(17) var depth_tab: texture_2d<f32>;    // 64×2: (sat, contrast, temp, haze), (black)
 @group(0) @binding(18) var hue_tab: texture_2d<f32>;      // 360×2: row 0 hue curves (hue shift rad, chroma ×, L shift), row 1 lightness → chroma ×
+// Apple's own skin matte (ProRAW), full frame, or a 1×1 zero when the file has none.
+@group(0) @binding(19) var skin_tex: texture_2d<f32>;
 
 const PI = 3.14159265;
 const P3_FROM_SRGB = mat3x3<f32>(
@@ -109,7 +111,7 @@ fn zones(L: f32) -> vec3<f32> {
   return vec3<f32>(s, max(0.0, 1.0 - s - h), h);
 }
 
-fn apply_profile(e_tech: vec3<f32>, g: array<f32, 12>, dist: f32) -> vec3<f32> {
+fn apply_profile(e_tech: vec3<f32>, g: array<f32, 12>, dist: f32, apple_skin: f32) -> vec3<f32> {
   var gw = g;
   // Spatial weights. Masks arrive soft (guided-filter refined, joint-bilaterally
   // upsampled against this pixel), depth continuous; every weight below is 0…1.
@@ -121,7 +123,10 @@ fn apply_profile(e_tech: vec3<f32>, g: array<f32, 12>, dist: f32) -> vec3<f32> {
   let ht = atan2(lab_t.z, lab_t.y);
   let skin_col = exp(-pow(angdiff(ht, 0.9) / 0.45, 2.0)) * smoothstep(0.012, 0.03, Ct) * (1.0 - smoothstep(0.17, 0.24, Ct))
     * smoothstep(0.12, 0.28, lab_t.x) * (1.0 - smoothstep(0.93, 0.99, lab_t.x));
-  let skin = clamp(clamp(gw[6], 0.0, 1.0) * (0.4 + 0.6 * skin_col), 0.0, 1.0) * prof.spa[0].x;
+  // Apple's matte, where the file has one, knows exactly where skin is; the
+  // colour-likelihood estimate stays as a floor for everything it missed.
+  let skin_est = clamp(gw[6], 0.0, 1.0) * (0.4 + 0.6 * skin_col);
+  let skin = clamp(max(skin_est, apple_skin), 0.0, 1.0) * prof.spa[0].x;
   let local = 1.0 - 0.85 * skin; // local corrections reach skin at ~15%
   let w_sky = clamp(gw[0], 0.0, 1.0) * (1.0 - skin);
   // 1. master tone curve on display-encoded luminance, applied as a ratio (no hue shift)
@@ -532,7 +537,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   e = srgb_oetf(clamp(outp, vec3<f32>(0.0), vec3<f32>(1.0)));
 
   // --- creative layer --------------------------------------------------------------------
-  if (prof.f.x > 0.5) { e = apply_profile(e, maps.g, dist); }
+  if (prof.f.x > 0.5) {
+    let uv = (vec2<f32>(px) + 0.5) / vec2<f32>(f32(W), f32(H));
+    e = apply_profile(e, maps.g, dist, textureSampleLevel(skin_tex, lsamp, uv, 0.0).r);
+  }
 
   // Debug views (flags.w): 1 = masks (argmax colours), 2 = depth.
   if (u.flags.w == 1u) {

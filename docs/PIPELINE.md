@@ -183,6 +183,10 @@ half the frame's width and height, named by an Apple URN
   of it along the sky edge and the thin twigs — exactly where a 512 px sliding
   window cannot see. The subject (portrait) matte is read but not merged: it
   describes depth of field, not a class.
+* The skin matte is also uploaded as its own texture and sampled by the look's
+  skin protection (`skin_tex` in `render_tone.wgsl`): the look then protects
+  exactly the skin the phone found, with the previous estimate (person mask ×
+  skin-colour likelihood) kept as a floor for whatever the matte missed.
 
 ### HDR HEIC (10-bit base + Apple gain map)
 
@@ -270,7 +274,8 @@ palette stays dominant; `spatial` values of 1 are the subtle upper bound.
 
 Priority: **skin → semantic objects → global palette → depth.**
 
-* **Skin**: person mask × a skin-colour likelihood of the technical colour
+* **Skin**: Apple's skin matte when the file is a ProRAW; otherwise (and as a
+  floor) the person mask × a skin-colour likelihood of the technical colour
   (OkLab hue ≈ 25–80°, moderate chroma) — faces and hands rather than
   clothes. Skin keeps ~35% of the palette and ~15% of every local correction;
   a guard then limits its hue departure to ±7°, chroma to +12% and lightness
