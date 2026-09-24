@@ -22,7 +22,7 @@ import { decodeFile } from "../decode/decode.ts";
 import type { DecodedImage } from "../decode/types.ts";
 import { develop, type WorkingImage } from "../raw/develop.ts";
 import { Neural, MODELS } from "../neural/ort.ts";
-import { analyseScene, type SceneMaps } from "../neural/scene.ts";
+import { analyseScene, applyAppleMattes, type SceneMaps } from "../neural/scene.ts";
 import { runTiled } from "../neural/tiles.ts";
 import { denoiseGPU } from "../restore/denoise.ts";
 import { UpscaleJob, probeUpscaler } from "../restore/upscale.ts";
@@ -259,6 +259,9 @@ export class Engine {
       void fetch("/__debug/save?name=depth.pgm", { method: "POST", body: pgm(d.width, d.height, (k) => d.dist[k]) });
       void fetch("/__debug/save?name=analysis.pgm", { method: "POST", body: pgm(gw, gh, (k) => analysisRgba[k * 4 + 1]) });
     }
+    // A ProRAW file carries Apple's own sky / skin mattes: sharper edges than
+    // the network can produce on a reduced image, and already computed.
+    if (decoded.masks?.length) scene.log.push(...applyAppleMattes(scene.seg, decoded.masks));
     scene.log.forEach((l) => this.log(l));
     if (gen !== this.generation) return;
 

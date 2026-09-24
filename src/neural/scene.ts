@@ -355,3 +355,44 @@ export async function analyseScene(neural: Neural, img: AnalysisImage, onStage?:
 
   return { seg: { width: lw, height: lh, probs }, depth: { width: ow, height: oh, dist, raw: disp }, coverage, timings, log };
 }
+
+/**
+ * Folds Apple's own mattes (ProRAW) into the network's probabilities.
+ *
+ * The phone computed them on the full-resolution frame while shooting, so
+ * their edges are exact where a 512 px sliding window can only guess — hair
+ * against sky, branches, roof lines. Where a matte claims a pixel, the other
+ * classes give way proportionally, so the probabilities still sum to 1; where
+ * it says nothing, the network's own answer stands.
+ */
+export function applyAppleMattes(seg: SceneMaps["seg"], mattes: Array<{ kind: "sky" | "skin" | "subject"; data: Uint8Array; width: number; height: number }>): string[] {
+  const log: string[] = [];
+  const plane = seg.width * seg.height;
+  for (const m of mattes) {
+    const g = m.kind === "sky" ? GROUPS.indexOf("sky") : GROUPS.indexOf("person");
+    if (g < 0 || m.kind === "subject") continue; // the subject matte is depth-of-field material, not a class
+    // Resample the matte onto the probability grid (box average: the matte is
+    // much larger, so every grid cell sees many of its pixels).
+    const sx = m.width / seg.width, sy = m.height / seg.height;
+    let claimed = 0;
+    for (let y = 0; y < seg.height; y++) {
+      const y0 = Math.floor(y * sy), y1 = Math.max(y0 + 1, Math.floor((y + 1) * sy));
+      for (let x = 0; x < seg.width; x++) {
+        const x0 = Math.floor(x * sx), x1 = Math.max(x0 + 1, Math.floor((x + 1) * sx));
+        let acc = 0, n = 0;
+        for (let yy = y0; yy < y1 && yy < m.height; yy++) for (let xx = x0; xx < x1 && xx < m.width; xx++) { acc += m.data[yy * m.width + xx]; n++; }
+        const p = n ? acc / (n * 255) : 0;
+        const i = y * seg.width + x;
+        const was = seg.probs[g * plane + i];
+        if (p <= was) continue; // never take a class away from the network
+        const rest = 1 - was;
+        const scale = rest > 1e-6 ? (1 - p) / rest : 0;
+        for (let k = 0; k < NG; k++) if (k !== g) seg.probs[k * plane + i] *= scale;
+        seg.probs[g * plane + i] = p;
+        claimed += p - was;
+      }
+    }
+    log.push(`Apple ${m.kind} matte ${m.width}×${m.height} → ${GROUPS[g]} (+${((claimed / plane) * 100).toFixed(1)}% of the frame)`);
+  }
+  return log;
+}

@@ -10,6 +10,7 @@
  */
 import createLibRaw from "./wasm/libraw.js";
 import { cameraColorFromLibRaw } from "../color/dng.ts";
+import { decodeDngMasks } from "./dngMasks.ts";
 import type { DecodedImage, LibRawMeta, PhotoMetadata, RawSource } from "./types.ts";
 
 interface LibRawModule {
@@ -152,12 +153,17 @@ export async function decodeRaw(bytes: Uint8Array, name: string): Promise<Decode
     color,
   };
   const tEnd = performance.now();
+  // Apple ships its own sky / skin / subject mattes inside a ProRAW file; they
+  // are more accurate than anything the segmentation network sees.
+  const masks = await decodeDngMasks(bytes, pm.orientation ?? 1);
+  const tMask = performance.now();
   return {
     format: meta.idata.dngVersion ? "dng" : "raw",
+    masks,
     source,
     meta: pm,
     close: () => { M._lr_close(); },
-    timings: { "libraw.init": tInit - t0, "libraw.unpack": tUnpack - tInit, "libraw.meta": tEnd - tUnpack },
+    timings: { "libraw.init": tInit - t0, "libraw.unpack": tUnpack - tInit, "libraw.meta": tEnd - tUnpack, ...(masks.length ? { "apple.masks": tMask - tEnd } : {}) },
     // Exposed for the debug log.
     ...({ libraw: meta } as object),
   };

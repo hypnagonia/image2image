@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
 import { appleHeadroom, appleHdrHeadroom, tiffCompressions } from "../src/decode/exif.ts";
 import { hasAppleGainMap } from "../src/decode/heif.ts";
+import { findDngMasks } from "../src/decode/dngMasks.ts";
 
 test("Apple HDR headroom follows the two MakerNote numbers", () => {
   // The values of a real iPhone HDR photograph: ~1 stop of headroom.
@@ -50,4 +51,44 @@ test("an HDR HEIC is recognised and its headroom read", () => {
   const i = b.findIndex((_, k) => b[k] === 0x4d && b[k + 1] === 0x4d && b[k + 2] === 0 && b[k + 3] === 42);
   const headroom = appleHdrHeadroom(b.subarray(i));
   assert.ok(headroom !== undefined && Math.abs(headroom - 2) < 0.05, `headroom ${headroom}`);
+});
+
+test("Apple's semantic mattes are found inside a ProRAW DNG", () => {
+  const dng = ".samples/IMG_1384.DNG";
+  if (!existsSync(dng)) return;
+  const masks = findDngMasks(new Uint8Array(readFileSync(dng)));
+  assert.equal(masks.length, 1);
+  assert.equal(masks[0].kind, "sky");
+  assert.equal(masks[0].width, 2016);
+  assert.equal(masks[0].height, 1512);
+  // A JPEG payload, ready for createImageBitmap.
+  assert.equal(masks[0].bytes[0], 0xff);
+  assert.equal(masks[0].bytes[1], 0xd8);
+});
+
+test("a portrait ProRAW carries the skin and subject mattes", () => {
+  const dng = ".samples/IMG_1401.DNG";
+  if (!existsSync(dng)) return;
+  const kinds = findDngMasks(new Uint8Array(readFileSync(dng))).map((m) => m.kind).sort();
+  assert.deepEqual(kinds, ["skin", "subject"]);
+});
+
+test("a matte overrides the network where it claims more, and probabilities still sum to 1", async () => {
+  const { applyAppleMattes, GROUPS, NG } = await import("../src/neural/scene.ts");
+  const w = 4, h = 4, plane = w * h;
+  const probs = new Float32Array(NG * plane);
+  const sky = GROUPS.indexOf("sky"), veg = GROUPS.indexOf("vegetation");
+  for (let i = 0; i < plane; i++) { probs[sky * plane + i] = 0.4; probs[veg * plane + i] = 0.6; }
+  // A matte that is certain about the top half and silent about the bottom.
+  const data = new Uint8Array(w * h * 4); // twice the grid in each direction
+  for (let y = 0; y < h * 2; y++) for (let x = 0; x < w * 2; x++) data[y * w * 2 + x] = y < h ? 255 : 0;
+  const log = applyAppleMattes({ width: w, height: h, probs }, [{ kind: "sky", data, width: w * 2, height: h * 2 }]);
+  assert.match(log[0], /Apple sky matte/);
+  for (let i = 0; i < plane; i++) {
+    let sum = 0;
+    for (let k = 0; k < NG; k++) sum += probs[k * plane + i];
+    assert.ok(Math.abs(sum - 1) < 1e-5, `probabilities sum to ${sum}`);
+  }
+  assert.ok(probs[sky * plane + 0] > 0.99); // top row: the matte won
+  assert.ok(Math.abs(probs[sky * plane + plane - 1] - 0.4) < 1e-6); // bottom: untouched
 });

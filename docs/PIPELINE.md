@@ -165,6 +165,25 @@ night photograph is compressed around its own key, so it stays a night
 photograph (measured: median 49 → 15 / 255 on a night ProRAW, the phone's own
 rendering 2).
 
+### Apple's mattes in a ProRAW DNG
+
+Every ProRAW file carries the masks the phone computed while shooting, as DNG
+1.6 semantic masks (PhotometricInterpretation 52527) in their own SubIFDs:
+`semanticskymatte`, `semanticskinmatte`, `portraiteffectsmatte` — JPEG, 8-bit,
+half the frame's width and height, named by an Apple URN
+(`src/decode/dngMasks.ts`).
+
+* They are decoded with the browser's JPEG decoder (50 ms for 12 MP, 97 ms for
+  48 MP) and rotated the same way the working image is.
+* `applyAppleMattes` (`src/neural/scene.ts`) folds them into the network's
+  probabilities: where a matte claims a pixel more strongly than SegFormer
+  did, the other classes give way proportionally, so the probabilities still
+  sum to 1; where it says nothing, the network's answer stands.
+* Effect measured on the maple landscape: 0.4% of the frame changes class, all
+  of it along the sky edge and the thin twigs — exactly where a 512 px sliding
+  window cannot see. The subject (portrait) matte is read but not merged: it
+  describes depth of field, not a class.
+
 ### HDR HEIC (10-bit base + Apple gain map)
 
 An iPhone HEIC is a 10-bit image plus an auxiliary gain map that says how far
@@ -368,8 +387,14 @@ region can be highlighted on the photo.
   HEIC path uses it so far.
 * HEIC gain maps are used (see below); the base image is still
   display-referred, so white balance and sharpening stay conservative for it.
-* Apple's ProfileGainTableMap (ProRAW local tone map) and semantic mattes are
-  not used; the engine does its own local tone mapping and segmentation.
+* Apple's semantic mattes inside a ProRAW file **are** used (see below). Its
+  ProfileGainTableMap (tag 52525, 3 MB: a 64×48 spatial grid × 257 tone
+  samples) is not: measured on these files it is a local tone map whose gain
+  times its input is constant (≈ 0.071), i.e. it flattens the local base to
+  mid grey — Apple's own local tone rendering, which the engine already does
+  its own way. Its spatial variation is ±1% in the mid-tones and ±10% in deep
+  shadows, so adopting it would mean replacing the local tone stage, not
+  adding detail.
 * SegFormer's weights are licensed for non-commercial use only (see
   `public/THIRD_PARTY_NOTICES.txt`).
 * The processed DNG export is linear, scene-referred and explicitly labelled

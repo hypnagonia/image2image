@@ -1,3 +1,4 @@
+import type { DngMask } from "./dngMasks.ts";
 /** Shape of the JSON produced by native/libraw/wrapper.cpp (lr_meta_json). */
 export interface LibRawMeta {
   rawKind: 0 | 1 | 3 | 4;
@@ -106,4 +107,6 @@ export interface DecodedImage {
   /** Release decoder memory (wasm heap, bitmaps). */
   close(): void;
   timings: Record<string, number>;
+  /** Apple's semantic mattes, when the file carries them (ProRAW). */
+  masks?: DngMask[];
 }
