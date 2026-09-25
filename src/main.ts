@@ -7,8 +7,10 @@ import type { Capabilities, ExportFormat, FromWorker, StageProfile, Summary, ToW
 import type { Decision, Params } from "./decision/params.ts";
 import { createLookPanel } from "./ui/lookPanel.ts";
 import { createRegionsPanel } from "./ui/regionsPanel.ts";
+import { createLlmPanel } from "./ui/llmPanel.ts";
 import { normalizeProfile } from "./looks/profile.ts";
 import { CurveEditor } from "./ui/curveEditor.ts";
+import { bandsFromCurve, curveFromBands, isFlat, type CurveBands } from "./render/curves.ts";
 import { crashedWhileProcessing, lastStage, markCompleted, markInflight, noteStage, rememberParams, rememberPhoto, restorablePhoto } from "./ui/session.ts";
 import { LANGS, LANG_NAMES, lang, setLang, storedLang, t, tOr, type Lang } from "./ui/i18n.ts";
 
@@ -72,6 +74,7 @@ function addPane(id: string, label: string) {
 }
 function showPane(id: string) {
   if (id === "look") setTimeout(() => lookPanel.requestThumbs(), 0);
+  if (id === "llm") setTimeout(() => llmPanel.refresh(), 0);
   // Deferred: the first call happens while the page is still being built.
   setTimeout(() => {
     regionsPanel.setVisible(id === "regions");
@@ -86,6 +89,7 @@ const lookPane = addPane("look", t("tab.look"));
 const regionsPane = addPane("regions", t("tab.regions"));
 const depthPane = addPane("depth", t("tab.depth"));
 const upscalePane = addPane("upscale", t("tab.upscale"));
+const llmPane = addPane("llm", t("tab.llm"));
 const exportPane = addPane("export", t("tab.export"));
 const debugPane = addPane("debug", t("tab.debug"));
 showPane("auto");
@@ -104,6 +108,8 @@ const logLines: string[] = [];
 let looks: Array<{ id: string; name: string; description: string }> = [];
 let dofInfo: { justified: boolean; focus: number; strength: number; reason: string; x?: number; y?: number; zones?: Array<{ share: number; label: string; lo: number; hi: number }> } | undefined;
 let focusMode = false;
+/** A ring being dragged: which one, where it started, where it is now. */
+let drag: { index: number; x0: number; y0: number; x: number; y: number; moved: boolean } | undefined;
 let busy = false;
 
 (document.getElementById("open-btn") as HTMLButtonElement).onclick = () => fileInput.click();
@@ -220,15 +226,25 @@ function imageRect() {
   return { left: c.left + (c.width - w) / 2, top: c.top + (c.height - h) / 2, width: w, height: h };
 }
 
+/**
+ * The rings shown while picking focus: the focus points, or — before any are
+ * added — the automatic subject, which is kept (and editable) as the first
+ * point once manual points are added.
+ */
+function shownFocusPoints(): Array<{ x: number; y: number; auto?: boolean }> {
+  if (!focusMode || !params?.enable.dof) return [];
+  if (params.dof.points.length) return params.dof.points;
+  if (drag?.moved) return [{ x: drag.x, y: drag.y, auto: true }];
+  return dofInfo?.x !== undefined && dofInfo.y !== undefined ? [{ x: dofInfo.x, y: dofInfo.y, auto: true }] : [];
+}
+
 /** One ring per focus point; numbered so several subjects can be told apart. */
 function renderRings() {
   // Rings are an editing aid: only shown while picking focus points.
-  let pts: Array<{ x: number; y: number }> = focusMode && params?.enable.dof ? params.dof.points : [];
-  const showAuto = focusMode && params?.enable.dof && !pts.length && dofInfo?.x !== undefined;
-  if (showAuto) pts = [{ x: dofInfo!.x!, y: dofInfo!.y! }];
+  const pts = shownFocusPoints();
   const r = imageRect(), st = stage.getBoundingClientRect();
   rings.replaceChildren(...pts.map((p, i) => {
-    const d = el("div", { class: "focus-ring" + (showAuto ? " auto" : ""), text: showAuto ? t("view.ringAuto") : String(i + 1) });
+    const d = el("div", { class: "focus-ring" + (p.auto ? " auto" : "") + (drag?.index === i ? " drag" : ""), text: p.auto ? t("view.ringAuto") : String(i + 1) });
     d.style.left = `${r.left - st.left + p.x * r.width}px`;
     d.style.top = `${r.top - st.top + p.y * r.height}px`;
     return d;
@@ -245,17 +261,47 @@ stage.addEventListener("pointerdown", (e) => {
     const r = imageRect();
     const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
     if (x < 0 || y < 0 || x > 1 || y > 1) return;
+    // On a ring: drag moves it, a tap removes it. Elsewhere: a new point.
+    const hit = shownFocusPoints().findIndex((q) => Math.hypot(q.x - x, q.y - y) < 0.045);
+    if (hit >= 0) {
+      drag = { index: hit, x0: x, y0: y, x, y, moved: false };
+      stage.setPointerCapture(e.pointerId);
+      renderRings();
+      return;
+    }
     send({ type: "focus", action: "toggle", x, y });
     return;
   }
   holdTimer = window.setTimeout(() => { holding = true; badge.textContent = t("view.before"); badge.classList.add("on"); send({ type: "view", view: currentView, before: true }); }, 180);
 });
+stage.addEventListener("pointermove", (e) => {
+  if (!drag || !params) return;
+  const r = imageRect();
+  drag.x = clamp01((e.clientX - r.left) / r.width);
+  drag.y = clamp01((e.clientY - r.top) / r.height);
+  if (Math.hypot(drag.x - drag.x0, drag.y - drag.y0) > 0.01) drag.moved = true;
+  if (!drag.moved) return;
+  // Follow the finger locally; the engine measures the distance on release.
+  const pts = params.dof.points;
+  if (pts.length) pts[drag.index] = { ...pts[drag.index], x: drag.x, y: drag.y, auto: false };
+  renderRings();
+});
+function endDragRing() {
+  if (!drag) return;
+  const d = drag;
+  drag = undefined;
+  if (d.moved) send({ type: "focus", action: "move", index: params?.dof.points.length ? d.index : -1, x: d.x, y: d.y });
+  // A tap on a point removes it; a tap on the lone automatic ring changes nothing.
+  else if (params?.dof.points.length) send({ type: "focus", action: "toggle", x: d.x0, y: d.y0 });
+  renderRings();
+}
+function clamp01(v: number) { return Math.min(1, Math.max(0, v)); }
 const endHold = () => {
   clearTimeout(holdTimer);
   if (holding) { holding = false; badge.classList.remove("on"); send({ type: "view", view: currentView, before: false }); }
 };
-stage.addEventListener("pointerup", endHold);
-stage.addEventListener("pointercancel", endHold);
+stage.addEventListener("pointerup", () => { endDragRing(); endHold(); });
+stage.addEventListener("pointercancel", () => { endDragRing(); endHold(); });
 stage.addEventListener("pointerleave", endHold);
 let currentView: 0 | 1 | 2 = 0;
 
@@ -359,16 +405,46 @@ adjustPane.append(
   slider({ path: "depth.near", label: t("adj.nearDetail"), min: 0.5, max: 1.5, step: 0.01 }),
   slider({ path: "depth.far", label: t("adj.farDetail"), min: 0.2, max: 1.5, step: 0.01 }),
 );
-// Curves for this photo (L, R, G, B), independent of the look's own curves.
-const photoCurve = new CurveEditor(220);
+// Curves for this photo (L, R, G, B), independent of the look's own curves: one
+// slider per tone range instead of dragging points (curves.ts: a view of the
+// curve, so curves set elsewhere show up here). The small curve is a preview.
+const photoCurve = new CurveEditor(150);
+photoCurve.el.style.pointerEvents = "none";
 let photoChan: "l" | "r" | "g" | "b" = "l";
 const photoChips = el("div", { class: "chips" });
 const CURVE_COLOURS = { l: "#ece9e3", r: "#ff6b6b", g: "#6bdc7a", b: "#6b9bff" } as const;
-photoCurve.onChange = (pts) => {
-  if (!params) return;
-  params.curves[photoChan] = pts.map(([x, y]) => ({ x, y }));
-  pushParams();
-};
+const bandRows: Array<{ input: HTMLInputElement; out: HTMLOutputElement; get: (b: CurveBands) => number; set: (b: CurveBands, v: number) => void }> = [];
+function bandRow(label: string, min: number, get: (b: CurveBands) => number, set: (b: CurveBands, v: number) => void, max = 1): HTMLElement {
+  const input = el("input", { type: "range", min: String(min), max: String(max), step: "0.01" });
+  const out = el("output");
+  const row = el("div", { class: "row" }, el("label", { text: label }), input, out);
+  input.oninput = () => {
+    if (!params) return;
+    const b = bandsFromCurve(params.curves[photoChan]);
+    set(b, parseFloat(input.value));
+    params.curves[photoChan] = curveFromBands(b);
+    lookPanel.invalidate();
+    renderPhotoCurve();
+    pushParams();
+  };
+  // Double-tap the label: this range back to unchanged.
+  row.querySelector("label")!.addEventListener("dblclick", () => {
+    if (!params) return;
+    const b = bandsFromCurve(params.curves[photoChan]);
+    set(b, 0);
+    params.curves[photoChan] = curveFromBands(b);
+    renderPhotoCurve();
+    pushParams();
+  });
+  bandRows.push({ input, out, get, set });
+  return row;
+}
+const bandSliders = el("div", {},
+  bandRow(t("curve.blackLevel"), 0, (b) => b.black, (b, v) => { b.black = v; }),
+  ...[t("curve.shadows"), t("curve.darks"), t("curve.midtones"), t("curve.lights"), t("curve.highlights")].map((label, i) =>
+    bandRow(label, -1, (b) => b.bands[i], (b, v) => { b.bands[i] = v; })),
+  bandRow(t("curve.whiteLevel"), -1, (b) => b.white, (b, v) => { b.white = v; }, 0),
+);
 const curveResetBtn = el("button", { class: "btn small", text: t("adj.curvesReset") });
 curveResetBtn.onclick = () => {
   if (!params) return;
@@ -378,16 +454,25 @@ curveResetBtn.onclick = () => {
 };
 function renderPhotoCurve() {
   photoChips.replaceChildren(...(["l", "r", "g", "b"] as const).map((c) => {
-    const b = el("button", { class: "chip" + (c === photoChan ? " on" : ""), text: t(`chip.${c === "l" ? "master" : c}`) });
+    const changed = params ? !isFlat(params.curves[c]) : false;
+    const b = el("button", { class: "chip" + (c === photoChan ? " on" : ""), text: t(`chip.${c === "l" ? "master" : c}`) + (changed ? " •" : "") });
     b.onclick = () => { photoChan = c; renderPhotoCurve(); };
     return b;
   }));
   const pts = params?.curves[photoChan] ?? FLAT_CURVE;
   photoCurve.set(pts.map((q) => [q.x, q.y] as [number, number]), CURVE_COLOURS[photoChan]);
+  const b = bandsFromCurve(pts);
+  for (const r of bandRows) {
+    const v = r.get(b);
+    r.input.value = String(v);
+    r.out.textContent = `${v > 0 ? "+" : ""}${Math.round(v * 100)}`;
+    r.out.classList.toggle("auto", Math.abs(v) < 1e-3);
+  }
 }
 adjustPane.append(
   el("div", { class: "group-title", text: t("adj.curves") }),
   photoChips,
+  bandSliders,
   el("div", { class: "curve-wrap" }, photoCurve.el),
   el("p", { class: "muted", text: t("adj.curvesHint") }),
   el("div", { class: "actions" }, curveResetBtn),
@@ -413,6 +498,18 @@ const lookPanel = createLookPanel(lookPane, {
   progress: (t) => setProgress(t),
 });
 function renderLooks() { lookPanel.sync(); }
+
+// Ask an LLM: a prompt to copy out, an answer to paste back (src/ui/llmPanel.ts)
+const llmPanel = createLlmPanel(llmPane, {
+  params: () => params,
+  auto: () => autoParams,
+  summary: () => summary,
+  decisions: () => decisions,
+  looks: () => lookPanel.list(),
+  selectLook: (id) => lookPanel.select(id),
+  changed: () => { lookPanel.invalidate(); regionsPanel.render(); syncControls(); pushParams(); },
+  canvas,
+});
 
 // Regions: per-segment controls (src/ui/regionsPanel.ts)
 const regionsPanel = createRegionsPanel(regionsPane, {
@@ -782,6 +879,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       dofReason.textContent = t("dof.reason", { d: m.dof.focus.toFixed(2) }) + (m.dof.justified ? t("dof.suggested") : t("dof.notSuggested")) + m.dof.reason;
       syncControls();
       renderAuto();
+      llmPanel.reset();
       lookPanel.invalidate();
       regionsPanel.render();
       if (pendingRestore) {

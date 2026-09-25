@@ -37,8 +37,18 @@ async function handle(m: ToWorker) {
       const s = engine.session;
       if (!s) break;
       let points = [...s.params.dof.points];
+      const a = s.decision.dofSuggestion;
       if (m.action === "clear") {
         points = [];
+      } else if (m.action === "move") {
+        // Dragging a ring: the point takes the distance at its new place. With no
+        // points yet, the ring dragged is the automatic one, which becomes a point.
+        const d = engine.focusAt(m.x, m.y);
+        if (d === undefined) break;
+        const moved = { x: m.x, y: m.y, dist: d };
+        if (m.index >= 0 && m.index < points.length) points[m.index] = moved;
+        else if (!points.length) points.push(moved);
+        else break;
       } else {
         // Tapping an existing point removes it; anywhere else adds one.
         const hit = points.findIndex((p) => Math.hypot(p.x - m.x, p.y - m.y) < 0.045);
@@ -46,6 +56,11 @@ async function handle(m: ToWorker) {
         else {
           const d = engine.focusAt(m.x, m.y);
           if (d === undefined) break;
+          // The automatic subject stays: the first manual point is added to it
+          // instead of replacing it (and it can be moved or removed like any other).
+          if (!points.length && a.x !== undefined && a.y !== undefined && Math.hypot(a.x - m.x, a.y - m.y) >= 0.045) {
+            points.push({ x: a.x, y: a.y, dist: a.focus, auto: true });
+          }
           points.push({ x: m.x, y: m.y, dist: d });
           if (points.length > MAX_FOCUS_POINTS) points.shift();
         }

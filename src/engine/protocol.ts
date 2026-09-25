@@ -58,6 +58,7 @@ export type ToWorker =
   | { type: "params"; params: Params; draft?: boolean }
   | { type: "view"; view: 0 | 1 | 2 | 4 | 5; before?: boolean; region?: number }
   | { type: "focus"; action: "toggle"; x: number; y: number }
+  | { type: "focus"; action: "move"; index: number; x: number; y: number }
   | { type: "focus"; action: "clear" }
   | { type: "export"; format: ExportFormat; quality: number; space: "srgb" | "p3"; stripRows?: number }
   | { type: "importLook"; name: string; text: string }

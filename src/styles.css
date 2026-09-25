@@ -181,3 +181,9 @@ body.fs .fs-exit {
 .zone-info { display: block; font-size: 10.5px; color: var(--muted); }
 .zone-row label span { line-height: 1.15; }
 .up-status { font-size: 15px; line-height: 1.4; margin: 2px 0 10px; }
+
+/* Ask AI tab */
+.llm-text { width: 100%; box-sizing: border-box; resize: vertical; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 13px; }
+.llm-text.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; line-height: 1.4; }
+.llm-status:empty { display: none; }
+.focus-ring.drag { transform: scale(1.25); background: rgba(217, 164, 65, .18); }

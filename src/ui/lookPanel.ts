@@ -477,6 +477,10 @@ export function createLookPanel(root: HTMLElement, ctx: Ctx) {
     },
     onLuts(list: Array<{ id: string; name: string }>) { lutSources = list; renderEditor(); },
     sync() { renderBrowserSelection(); renderEditor(); },
+    /** Every look that can be chosen (built-in and saved), for the LLM prompt. */
+    list() { return all().map((pr) => ({ id: pr.id, name: pr.name, description: pr.description ?? "" })); },
+    /** Chooses a look by id, as a tap on its card would; false if there is none. */
+    select(id: string) { const pr = all().find((q) => q.id === id); if (pr) selectProfile(pr); return !!pr; },
     get palette() { return lastPalette; },
   };
 }

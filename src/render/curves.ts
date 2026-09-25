@@ -104,3 +104,41 @@ export function curveLUT(curves: Params["curves"]): Float32Array {
   }
   return out;
 }
+
+/**
+ * Tone-range sliders over a point curve: black level, five tone ranges
+ * (shadows, darks, midtones, lights, highlights at x = 0.1 … 0.9) and white
+ * level. They are a *view* of the curve, not extra parameters: reading
+ * samples the curve at those places, writing rebuilds the curve through them,
+ * so a curve set any other way (an older edit, the Ask-AI answer) still shows
+ * up on the sliders.
+ */
+export const TONE_BANDS = [0.1, 0.3, 0.5, 0.7, 0.9];
+/** Output shift of a tone-range slider at ±1. */
+export const BAND_RANGE = 0.12;
+/** Black lift / white drop at slider 1 / −1. */
+export const END_RANGE = 0.15;
+
+export interface CurveBands { black: number; bands: number[]; white: number }
+
+const clampN = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
+const round4 = (v: number) => Math.round(v * 10000) / 10000;
+
+export function bandsFromCurve(points: CurvePoint[]): CurveBands {
+  const f = monotoneCurve(points);
+  return {
+    black: round4(clampN(f(0) / END_RANGE, 0, 1)),
+    bands: TONE_BANDS.map((x) => round4(clampN((f(x) - x) / BAND_RANGE, -1, 1))),
+    white: round4(clampN((f(1) - 1) / END_RANGE, -1, 0)),
+  };
+}
+
+export function curveFromBands(b: CurveBands): CurvePoint[] {
+  const pts: CurvePoint[] = [{ x: 0, y: clampN(b.black, 0, 1) * END_RANGE }];
+  TONE_BANDS.forEach((x, i) => pts.push({ x, y: clampN(x + clampN(b.bands[i] ?? 0, -1, 1) * BAND_RANGE, 0, 1) }));
+  pts.push({ x: 1, y: 1 + clampN(b.white, -1, 0) * END_RANGE });
+  // Never inverted: each point at or above the one before it.
+  for (let i = 1; i < pts.length; i++) pts[i].y = Math.max(pts[i].y, pts[i - 1].y);
+  const out = pts.map((q) => ({ x: q.x, y: round4(q.y) }));
+  return isFlat(out) ? [{ x: 0, y: 0 }, { x: 1, y: 1 }] : out;
+}

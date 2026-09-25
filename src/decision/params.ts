@@ -11,7 +11,11 @@ import { BUILTIN_PROFILES, DEFAULT_PROFILE_ID } from "../looks/builtin.ts";
 export interface CurvePoint { x: number; y: number }
 
 /** A user-chosen focus point: position in the image (0..1) and the refined distance there. */
-export interface FocusPoint { x: number; y: number; dist: number }
+export interface FocusPoint {
+  x: number; y: number; dist: number;
+  /** The automatic subject, kept as a point once manual points are added (until it is moved). */
+  auto?: boolean;
+}
 
 export const MAX_FOCUS_POINTS = 8;
 

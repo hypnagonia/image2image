@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { solveCameraColor, xyToNeutral, type CameraColorInput } from "../src/color/dng.ts";
 import { mulVec } from "../src/color/mat3.ts";
+import { bandsFromCurve, curveFromBands } from "../src/render/curves.ts";
 import { tempTintToXy, xyToTempTint, planckianXY, REC2020_TO_P3 } from "../src/color/spaces.ts";
 
 // iPhone 16 Pro Max ProRAW (IMG_1384.DNG) as reported by LibRaw.
@@ -46,4 +47,13 @@ test("temperature/tint round trip", () => {
 test("Rec.2020→P3 keeps white", () => {
   const w = mulVec(REC2020_TO_P3, [1, 1, 1]);
   for (const v of w) assert.ok(Math.abs(v - 1) < 1e-4);
+});
+test("tone-range sliders round-trip through the curve and never invert it", () => {
+  const b = { black: 0.3, bands: [0.5, -0.2, 0.1, 0, -1], white: -0.4 };
+  const back = bandsFromCurve(curveFromBands(b));
+  assert.ok(Math.abs(back.black - 0.3) < 1e-3 && Math.abs(back.white + 0.4) < 1e-3);
+  back.bands.forEach((v, i) => assert.ok(Math.abs(v - b.bands[i]) < 1e-3, `band ${i}: ${v}`));
+  const steep = curveFromBands({ black: 0, bands: [1, -1, 1, -1, 1], white: 0 });
+  for (let i = 1; i < steep.length; i++) assert.ok(steep[i].y >= steep[i - 1].y);
+  assert.deepEqual(curveFromBands({ black: 0, bands: [0, 0, 0, 0, 0], white: 0 }), [{ x: 0, y: 0 }, { x: 1, y: 1 }]);
 });
