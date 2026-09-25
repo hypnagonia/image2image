@@ -88,6 +88,13 @@ export interface Params {
    */
   vignette: { amount: number; midpoint: number; feather: number; roundness: number; highlights: number };
   /**
+   * Film grain, added last (after sharpening and depth of field): amount 0 … 1,
+   * size 0 … 1 (fine … coarse, relative to the image, so every resolution
+   * gets the same film), roughness 0 … 1 (clumping), colour 0 … 1
+   * (0 = monochrome grain, 1 = dye-cloud colour grain).
+   */
+  grain: { amount: number; size: number; roughness: number; color: number };
+  /**
    * Depth of field. With no `points`, `focus` (automatic) is the single focal
    * distance. With points, a pixel stays sharp if it is near the distance of
    * *any* point — several subjects at different distances can all be sharp,
@@ -126,6 +133,7 @@ export function defaultParams(): Params {
     semantic: Object.fromEntries(GROUPS.map((g) => [g, neutralSemantic()])) as Record<Group, SemanticAdjust>,
     depth: { near: 1, far: 1 },
     vignette: { amount: 0, midpoint: 0.5, feather: 0.6, roundness: 0.3, highlights: 0.5 },
+    grain: { amount: 0, size: 0.35, roughness: 0.5, color: 0 },
     dof: { focus: 0.3, strength: 0, points: [], auto: false },
   };
 }

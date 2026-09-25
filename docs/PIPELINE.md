@@ -48,7 +48,7 @@ DNG/ProRAW/HEIC → decode (LibRaw / native / libheif)
   → technical colour (vibrance/saturation, semantic hue fixes)
   → look profile (tone curve → RGB curves → HSL → saturation response
     → colour balance → 3D LUT → semantic rules → depth curves → intensity blend)
-  → sharpening → optional depth of field → output transform
+  → sharpening → optional depth of field → film grain → output transform
 ```
 
 ### Deviations from the reference order (and why)
@@ -71,7 +71,8 @@ DNG/ProRAW/HEIC → decode (LibRaw / native / libheif)
    `I = J·t + A·(1−t)` holds for scene-linear radiance only.
 5. **3D LUT inside the look profile** (creative layer), never as part of the
    technical rendering.
-6. **No crop, grain, halation or bloom stages exist** — the upscale
+6. **No crop, halation or bloom stages exist** (grain is the last stage,
+   after depth of field, as it lies on the film) — the upscale
    stage sits where it would in a film pipeline: after denoise/restoration and
    before everything creative. Because every render stage (tone, look,
    semantic, dehaze, sharpening, depth of field, export) runs per pixel on the

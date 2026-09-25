@@ -14,6 +14,7 @@ import toneWgsl from "../gpu/shaders/render_tone.wgsl?raw";
 import detailWgsl from "../gpu/shaders/render_detail.wgsl?raw";
 import dofWgsl from "../gpu/shaders/render_dof.wgsl?raw";
 import outputWgsl from "../gpu/shaders/output.wgsl?raw";
+import grainWgsl from "../gpu/shaders/render_grain.wgsl?raw";
 import { floatsToHalves } from "../gpu/half.ts";
 import { CURVE_LUT_SIZE, TONE_LUT_SIZE, curveLUT, isFlat, toneCurveLUT } from "./curves.ts";
 import { buildLUT, LOOKS, type Look } from "./looks.ts";
@@ -247,6 +248,19 @@ export class Renderer {
     if (dof) {
       final = await this.depthOfField(t2, distT, W, th, p, maxRadius, dofLevels);
       finalLinear = true;
+    }
+    const gr = p.grain;
+    if (gr && gr.amount > 0 && o.debugView !== 1 && o.debugView !== 2) {
+      // Last, on the finished image. Particle size is set for a ~12 MP frame and
+      // scales with the image; `scale` is this render's pixels per full-image pixel.
+      const sizePx = (0.7 + 2.3 * gr.size) * Math.max(W / scale, H / scale) / 4032;
+      const out = this.target("grain", W, th, "rgba16float");
+      await gpu.run("render.grain", (enc, temp) => {
+        const u = gpu.uniform(new Uniforms(12).u32(W, th, ty0, finalLinear ? 1 : 0).f32(gr.amount * 0.055, sizePx, gr.roughness, gr.color).f32(1 / scale, 0, 0, 0).bytes(), "grain.u");
+        temp.push(u);
+        gpu.dispatch(enc, gpu.pipeline("render.grain", grainWgsl), [u, final.createView(), out.createView()], Math.ceil(W / 8), Math.ceil(th / 8));
+      });
+      final = out;
     }
     if (o.output === "p3f16" && !finalLinear) return { tex: final, top, rows };
     if (o.output === "p3f16") return { tex: await this.encodeF16(final, W, th), top, rows };

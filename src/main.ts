@@ -563,6 +563,12 @@ adjustPane.append(
   slider({ path: "vignette.feather", label: t("adj.vigFeather"), min: 0, max: 1, step: 0.01, fmt: pct }),
   slider({ path: "vignette.roundness", label: t("adj.vigRoundness"), min: 0, max: 1, step: 0.01, fmt: pct }),
   slider({ path: "vignette.highlights", label: t("adj.vigHighlights"), min: 0, max: 1, step: 0.01, fmt: pct }),
+  el("div", { class: "group-title", text: t("adj.grain") }),
+  slider({ path: "grain.amount", label: t("adj.grainAmount"), min: 0, max: 1, step: 0.01, fmt: pct }),
+  slider({ path: "grain.size", label: t("adj.grainSize"), min: 0, max: 1, step: 0.01, fmt: pct }),
+  slider({ path: "grain.roughness", label: t("adj.grainRoughness"), min: 0, max: 1, step: 0.01, fmt: pct }),
+  slider({ path: "grain.color", label: t("adj.grainColour"), min: 0, max: 1, step: 0.01, fmt: pct }),
+  el("p", { class: "muted", text: t("adj.grainHint") }),
 );
 // Curves for this photo (L, R, G, B), independent of the look's own curves: one
 // slider per tone range instead of dragging points (curves.ts: a view of the

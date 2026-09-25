@@ -55,6 +55,10 @@ const NUMS: Num[] = [
   { path: "vignette.feather", min: 0, max: 1, what: "how gradual the vignette falloff is" },
   { path: "vignette.roundness", min: 0, max: 1, what: "vignette shape: 0 follows the frame's aspect, 1 is a circle" },
   { path: "vignette.highlights", min: 0, max: 1, what: "how much bright light sources are spared by a darkening vignette" },
+  { path: "grain.amount", min: 0, max: 1, what: "film grain, added last (not sharpened or blurred); 0 = none, 0.15–0.3 subtle fine-art film, 0.5+ strong high-ISO film" },
+  { path: "grain.size", min: 0, max: 1, what: "grain particle size relative to the image (0 = fine 100-ISO, 1 = coarse 3200-ISO)" },
+  { path: "grain.roughness", min: 0, max: 1, what: "grain clumping (0 = even, 1 = clumpy)" },
+  { path: "grain.color", min: 0, max: 1, what: "0 = monochrome grain, 1 = colour (dye-cloud) grain" },
   { path: "profile.intensity", min: 0, max: 1, what: "strength of the active look (0 = technical rendering only)" },
 ];
 
