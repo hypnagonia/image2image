@@ -89,16 +89,18 @@ function showPane(id: string) {
   for (const [k, p] of Object.entries(panes)) p.hidden = k !== id;
   for (const b of tabs.querySelectorAll("button")) b.classList.toggle("on", (b as HTMLElement).dataset.id === id);
 }
-const autoPane = addPane("auto", t("tab.auto"));
 const adjustPane = addPane("adjust", t("tab.adjust"));
-const lookPane = addPane("look", t("tab.look"));
+// Hidden for now (not in the tab bar): the Look and Ask AI panels still exist, off-screen.
+const lookPane = el("div");
 const regionsPane = addPane("regions", t("tab.regions"));
 const depthPane = addPane("depth", t("tab.depth"));
 const upscalePane = addPane("upscale", t("tab.upscale"));
-const llmPane = addPane("llm", t("tab.llm"));
+const llmPane = el("div");
 const exportPane = addPane("export", t("tab.export"));
 const debugPane = addPane("debug", t("tab.debug"));
-showPane("auto");
+// Info (what was measured and decided) comes last; editing starts in Adjust.
+const autoPane = addPane("auto", t("tab.auto"));
+showPane("adjust");
 autoPane.append(el("p", { class: "muted", text: t("auto.hint") }));
 
 // --------------------------------------------------------------------------- state
@@ -143,6 +145,11 @@ fsBtn.onclick = () => setFullscreen(true);
 fsExit.onclick = (e) => { e.stopPropagation(); setFullscreen(false); };
 document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement) document.body.classList.remove("fs"); });
 header.insertBefore(fsBtn, capsEl);
+// Export in one tap, with the Export tab's current settings (format, colour, quality).
+const exportTop = el("button", { class: "btn small primary", text: t("app.export") });
+exportTop.onclick = () => exportBtn.click();
+exportTop.disabled = true; // until a photo is open
+header.insertBefore(exportTop, fsBtn);
 stage.append(fsExit);
 
 let resolution: "auto" | "full" | "half" = "auto";
@@ -827,10 +834,12 @@ const qualityOut = el("output", { text: "92" });
 qualitySl.oninput = () => (qualityOut.textContent = String(Math.round(+qualitySl.value * 100)));
 const exportBtn = el("button", { class: "btn primary", text: t("exp.button") });
 const exportInfo = el("p", { class: "muted" });
+/** The Export tab's button and the header's one are busy together. */
+function setExportEnabled(on: boolean) { exportBtn.disabled = !on; exportTop.disabled = !on || !params; }
 exportBtn.onclick = () => {
   if (!params || busy) return;
   busy = true;
-  exportBtn.disabled = true;
+  setExportEnabled(false);
   setProgress(t("progress.exporting"));
   // ?strip=N overrides the export strip height (memory vs speed; testing).
   const stripRows = Number(new URLSearchParams(location.search).get("strip")) || undefined;
@@ -1075,6 +1084,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case "analysis":
       summary = m.summary; decisions = m.decisions; autoParams = m.auto; params = m.params; dofInfo = m.dof;
       autoCurveBands = m.autoCurves;
+      exportTop.disabled = busy;
       cellCov = m.cellCoverage;
       histograms = undefined; // the previous photo's; the first final preview brings new ones
       exposureSuggestion = m.exposureSuggestion;
@@ -1123,7 +1133,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case "exported":
       busy = false;
-      exportBtn.disabled = false;
+      setExportEnabled(true);
       setProgress(undefined);
       exportInfo.textContent = t("exp.done", { file: m.name, mb: (m.blob.size / 1e6).toFixed(1), s: (m.ms / 1000).toFixed(1) });
       void share(m.blob, m.name);
@@ -1144,7 +1154,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case "error":
       showError(m.message);
       busy = false;
-      exportBtn.disabled = false;
+      setExportEnabled(true);
       setProgress(undefined);
       logLines.push("ERROR: " + m.message);
       logPre.textContent = logLines.join("\n");

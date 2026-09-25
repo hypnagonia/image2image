@@ -130,10 +130,10 @@ downloaded or loaded, and the render path is unchanged (analysis is read-only,
   ~1 s per tile on an Apple-silicon desktop GPU (WebGPU EP); phones are
   several times slower. Each new session is self-tested on a probe tile; on
   failure the stage retries on WASM, and if that fails too the photo simply
-  continues at 1× ("unavailable" in the Auto tab).
+  continues at 1× ("unavailable" in the Info tab).
 * The decision and metrics are kept on the session (`upscaleApplied`,
   `upscaleFactor`, `upscaleReason`, `qualityMetrics`) and shown as one line in
-  the Auto tab.
+  the Info tab.
 
 ## Colour
 
@@ -153,7 +153,7 @@ downloaded or loaded, and the render path is unchanged (analysis is read-only,
 `src/decision/engine.ts`. Semantic class decides which operations are
 appropriate for a region, measurements decide how strong they are, depth
 provides spatial context. Every decision is recorded with the numbers it used
-(Auto tab, and the "Download analysis JSON" button in Debug).
+(Info tab, and the "Download analysis JSON" button in Debug).
 
 Examples: denoise strength follows the measured noise σ per luminance bin
 (15th percentile of Immerkaer estimates per 32 px block) after the chosen
@@ -395,7 +395,7 @@ changes fire only outside comfortable ranges: a flat photo gets contrast around
 its own median and closed-in whites are opened; a washed-out sky is deepened;
 dark faces are lifted (skin curve only); flat vegetation / water / buildings
 get a little contrast; a flat foreground gets a little contrast; a landscape's
-deep far shadows are lifted a touch. Each fires with a note in the Auto tab.
+deep far shadows are lifted a touch. Each fires with a note in the Info tab.
 "Auto curves" in Adjust rescales them (0–150%) without touching curves the
 user edited.
 

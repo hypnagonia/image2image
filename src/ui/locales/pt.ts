@@ -5,6 +5,7 @@ export const pt: Dict = {
   // ---- header / empty state
   "app.starting": "iniciando…",
   "app.open": "Abrir",
+  "app.export": "Exportar",
   "app.fullscreen": "Tela cheia",
   "app.exitFullscreen": "Sair da tela cheia",
   "app.threads": "{n} threads",
@@ -16,7 +17,7 @@ export const pt: Dict = {
   "empty.fine": "Melhor com ProRAW de 12 MP (Ajustes → Câmera → Formatos → ProRAW e Controle de Resolução).",
 
   // ---- tabs
-  "tab.auto": "Auto",
+  "tab.auto": "Info",
   "tab.adjust": "Ajustes",
   "tab.look": "Estilo",
   "tab.regions": "Regiões",
@@ -24,7 +25,7 @@ export const pt: Dict = {
   "tab.export": "Exportar",
   "tab.debug": "Depuração",
 
-  // ---- Auto tab
+  // ---- Info tab (was: Auto)
   "auto.hint": "Abra uma foto. Cada decisão automática aparecerá aqui, com as medições que a justificam.",
   "auto.source": "origem",
   "auto.size": "tamanho",

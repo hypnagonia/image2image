@@ -5,6 +5,7 @@ export const ru: Dict = {
   // ---- header / empty state
   "app.starting": "запуск…",
   "app.open": "Открыть",
+  "app.export": "Экспорт",
   "app.fullscreen": "Во весь экран",
   "app.exitFullscreen": "Выйти из полноэкранного режима",
   "app.threads": "потоков: {n}",
@@ -16,7 +17,7 @@ export const ru: Dict = {
   "empty.fine": "Лучше всего с 12 Мп ProRAW (Настройки → Камера → Форматы → ProRAW и управление разрешением).",
 
   // ---- tabs
-  "tab.auto": "Авто",
+  "tab.auto": "Инфо",
   "tab.adjust": "Коррекция",
   "tab.look": "Стиль",
   "tab.regions": "Области",
@@ -24,7 +25,7 @@ export const ru: Dict = {
   "tab.export": "Экспорт",
   "tab.debug": "Отладка",
 
-  // ---- Auto tab
+  // ---- Info tab (was: Auto)
   "auto.hint": "Откройте фото. Здесь появятся все автоматические решения вместе с измерениями, на которых они основаны.",
   "auto.source": "источник",
   "auto.size": "размер",

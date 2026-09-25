@@ -33,6 +33,9 @@ header.top {
 }
 header.top h1 { font-size: 17px; font-weight: 650; margin: 0; letter-spacing: .01em; }
 header.top .caps { margin-left: auto; font-size: 11px; color: var(--muted); text-align: right; line-height: 1.25; }
+/* On a phone the buttons keep their size; the status text is what gives way. */
+header.top .btn { flex: none; }
+header.top .caps { min-width: 0; overflow: hidden; }
 /* Language picker: a small pill with the code; the native select covers it invisibly. */
 header.top .lang { position: relative; flex: none; color: var(--muted); }
 header.top .lang select { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }

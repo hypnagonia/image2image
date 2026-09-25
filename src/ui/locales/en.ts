@@ -10,6 +10,7 @@ export const en = {
   // ---- header / empty state
   "app.starting": "starting…",
   "app.open": "Open",
+  "app.export": "Export",
   "app.fullscreen": "Fullscreen preview",
   "app.exitFullscreen": "Exit fullscreen",
   "app.threads": "{n} threads",
@@ -21,7 +22,7 @@ export const en = {
   "empty.fine": "Best with 12 MP ProRAW (Settings → Camera → Formats → ProRAW & Resolution Control).",
 
   // ---- tabs
-  "tab.auto": "Auto",
+  "tab.auto": "Info",
   "tab.adjust": "Adjust",
   "tab.look": "Look",
   "tab.regions": "Regions",
@@ -29,7 +30,7 @@ export const en = {
   "tab.export": "Export",
   "tab.debug": "Debug",
 
-  // ---- Auto tab
+  // ---- Info tab (was: Auto)
   "auto.hint": "Open a photo. Every automatic decision will be listed here with the measurements behind it.",
   "auto.source": "source",
   "auto.size": "size",
