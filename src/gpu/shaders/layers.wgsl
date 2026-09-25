@@ -23,7 +23,26 @@ fn atlas_at(row: f32, x: f32) -> vec4<f32> {
  * green is sky, dark (branches, trunks) is not. Where the map is sure, it stays.
  * `e` is the colour before the layers (so earlier layers do not move the mask).
  */
+/** The refined sky of this pixel, computed once however many layers use it (−1 = not yet). */
+var<private> sky_cache: f32 = -1.0;
+
 fn sky_mask(p: f32, e: vec3<f32>, uv: vec2<f32>, other: f32) -> f32 {
+  if (sky_cache >= 0.0) { return sky_cache; }
+  let conf = smoothstep(0.75, 0.97, p);
+  let y = dot(e, LUMAP3);
+  // Sky's own colours: bright and neutral (overcast), or clearly blue even when darker;
+  // not green (leaves), not warm (lit walls, signs, skin).
+  let blue = smoothstep(0.04, 0.12, e.b - e.r) * smoothstep(0.12, 0.25, y);
+  let hue_ok = (1.0 - smoothstep(0.02, 0.1, e.g - max(e.r, e.b))) * (1.0 - smoothstep(0.0, 0.06, e.r - e.b));
+  // Never into what the map sees as water (it mirrors the sky's colour) or buildings.
+  let allowed = 1.0 - smoothstep(0.2, 0.5, other);
+  // Cheap cases first (most pixels): surely sky, or nothing sky-like to reach for.
+  // The neighbourhood search below is the expensive part — phones' GPUs time out
+  // when every pixel runs it for every sky layer.
+  if (conf >= 0.999 || hue_ok * allowed < 0.01 || max(smoothstep(0.22, 0.47, y), blue) < 0.01) {
+    sky_cache = max(conf, smoothstep(0.12, 0.45, p) * allowed * hue_ok * max(smoothstep(0.35, 0.6, y), blue));
+    return sky_cache;
+  }
   // Only near sky the map already sees (not water or a white wall far from it):
   // where the map itself is unsure, or confident sky lies within ≈ 7 % of the
   // picture (sky seen through a canopy or between trunks, next to open sky).
@@ -32,14 +51,11 @@ fn sky_mask(p: f32, e: vec3<f32>, uv: vec2<f32>, other: f32) -> f32 {
   // The most confident sky around, and its colour (both in the analysis encoding).
   var near = 0.0;
   var sky_c = vec3<f32>(0.0);
-  for (var k = 0; k < 12; k++) {
-    let a = f32(k) * 0.5235988;
-    let d = vec2<f32>(cos(a), sin(a));
-    for (var r = 0; r < 2; r++) {
-      let q = vec2<i32>(gp + d * R * select(1.0, 0.45, r == 1));
-      let s = gl(m0, q).x;
-      if (s > near) { near = s; sky_c = gl(guide, q).rgb; }
-    }
+  for (var k = 0; k < 8; k++) {
+    let a = f32(k) * 0.7853982 + select(0.0, 0.3927, (k & 1) == 1);
+    let q = vec2<i32>(gp + vec2<f32>(cos(a), sin(a)) * R * select(1.0, 0.5, (k & 1) == 1));
+    let s = gl(m0, q).x;
+    if (s > near) { near = s; sky_c = gl(guide, q).rgb; }
   }
   // Reaching out only to what looks like that sky (white paint next to blue sky does not).
   // Same colour, any brightness: sky seen through a canopy is often brighter than the
@@ -47,16 +63,13 @@ fn sky_mask(p: f32, e: vec3<f32>, uv: vec2<f32>, other: f32) -> f32 {
   let dc = pix_enc - sky_c;
   let same = 1.0 - smoothstep(0.03, 0.09, length(dc - vec3<f32>((dc.r + dc.g + dc.b) / 3.0)));
   let nearSky = smoothstep(0.6, 0.95, near) * same;
-  // Never into what the map sees as water (it mirrors the sky's colour) or buildings.
-  let reach = max(smoothstep(0.12, 0.45, p), 0.95 * nearSky) * (1.0 - smoothstep(0.2, 0.5, other));
-  let y = dot(e, LUMAP3);
-  // Sky's own colours: bright and neutral (overcast), or clearly blue even when darker;
-  // not green (leaves), not warm (lit walls, signs, skin). Next to known sky the
-  // brightness bar is lower, so pixels half sky, half twig are not left as pale fringes.
+  let reach = max(smoothstep(0.12, 0.45, p), 0.95 * nearSky) * allowed;
+  // Next to known sky the brightness bar is lower, so pixels half sky, half twig are
+  // not left as pale fringes.
   let lo = mix(0.35, 0.22, nearSky);
-  let blue = smoothstep(0.04, 0.12, e.b - e.r) * smoothstep(0.12, 0.25, y);
-  let skyish = max(smoothstep(lo, lo + 0.25, y), blue) * (1.0 - smoothstep(0.02, 0.1, e.g - max(e.r, e.b))) * (1.0 - smoothstep(0.0, 0.06, e.r - e.b));
-  return max(smoothstep(0.75, 0.97, p), reach * skyish);
+  let skyish = max(smoothstep(lo, lo + 0.25, y), blue) * hue_ok;
+  sky_cache = max(conf, reach * skyish);
+  return sky_cache;
 }
 
 /** The layer's smart mask at this pixel (0…1), before opacity. `e0`: the colour before the layers. */
