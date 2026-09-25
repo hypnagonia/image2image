@@ -273,12 +273,23 @@ function stageText(stage: string, detail?: string): string {
 const ctx = (() => {
   try { return canvas.getContext("2d", { colorSpace: "display-p3" }) as CanvasRenderingContext2D; } catch { return canvas.getContext("2d")!; }
 })();
+/** Drafts (smaller, same shape) are drawn scaled through this, so the canvas keeps its size during a drag. */
+const scratch = document.createElement("canvas");
+const scratchCtx = (() => { try { return scratch.getContext("2d", { colorSpace: "display-p3" }); } catch { return null; } })() ?? scratch.getContext("2d")!;
 function drawPreview(m: Extract<FromWorker, { type: "preview" }>) {
-  if (canvas.width !== m.width || canvas.height !== m.height) { canvas.width = m.width; canvas.height = m.height; }
   let img: ImageData;
   try { img = new ImageData(new Uint8ClampedArray(m.data), m.width, m.height, { colorSpace: "display-p3" }); }
   catch { img = new ImageData(new Uint8ClampedArray(m.data), m.width, m.height); }
-  ctx.putImageData(img, 0, 0);
+  const sameShape = Math.abs(m.width / m.height - canvas.width / Math.max(1, canvas.height)) < 0.01;
+  if (!m.final && m.width < canvas.width && sameShape) {
+    // Resizing the canvas reallocates its backing store twice per drag (in and out of drafts).
+    if (scratch.width !== m.width || scratch.height !== m.height) { scratch.width = m.width; scratch.height = m.height; }
+    scratchCtx.putImageData(img, 0, 0);
+    ctx.drawImage(scratch, 0, 0, canvas.width, canvas.height);
+  } else {
+    if (canvas.width !== m.width || canvas.height !== m.height) { canvas.width = m.width; canvas.height = m.height; }
+    ctx.putImageData(img, 0, 0);
+  }
   renderRings();
 }
 

@@ -18,6 +18,8 @@ struct U {
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var src: texture_2d<f32>;       // mip chain of the sharpened image (linear P3)
 @group(0) @binding(2) var distt: texture_2d<f32>;     // per-pixel refined distance (r32float)
+@group(0) @binding(3) var coct: texture_2d<f32>;      // per-pixel (distance, circle of confusion): written by `coc_pass`
+@group(0) @binding(6) var cocdst: texture_storage_2d<rg32float, write>;
 @group(0) @binding(4) var samp: sampler;
 @group(0) @binding(5) var dst: texture_storage_2d<rgba16float, write>;
 
@@ -60,13 +62,27 @@ fn coc(d: f32) -> f32 {
   return u.d.y * c;
 }
 
+/** Distance and blur radius of every pixel, once (the gather reads 48 neighbours' each). */
+@compute @workgroup_size(8, 8)
+fn coc_pass(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= u.size.x || id.y >= u.size.y) { return; }
+  let d = textureLoad(distt, vec2<i32>(id.xy), 0).r;
+  textureStore(cocdst, vec2<i32>(id.xy), vec4<f32>(d, coc(d), 0.0, 0.0));
+}
+
+fn coc_at(px: vec2<f32>) -> vec2<f32> {
+  let m = vec2<i32>(i32(u.size.x) - 1, i32(u.size.y) - 1);
+  return textureLoad(coct, clamp(vec2<i32>(px), vec2<i32>(0), m), 0).rg;
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let W = u.size.x; let H = u.size.y;
   if (id.x >= W || id.y >= H) { return; }
   let px = vec2<f32>(id.xy) + 0.5;
-  let dc = dist_at(px);
-  let rc = coc(dc);
+  let cc = coc_at(px);
+  let dc = cc.x;
+  let rc = cc.y;
   let center = textureLoad(src, vec2<i32>(id.xy), 0);
   // Alpha arrives as HDR excess luminance (output.wgsl linearize) and leaves as a gain again.
   if (rc < 0.6) { textureStore(dst, vec2<i32>(id.xy), vec4<f32>(center.rgb, 1.0 + center.a / max(dot(center.rgb, LUMAP3), 1e-6))); return; }
@@ -81,8 +97,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let o = vec2<f32>(cos(a), sin(a)) * r;
     let sp = px + o;
     if (sp.x < 0.0 || sp.y < 0.0 || sp.x >= size.x || sp.y >= size.y) { continue; }
-    let ds = dist_at(sp);
-    let rs = coc(ds);
+    let cs = coc_at(sp);
+    let ds = cs.x;
+    let rs = cs.y;
     // A sample contributes if its own blur disc reaches the centre…
     var w = smoothstep(r - 1.0, r + 1.0, rs);
     // …and background behind a sharper centre may not spill onto it.

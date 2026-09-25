@@ -15,6 +15,21 @@ import { BLEND_MODES, hueSatTable, LAYER_TYPES, type Layer, type LayerParams } f
 import { gradientTable } from "./gradient.ts";
 
 export const RECORD = 32;
+
+/**
+ * Atlas rows by the layer settings that make them: a slider drag changes one
+ * layer, so the other layers' tables (curve splines, hue and gradient tables)
+ * are not rebuilt on every frame.
+ */
+const rowCache = new Map<string, Float32Array>();
+function cachedRow(key: string, make: () => Float32Array): Float32Array {
+  let r = rowCache.get(key);
+  if (r) { rowCache.delete(key); rowCache.set(key, r); return r; } // most recently used last
+  r = make();
+  rowCache.set(key, r);
+  if (rowCache.size > 64) rowCache.delete(rowCache.keys().next().value!);
+  return r;
+}
 export const ATLAS_W = CURVE_LUT_SIZE; // 1024
 const MASK_KIND = { all: 0, region: 1, distance: 2, cell: 3, luminance: 4 } as const;
 
@@ -64,24 +79,26 @@ export function packLayers(layers: Layer[], autoStrength = 1, enable?: { curves?
     switch (l.type) {
       case "curves": {
         r[3] = rows.length;
-        rows.push(curveLUT(l.params as Curves));
+        rows.push(cachedRow("c" + JSON.stringify(l.params), () => curveLUT(l.params as Curves)));
         break;
       }
       case "hueSat": {
         const h = l.params as LayerParams["hueSat"];
         p[0] = h.colorize ? 1 : 0; p[1] = (h.cHue * Math.PI) / 180; p[2] = h.cSat; p[3] = h.cLight;
         // Per-hue table: r = hue shift (radians), g = saturation, b = lightness; 1024 samples over 0…360°.
-        const t = hueSatTable(h, ATLAS_W), row = new Float32Array(ATLAS_W * 4);
-        for (let k = 0; k < ATLAS_W; k++) { row[k * 4] = (t[k * 3] * Math.PI) / 180; row[k * 4 + 1] = t[k * 3 + 1]; row[k * 4 + 2] = t[k * 3 + 2]; row[k * 4 + 3] = 1; }
         r[3] = rows.length;
-        rows.push(row);
+        rows.push(cachedRow("h" + JSON.stringify(h.ranges), () => {
+          const t = hueSatTable(h, ATLAS_W), row = new Float32Array(ATLAS_W * 4);
+          for (let k = 0; k < ATLAS_W; k++) { row[k * 4] = (t[k * 3] * Math.PI) / 180; row[k * 4 + 1] = t[k * 3 + 1]; row[k * 4 + 2] = t[k * 3 + 2]; row[k * 4 + 3] = 1; }
+          return row;
+        }));
         break;
       }
       case "gradientMap": {
         const g = l.params as LayerParams["gradientMap"];
         p[0] = g.reverse ? 1 : 0;
         r[3] = rows.length;
-        rows.push(gradientTable(g.gradient, ATLAS_W));
+        rows.push(cachedRow("g" + JSON.stringify(g.gradient), () => gradientTable(g.gradient, ATLAS_W)));
         break;
       }
       case "gradientFill": {
@@ -89,7 +106,7 @@ export function packLayers(layers: Layer[], autoStrength = 1, enable?: { curves?
         p[0] = g.style === "radial" ? 1 : 0; p[1] = (g.angle * Math.PI) / 180; p[2] = Math.max(0.02, g.scale); p[3] = g.reverse ? 1 : 0;
         p[4] = g.x; p[5] = g.y;
         r[3] = rows.length;
-        rows.push(gradientTable(g.gradient, ATLAS_W));
+        rows.push(cachedRow("g" + JSON.stringify(g.gradient), () => gradientTable(g.gradient, ATLAS_W)));
         break;
       }
       case "brightContrast": { const b = l.params as LayerParams["brightContrast"]; p[0] = b.brightness; p[1] = b.contrast; break; }

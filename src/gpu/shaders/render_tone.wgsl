@@ -97,8 +97,10 @@ const P3_FROM_SRGB = mat3x3<f32>(
   vec3<f32>(0.0, 0.0, 0.9105199));
 
 fn enc_to_lab(e: vec3<f32>) -> vec3<f32> { return lin_srgb_to_oklab(P3_TO_SRGB * srgb_eotf(e)); }
-fn lab_to_enc(l: vec3<f32>) -> vec3<f32> {
-  var p3 = P3_FROM_SRGB * oklab_to_lin_srgb(l);
+fn lab_to_enc(l: vec3<f32>) -> vec3<f32> { return p3_to_enc(P3_FROM_SRGB * oklab_to_lin_srgb(l)); }
+/** Linear P3 → display-encoded, out-of-gamut values compressed toward their luminance. */
+fn p3_to_enc(lin: vec3<f32>) -> vec3<f32> {
+  var p3 = lin;
   // Out-of-gamut results are pulled toward their own luminance, never clipped per channel.
   let Y = dot(p3, LUMAP3);
   let mn = min(p3.r, min(p3.g, p3.b));
@@ -141,7 +143,7 @@ fn apply_profile(e_tech: vec3<f32>, g: array<f32, 12>, dist: f32, apple_skin: f3
   let lin = srgb_eotf(e_tech);
   let Y = max(dot(lin, LUMAP3), 1e-6);
   let Yt = srgb_eotf1(textureSampleLevel(prof_curve, lsamp, vec2<f32>(srgb_oetf1(Y), 0.5), 0.0).r);
-  var e = lab_to_enc(lin_srgb_to_oklab(P3_TO_SRGB * (lin * (Yt / Y))));
+  var e = p3_to_enc(lin * (Yt / Y)); // (was an OkLab round trip: identical, 3 cbrt and 3 matrices cheaper)
   // 2. RGB curves
   e = vec3<f32>(textureSampleLevel(prof_curve, lsamp, vec2<f32>(e.r, 0.5), 0.0).g,
                 textureSampleLevel(prof_curve, lsamp, vec2<f32>(e.g, 0.5), 0.0).b,
@@ -664,7 +666,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // layer does not reach is tinted red, as in Photoshop's quick-mask overlay.
   if (u.flags.w == 6u && u.lay.x > 0u) {
     let Lm = layers[min(u32(u.color.z), u.lay.x - 1u)];
-    let mw = layer_mask(Lm, maps.g, dist, skin_w, e, e_pre, uv);
+    layer_setup(maps.g, dist);
+    let mw = layer_mask(Lm, skin_w, e, e_pre, uv);
     e = mix(mix(e, vec3<f32>(1.0, 0.12, 0.12), 0.55), e, mw);
   }
 

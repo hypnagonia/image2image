@@ -120,11 +120,23 @@ export class Gpu {
     return b;
   }
 
+  /**
+   * Released uniform buffers, by size, for reuse: a render makes 5–8 of them. Reuse
+   * right after the work using one was submitted is safe — queue writes and
+   * submits run in order, so that work still reads the old contents.
+   */
+  private uniformPool = new Map<number, GPUBuffer[]>();
+  private uniforms = new WeakSet<GPUBuffer>();
   uniform(data: ArrayBufferView | ArrayBuffer, label = "uniforms"): GPUBuffer {
     const bytes = data instanceof ArrayBuffer ? data.byteLength : data.byteLength;
-    const b = this.device.createBuffer({ label, size: Math.max(16, Math.ceil(bytes / 16) * 16), usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const size = Math.max(16, Math.ceil(bytes / 16) * 16);
+    let b = this.uniformPool.get(size)?.pop();
+    if (!b) {
+      b = this.device.createBuffer({ label, size, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      this.uniforms.add(b);
+    }
     this.device.queue.writeBuffer(b, 0, data as BufferSource);
-    // Uniforms are tiny and short-lived: destroyed by the caller via `release`.
+    // Uniforms are tiny and short-lived: handed back by the caller via `release`.
     this.track(b, { label, kind: "buffer", bytes: b.size });
     return b;
   }
@@ -138,7 +150,12 @@ export class Gpu {
   release(...rs: Array<GPUTexture | GPUBuffer | undefined | null>) {
     for (const r of rs) {
       if (!r) continue;
-      if (this.live.delete(r)) r.destroy();
+      if (!this.live.delete(r)) continue;
+      if (r instanceof GPUBuffer && this.uniforms.has(r)) {
+        const pool = this.uniformPool.get(r.size) ?? [];
+        if (pool.length < 32) { pool.push(r); this.uniformPool.set(r.size, pool); continue; }
+      }
+      r.destroy();
     }
   }
 
@@ -209,6 +226,10 @@ export class Gpu {
   // Readback staging buffers are pooled: previews and export strips read back
   // the same sizes over and over.
   private stagingPool: GPUBuffer[] = [];
+  /** Most memory kept in pooled readback buffers (phones: less). */
+  stagingLimitMB = 48;
+  /** Drops every pooled readback buffer (after an export: its strip sizes will not come back). */
+  flushStaging() { for (const b of this.stagingPool.splice(0)) b.destroy(); }
   private takeStaging(size: number): GPUBuffer {
     const i = this.stagingPool.findIndex((b) => b.size >= size && b.size <= size * 2);
     if (i >= 0) return this.stagingPool.splice(i, 1)[0];
@@ -217,7 +238,7 @@ export class Gpu {
   private giveStaging(b: GPUBuffer) {
     this.stagingPool.push(b);
     let total = this.stagingPool.reduce((a, x) => a + x.size, 0);
-    while (total > 48 * 1048576 && this.stagingPool.length) {
+    while (total > this.stagingLimitMB * 1048576 && this.stagingPool.length) {
       const old = this.stagingPool.shift()!;
       total -= old.size;
       old.destroy();

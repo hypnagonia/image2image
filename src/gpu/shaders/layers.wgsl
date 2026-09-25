@@ -73,14 +73,18 @@ fn sky_mask(p: f32, e: vec3<f32>, uv: vec2<f32>, other: f32) -> f32 {
 }
 
 /** The layer's smart mask at this pixel (0…1), before opacity. `e0`: the colour before the layers. */
-fn layer_mask(L: LayerRec, g: array<f32, 12>, dist: f32, skin_w: f32, e: vec3<f32>, e0: vec3<f32>, uv: vec2<f32>) -> f32 {
-  var gs = g;
+/** This pixel's region probabilities and distance bands: set once per pixel (layer_setup), read by every layer. */
+var<private> lay_g: array<f32, 12>;
+var<private> lay_bw: vec3<f32>;
+fn layer_setup(g: array<f32, 12>, dist: f32) { lay_g = g; lay_bw = band_w(dist); }
+
+fn layer_mask(L: LayerRec, skin_w: f32, e: vec3<f32>, e0: vec3<f32>, uv: vec2<f32>) -> f32 {
   let kind = u32(L.m0.x);
   let reg = u32(L.m0.y);
-  let bw = band_w(dist);
+  let bw = lay_bw;
   var m = 1.0;
-  var pr = clamp(gs[min(reg, 10u)], 0.0, 1.0);
-  if (reg == 0u && (kind == 1u || kind == 3u)) { pr = sky_mask(pr, e0, uv, max(gs[5], gs[2])); }
+  var pr = clamp(lay_g[min(reg, 10u)], 0.0, 1.0);
+  if (reg == 0u && (kind == 1u || kind == 3u)) { pr = sky_mask(pr, e0, uv, max(lay_g[5], lay_g[2])); }
   if (kind == 1u) { m = select(pr, skin_w, reg == 11u); }
   else if (kind == 2u) { m = bw[min(u32(L.m0.z), 2u)]; }
   else if (kind == 3u) { m = pr * bw[min(u32(L.m0.z), 2u)]; }
@@ -263,10 +267,13 @@ fn op_gradient_fill(L: LayerRec, uv: vec2<f32>, aspect: f32) -> vec4<f32> {
 fn apply_layers(e0: vec3<f32>, g: array<f32, 12>, dist: f32, skin_w: f32, uv: vec2<f32>, aspect: f32) -> vec3<f32> {
   var e = e0;
   let n = u.lay.x;
+  layer_setup(g, dist);
   for (var i = 0u; i < n; i++) {
     let L = layers[i];
-    var w = L.a.z * layer_mask(L, g, dist, skin_w, e, e0, uv);
-    if (w < 1e-4) { continue; }
+    var w = L.a.z * layer_mask(L, skin_w, e, e0, uv);
+    // Soft region probabilities are rarely exactly 0: below 0.002 a layer moves the
+    // pixel by under half a level of 255, so it is skipped (most region layers, most pixels).
+    if (w < 2e-3) { continue; }
     var t = e;
     switch u32(L.a.x) {
       case 0u: { t = op_curves(L, e); }

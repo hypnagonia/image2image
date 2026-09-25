@@ -153,6 +153,17 @@ export class Engine {
     return [i === 0 ? -1 : e[i], i === 4 ? 2 : e[i + 1]];
   }
 
+  private draftIdle = 0;
+  /** The draft copy is freed a few seconds after the last drag (it comes back on the next one). */
+  private scheduleDraftRelease(s: Session) {
+    clearTimeout(this.draftIdle);
+    this.draftIdle = setTimeout(() => void this.exclusive(async () => {
+      if (this.s !== s || !s.draft) return;
+      this.gpu.release(s.draft.base, s.draft.denoised === s.draft.base ? undefined : s.draft.denoised);
+      s.draft = undefined;
+    }), 8000) as unknown as number;
+  }
+
   /** Half-size (quarter-pixel) copy of the preview proxy, created on first drag. */
   private async draftSource(): Promise<RenderSource> {
     const s = this.s!;
@@ -180,6 +191,7 @@ export class Engine {
       throw new Error(this.initError);
     }
     this.gpu = gpu;
+    if (isMobile()) gpu.stagingLimitMB = 16;
     gpu.onError = (m) => this.log("GPU error: " + m);
     gpu.onLost = (m) => this.post({ type: "gpu-lost", reason: m });
     this.renderer = new Renderer(gpu);
@@ -703,13 +715,23 @@ export class Engine {
     const t0 = performance.now();
     const p = this.effectiveParams();
     const src = draft && s.proxy ? await this.draftSource() : this.renderSource(false);
+    if (s.draft) this.scheduleDraftRelease(s);
     const dof = p.enable.dof && p.dof.strength > 0;
     const r = await this.renderer.render(src, s.maps, p, { wb: this.wbFor(p), gain: s.gain, lightLinear: s.lightLinear, output: "p38", debugView: this.view, region: this.region, zoneRange: this.zoneRange(), draft }, dof);
     const data = await this.gpu.readTexture(r.tex, 0, 0, src.width, src.height, 4);
     // Histograms for the curve boxes (the edit as rendered; not for "before" or debug views),
     // computed after the preview is on its way so they never delay it.
     const wantHist = final && !draft && !this.before && this.view === 0;
-    const pixels = wantHist ? new Uint8Array(data.slice(0)) : undefined;
+    // Only the pixels the histograms read (every 3rd in each direction: ~1/9 of the frame), not a full copy.
+    const HS = 3;
+    const hw = Math.ceil(src.width / HS), hh = Math.ceil(src.height / HS);
+    let pixels: Uint8Array | undefined;
+    if (wantHist) {
+      const all = new Uint32Array(data, 0, src.width * src.height);
+      const sub = new Uint32Array(hw * hh);
+      for (let y = 0, k = 0; y < src.height; y += HS) for (let x = 0; x < src.width; x += HS) sub[k++] = all[y * src.width + x];
+      pixels = new Uint8Array(sub.buffer);
+    }
     const calib = final && !draft && !this.before && this.view === 0 && s.calib && (s.calib.rounds < 2 || !s.calib.black) && Math.abs(p.exposure - s.decision.params.exposure) < 1e-6
       ? renderedQuantiles(new Uint8Array(data)) : undefined; // read before `data` is transferred
     this.post({ type: "preview", width: src.width, height: src.height, data, space: "p3", final, ms: performance.now() - t0 }, [data]);
@@ -740,7 +762,7 @@ export class Engine {
       }
     }
     if (pixels) {
-      const hist = previewHistograms(pixels, src.width, src.height, s.scene.seg, s.distCPU, p.depthBands ?? [0.33, 0.66]);
+      const hist = previewHistograms(pixels, hw, hh, s.scene.seg, s.distCPU, p.depthBands ?? [0.33, 0.66], 1);
       this.post({ type: "histograms", data: hist }, [hist.buffer]);
     }
   }
@@ -922,8 +944,9 @@ export class Engine {
       this.post({ type: "profile", stages: P.stages });
       return { blob, name: `${base}-edit.${format === "heic" ? "heic" : "jpg"}`, ms: performance.now() - t0 };
     } finally {
-      // Strip targets are export-sized; the next preview re-creates its own.
+      // Strip targets and readback buffers are export-sized; the next preview re-creates its own.
       this.renderer.releaseTargets();
+      this.gpu.flushStaging();
     }
   }
 

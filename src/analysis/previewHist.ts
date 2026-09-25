@@ -31,42 +31,55 @@ export function previewHistograms(
   const plane = seg ? seg.width * seg.height : 0;
   const person = GROUPS.indexOf("person");
   const f = 0.06;
-  const add = (t: number, w8: number, v: number[]) => {
+  // Scalar arguments (no per-sample arrays: this runs ~200k times per preview).
+  let L = 0, R = 0, G = 0, B = 0;
+  const add = (t: number, w8: number) => {
     const base = t * CH * HIST_BINS;
-    for (let c = 0; c < CH; c++) out[base + c * HIST_BINS + Math.min(HIST_BINS - 1, v[c] >> 2)] += w8;
+    out[base + Math.min(HIST_BINS - 1, L >> 2)] += w8;
+    out[base + HIST_BINS + Math.min(HIST_BINS - 1, R >> 2)] += w8;
+    out[base + 2 * HIST_BINS + Math.min(HIST_BINS - 1, G >> 2)] += w8;
+    out[base + 3 * HIST_BINS + Math.min(HIST_BINS - 1, B >> 2)] += w8;
   };
+  const t0 = 2 + GROUPS.length;
   for (let y = 0; y < h; y += stride) {
+    const dy = dist ? Math.min(dist.h - 1, Math.floor((y / h) * dist.h)) : 0;
+    const sy = seg ? Math.min(seg.height - 1, Math.floor((y / h) * seg.height)) : 0;
     for (let x = 0; x < w; x += stride) {
       const i = (y * w + x) * 4;
-      const r = px[i], g = px[i + 1], b = px[i + 2];
-      const l = Math.round(0.2290 * r + 0.6917 * g + 0.0793 * b);
-      const v = [l, r, g, b];
-      add(0, 1, v);
-      let wb: number[] | undefined;
+      R = px[i]; G = px[i + 1]; B = px[i + 2];
+      L = Math.round(0.2290 * R + 0.6917 * G + 0.0793 * B);
+      add(0, 1);
+      let w0 = 0, w1 = 0, w2 = 0;
       if (dist) {
-        const dx = Math.min(dist.w - 1, Math.floor((x / w) * dist.w)), dy = Math.min(dist.h - 1, Math.floor((y / h) * dist.h));
+        const dx = Math.min(dist.w - 1, Math.floor((x / w) * dist.w));
         const d = dist.data[dy * dist.w + dx];
-        const wn = 1 - smooth(bands[0] - f, bands[0] + f, d), wf = smooth(bands[1] - f, bands[1] + f, d);
-        wb = [wn, Math.max(0, 1 - wn - wf), wf];
+        w0 = 1 - smooth(bands[0] - f, bands[0] + f, d); w2 = smooth(bands[1] - f, bands[1] + f, d);
+        w1 = Math.max(0, 1 - w0 - w2);
       }
       if (seg) {
-        const sx = Math.min(seg.width - 1, Math.floor((x / w) * seg.width)), sy = Math.min(seg.height - 1, Math.floor((y / h) * seg.height));
+        const sx = Math.min(seg.width - 1, Math.floor((x / w) * seg.width));
         const k = sy * seg.width + sx;
         for (let gi = 0; gi < GROUPS.length; gi++) {
           const p = seg.probs[gi * plane + k];
           if (p > 0.05) {
-            add(1 + gi, p, v);
+            add(1 + gi, p);
             // The same region at each distance (a cell).
-            if (wb) for (let b = 0; b < 3; b++) if (p * wb[b] > 0.05) add(CELL0 + gi * 3 + b, p * wb[b], v);
+            if (dist) {
+              const c = CELL0 + gi * 3;
+              if (p * w0 > 0.05) add(c, p * w0);
+              if (p * w1 > 0.05) add(c + 1, p * w1);
+              if (p * w2 > 0.05) add(c + 2, p * w2);
+            }
           }
         }
-        const warm = r > g && g > b && r - b > 15 ? 1 : 0;
+        const warm = R > G && G > B && R - B > 15 ? 1 : 0;
         const sk = seg.probs[person * plane + k] * warm;
-        if (sk > 0.05) add(1 + GROUPS.length, sk, v);
+        if (sk > 0.05) add(1 + GROUPS.length, sk);
       }
-      if (wb) {
-        const t0 = 2 + GROUPS.length;
-        for (let b = 0; b < 3; b++) if (wb[b] > 0.05) add(t0 + b, wb[b], v);
+      if (dist) {
+        if (w0 > 0.05) add(t0, w0);
+        if (w1 > 0.05) add(t0 + 1, w1);
+        if (w2 > 0.05) add(t0 + 2, w2);
       }
     }
   }

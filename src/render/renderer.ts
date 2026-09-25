@@ -297,7 +297,8 @@ export class Renderer {
     let final = t2;
     let finalLinear = false;
     if (dof) {
-      final = await this.depthOfField(t2, distT, W, th, p, maxRadius, dofLevels);
+      // Into the tone target: free once the detail pass has read it (saves a full-size buffer).
+      final = await this.depthOfField(t2, t1, distT, W, th, p, maxRadius, dofLevels);
       finalLinear = true;
     }
     const gr = p.grain;
@@ -305,7 +306,8 @@ export class Renderer {
       // Last, on the finished image. Particle size is set for a ~12 MP frame and
       // scales with the image; `scale` is this render's pixels per full-image pixel.
       const sizePx = (0.7 + 2.3 * gr.size) * Math.max(W / scale, H / scale) / 4032;
-      const out = this.target("grain", W, th, "rgba16float");
+      // Into whichever of tone / detail the image is not in now (no buffer of its own).
+      const out = final === t1 ? t2 : t1;
       await gpu.run("render.grain", (enc, temp) => {
         const u = gpu.uniform(new Uniforms(12).u32(W, th, ty0, finalLinear ? 1 : 0).f32(gr.amount * 0.055, sizePx, gr.roughness, gr.color).f32(1 / scale, o.draft ? 1 : 0, 0, 0).bytes(), "grain.u");
         temp.push(u);
@@ -367,7 +369,7 @@ export class Renderer {
     return out;
   }
 
-  private async depthOfField(sharp: GPUTexture, distT: GPUTexture, W: number, H: number, p: Params, maxRadius: number, fullLevels: number): Promise<GPUTexture> {
+  private async depthOfField(sharp: GPUTexture, out: GPUTexture, distT: GPUTexture, W: number, H: number, p: Params, maxRadius: number, fullLevels: number): Promise<GPUTexture> {
     const gpu = this.gpu;
     // Same level count as a full-image render (a strip may be shorter), limited by what fits.
     const levels = Math.max(1, Math.min(fullLevels, Math.floor(Math.log2(Math.min(W, H))) + 1));
@@ -381,7 +383,6 @@ export class Renderer {
       }) };
     }
     const mipTex = this.dofMips.tex;
-    const out = this.target("dof", W, H, "rgba16float");
     await gpu.run("dof", (enc, temp) => {
       const u0 = gpu.uniform(new Uniforms(8).u32(W, H, 0, 0, 0, 0, 0, 0).bytes());
       temp.push(u0);
@@ -404,7 +405,9 @@ export class Renderer {
       const zv = zonesOn ? [...p.dof.zones!, 0, 0, 0] : new Array(8).fill(0);
       const u = gpu.uniform(new Uniforms(44).u32(W, H, 0, 0).f32(p.dof.focus, maxRadius, 0.6, span[0]).f32(pts.length, zonesOn ? 1 : 0, levels, span[1]).f32(...foci).f32(...zc).f32(...zv).f32(...fociHi).bytes());
       temp.push(u);
-      gpu.dispatch(enc, gpu.pipeline("render.dof", dofWgsl), [u, mipTex.createView(), distT.createView(), undefined, this.sampler, out.createView()], Math.ceil(W / 8), Math.ceil(H / 8));
+      const cocT = this.target("dof.coc", W, H, "rg32float");
+      gpu.dispatch(enc, gpu.pipeline("render.dof.coc", dofWgsl, "coc_pass"), [u, undefined, distT.createView(), undefined, undefined, undefined, cocT.createView()], Math.ceil(W / 8), Math.ceil(H / 8));
+      gpu.dispatch(enc, gpu.pipeline("render.dof", dofWgsl), [u, mipTex.createView(), undefined, cocT.createView(), this.sampler, out.createView()], Math.ceil(W / 8), Math.ceil(H / 8));
     });
     return out;
   }
