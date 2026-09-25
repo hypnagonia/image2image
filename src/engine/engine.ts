@@ -5,16 +5,15 @@
  *   Input/Decoder → RAW Development → Scene Analysis (reduced image) →
  *   Semantic Segmentation → Depth Estimation → Mask/Depth Refinement →
  *   Image statistics → Automatic Decision Engine → [preview] →
- *   Neural Restoration (SCUNet, NAFNet; tiled, only where needed) →
+ *   Denoise (GPU, noise-adaptive) →
  *   Image quality analysis → optional 2× upscale (Swin2SR, only when needed) →
  *   Exposure/Tone → Camera Color → Semantic/Depth → Depth of Field → Output
  *
  * Deviation from the reference order (documented in docs/PIPELINE.md): the
- * tiled neural denoise/restoration runs after the first preview. The analysis
+ * denoise and the tiled restoration run after the first preview. The analysis
  * networks see a ≤768 px area-averaged image in which sensor noise is already
  * averaged away, so running them on the denoised image would not change
- * their output — but it would delay the first preview by the full cost of
- * SCUNet on a phone.
+ * their output — but it would delay the first preview.
  */
 import { Gpu } from "../gpu/gpu.ts";
 import { halvesToFloats } from "../gpu/half.ts";
@@ -23,7 +22,6 @@ import type { DecodedImage } from "../decode/types.ts";
 import { develop, type WorkingImage } from "../raw/develop.ts";
 import { Neural, MODELS } from "../neural/ort.ts";
 import { analyseScene, applyAppleMattes, type SceneMaps } from "../neural/scene.ts";
-import { runTiled } from "../neural/tiles.ts";
 import { denoiseGPU } from "../restore/denoise.ts";
 import { UpscaleJob, probeUpscaler } from "../restore/upscale.ts";
 import { decideUpscale, measureQuality, type ImageQualityReport, type UpscaleMode } from "../analysis/quality.ts";
@@ -388,7 +386,7 @@ export class Engine {
     if (gen !== this.generation) return;
 
     // --- image quality → optional 2× upscale ----------------------------------------------
-    // Measured on the restored image (after denoise/deblur), before any tone or
+    // Measured on the restored image (after denoise), before any tone or
     // look. When the source already has enough detail this is the only cost:
     // the upscaling model is never downloaded or loaded.
     const q = await P.time("quality analysis", () => this.analyseQuality(resolution === "half", upscaleMode), (r) => `${r.megapixels} MP, edge σ ${r.metrics.edgeSigma.toFixed(2)} px, noise ${(r.metrics.noiseSigma * 255).toFixed(2)}/255 → ${r.needsUpscale ? "2×" : "skip"}`);
@@ -533,78 +531,16 @@ export class Engine {
     }
   }
 
-  /** Runs SCUNet/NAFNet on demand (user request), overriding the automatic plan. */
-  async forceRestore(which: { scunet: boolean; nafnet: boolean }) {
-    const s = this.s;
-    if (!s) return;
-    const auto = s.decision.plan;
-    if (isMobile() && which.scunet) { this.log("SCUNet is desktop-only (too heavy for phone memory)"); return; }
-    const plan = {
-      denoise: false,
-      scunet: which.scunet,
-      nafnet: which.nafnet,
-      denoiseTile: () => 1,
-      // Forced restoration still follows the measured blur map, with a floor so every tile is tried.
-      deblurTile: (x: number, y: number, n: number) => Math.max(0.5, auto.deblurTile(x / s.scale, y / s.scale, n / s.scale)),
-    };
-    if (s.denoised !== s.work.tex) { this.gpu.release(s.denoised); s.denoised = s.work.tex; }
-    if (which.scunet && s.params.denoise.luma === 0 && s.params.denoise.chroma === 0) s.params = { ...s.params, denoise: { ...s.params.denoise, luma: 0.6, chroma: 0.6 } };
-    await this.restore(this.generation, plan);
-    await this.profiler.time("preview proxy (restored)", () => this.makeProxy());
-    this.post({ type: "params", params: s.params });
-    await this.renderNow(true);
-    this.post({ type: "profile", stages: this.profiler.stages });
-  }
-
-  private async restore(gen: number, override?: DecisionResult["plan"]) {
+  /** Noise-adaptive GPU denoise of the working image, when the decision engine asked for it. */
+  private async restore(_gen: number) {
     const s = this.s!;
     const gpu = this.gpu;
     const P = this.profiler;
-    const plan = { ...(override ?? s.decision.plan) };
     const { width: W, height: H } = s.work;
-    // Phones: the ~17M-parameter restoration networks can exhaust memory and
-    // crash the tab, so they never run automatically there.
-    if (!override && isMobile() && plan.nafnet) { plan.nafnet = false; this.log("NAFNet restoration skipped automatically on this device (memory); use the button to run it"); }
-    if (!plan.denoise && !plan.scunet && !plan.nafnet) { this.log("neural restoration: not needed for this photograph"); return; }
-    let target = s.work.tex;
-    if (plan.denoise && !plan.scunet) {
-      this.progress("denoise", "GPU");
-      target = await P.time("GPU denoise", () => denoiseGPU(gpu, s.work.tex, W, H, s.gain, s.report.noise), () => `${W}×${H}`);
-      this.log(`GPU denoise: full frame, noise-adaptive (σ mid ${(s.report.noise.mid * 255).toFixed(2)}/255)`);
-    }
-    if (plan.scunet) {
-      this.progress("denoise (SCUNet)", "loading model");
-      const session = await P.time("SCUNet load", () => this.neural.session(MODELS.scunet, this.neural.backend === "webgpu"));
-      const out = gpu.tex("denoised", W, H, "rgba16float");
-      const st = await P.time("SCUNet tiles", () => runTiled(gpu, this.neural, session, s.work.tex, out, W, H, {
-        gain: s.gain,
-        plan: (_c, _r, x, y) => ({ strength: plan.denoiseTile(x, y, 256) }),
-        onTile: (d, t) => this.progress("denoise (SCUNet)", `tile ${d}/${t}`, d / t),
-        shouldCancel: () => gen !== this.generation,
-      }), (r) => `${r.run}/${r.tiles} tiles run, ${r.msPerTile.toFixed(0)} ms/tile`);
-      await session.release();
-      this.log(`SCUNet: ${st.run} of ${st.tiles} tiles processed (${st.skipped} clean tiles skipped), ${st.msPerTile.toFixed(0)} ms per tile on ${this.neural.backend}`);
-      target = out;
-    }
-    if (plan.nafnet) {
-      if (target === s.work.tex) {
-        target = gpu.tex("denoised", W, H, "rgba16float");
-        await gpu.run("copy", (enc) => enc.copyTextureToTexture({ texture: s.work.tex }, { texture: target }, { width: W, height: H }));
-      }
-      this.progress("restore (NAFNet)", "loading model");
-      const session = await P.time("NAFNet load", () => this.neural.session(MODELS.nafnet, this.neural.backend === "webgpu"));
-      const st = await P.time("NAFNet tiles", () => runTiled(gpu, this.neural, session, target, target, W, H, {
-        gain: s.gain,
-        plan: (_c, _r, x, y) => ({ strength: plan.deblurTile(x, y, 256) }),
-        // NAFNet-GoPro diverges on sharp, sharpened content: reject such tiles.
-        sanity: { maxMeanDiff: 0.08, maxDeviation: 0.75 },
-        onTile: (d, t) => this.progress("restore (NAFNet)", `tile ${d}/${t}`, d / t),
-        shouldCancel: () => gen !== this.generation,
-      }), (r) => `${r.run}/${r.tiles} tiles, ${r.rejected} rejected`);
-      await session.release();
-      this.log(`NAFNet: ${st.run} of ${st.tiles} tiles restored, ${st.rejected} rejected by the sanity gate`);
-    }
-    s.denoised = target;
+    if (!s.decision.plan.denoise) { this.log("denoise: noise below visibility — not needed"); return; }
+    this.progress("denoise", "GPU");
+    s.denoised = await P.time("GPU denoise", () => denoiseGPU(gpu, s.work.tex, W, H, s.gain, s.report.noise), () => `${W}×${H}`);
+    this.log(`GPU denoise: full frame, noise-adaptive (σ mid ${(s.report.noise.mid * 255).toFixed(2)}/255)`);
     this.dropThumb(); // look previews must see the restored image
   }
 
@@ -645,7 +581,7 @@ export class Engine {
     // "Before": camera rendering only — exposure/WB from the camera, tone curve, nothing adaptive.
     const p = structuredClone(s.params);
     const e = p.enable;
-    e.denoise = false; e.deblur = false; e.localTone = false; e.semantic = false; e.dehaze = false; e.sharpen = false; e.dof = false; e.curves = false;
+    e.denoise = false; e.localTone = false; e.semantic = false; e.dehaze = false; e.sharpen = false; e.dof = false; e.curves = false;
     p.exposure = 0;
     p.wb = { temp: s.work.camera?.temp ?? 6504, tint: s.work.camera?.tint ?? 0 };
     p.tone = { highlights: 0, shadows: 0, whites: 0, blacks: 0, contrast: 0, rolloff: 0.5 };

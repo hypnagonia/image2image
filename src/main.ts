@@ -624,15 +624,9 @@ adjustPane.append(
   el("p", { class: "muted", text: t("adj.curvesHint") }),
 );
 
-const dnBtn = el("button", { class: "btn small", text: t("adj.scunet") });
-dnBtn.onclick = () => { if (params) { markInflight(); setProgress(stageText("denoise (SCUNet)")); send({ type: "restore", scunet: true, nafnet: false }); } };
-const isPhone = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || navigator.maxTouchPoints > 1;
-if (isPhone) dnBtn.style.display = "none"; // SCUNet is too heavy for phone memory
-const rsBtn = el("button", { class: "btn small", text: t("adj.nafnet") });
-rsBtn.onclick = () => { if (params) { markInflight(); setProgress(stageText("restore (NAFNet)")); send({ type: "restore", scunet: false, nafnet: true }); } };
 const resetBtn = el("button", { class: "btn small", text: t("adj.reset") });
 resetBtn.onclick = () => { if (autoParams) { params = structuredClone(autoParams); syncControls(); pushParams(); } };
-adjustPane.append(el("div", { class: "actions" }, dnBtn, rsBtn), el("p", { class: "muted", text: t("adj.networksHint") }), el("div", { class: "actions" }, resetBtn), el("p", { class: "muted", text: t("adj.amberHint") }));
+adjustPane.append(el("div", { class: "actions" }, resetBtn), el("p", { class: "muted", text: t("adj.amberHint") }));
 
 // Look profiles: browser, palette, reference, editor (src/ui/lookPanel.ts)
 const lookPanel = createLookPanel(lookPane, {

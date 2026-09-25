@@ -14,17 +14,6 @@ libheif (libheif-js 1.23.2, WebAssembly) — HEIC fallback decoder
 
 ONNX Runtime Web 1.30 — MIT License, Copyright (c) Microsoft Corporation.
 
-SCUNet (color, real-world PSNR checkpoint) — Apache License 2.0
-  Kai Zhang et al., "Practical Blind Image Denoising via Swin-Conv-UNet and Data
-  Synthesis", 2022. https://github.com/cszn/SCUNet
-  Converted to ONNX (fp16) by scripts/models/export.py.
-
-NAFNet (GoPro, width 32) — MIT License, Copyright (c) 2022 megvii-model
-  Liangyu Chen et al., "Simple Baselines for Image Restoration", ECCV 2022.
-  https://github.com/megvii-research/NAFNet
-  Weights SHA-256 19394e6155d12ef6371d1d57496f87f0ec88f92bdffa27c0792690722d5d1a5c
-  (identical to the authors' Google Drive release). Converted by scripts/models/export.py.
-
 Swin2SR lightweight ×2 (optional 2× upscale) — Apache License 2.0
   Marcos V. Conde et al., "Swin2SR: SwinV2 Transformer for Compressed Image
   Super-Resolution and Restoration", ECCV Workshops 2022. https://github.com/mv-lab/swin2sr

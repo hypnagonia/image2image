@@ -62,7 +62,7 @@ export interface SemanticAdjust {
 export interface Params {
   /** Master switch per stage (for A/B debugging). */
   enable: {
-    denoise: boolean; deblur: boolean; wb: boolean; exposure: boolean; localTone: boolean;
+    denoise: boolean; wb: boolean; exposure: boolean; localTone: boolean;
     curves: boolean; lut: boolean; semantic: boolean; dehaze: boolean; sharpen: boolean; dof: boolean;
   };
   exposure: number;
@@ -105,7 +105,6 @@ export interface Params {
   /** The creative layer: one look profile on top of the technical base. */
   profile: LookProfile;
   denoise: { luma: number; chroma: number; shadowBoost: number };
-  deblur: { strength: number };
   sharpen: { amount: number; radius: number; threshold: number };
   dehaze: { strength: number; light: [number, number, number]; beta: number; minT: number };
   semantic: Record<Group, SemanticAdjust>;
@@ -167,7 +166,7 @@ export function neutralSemantic(): SemanticAdjust {
 export function defaultParams(): Params {
   const flat: CurvePoint[] = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
   return {
-    enable: { denoise: true, deblur: true, wb: true, exposure: true, localTone: true, curves: true, lut: true, semantic: true, dehaze: true, sharpen: true, dof: false },
+    enable: { denoise: true, wb: true, exposure: true, localTone: true, curves: true, lut: true, semantic: true, dehaze: true, sharpen: true, dof: false },
     exposure: 0,
     wb: { temp: 6504, tint: 0 },
     tone: { highlights: 0, shadows: 0, whites: 0, blacks: 0, contrast: 0, rolloff: 0.5 },
@@ -176,7 +175,6 @@ export function defaultParams(): Params {
     curves: { l: [...flat], r: [...flat], g: [...flat], b: [...flat] },
     profile: structuredClone(BUILTIN_PROFILES.find((q) => q.id === DEFAULT_PROFILE_ID)!),
     denoise: { luma: 0, chroma: 0, shadowBoost: 0 },
-    deblur: { strength: 0 },
     sharpen: { amount: 0, radius: 1, threshold: 0.01 },
     dehaze: { strength: 0, light: [1, 1, 1], beta: 1, minT: 0.45 },
     semantic: Object.fromEntries(GROUPS.map((g) => [g, neutralSemantic()])) as Record<Group, SemanticAdjust>,

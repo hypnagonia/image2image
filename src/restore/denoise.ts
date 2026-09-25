@@ -1,7 +1,6 @@
 /**
  * Fast GPU denoise (denoise.wgsl): a full-frame, noise-profile-driven
- * edge-preserving filter. Milliseconds at 12 MP, so it replaces SCUNet in the
- * automatic pipeline (SCUNet remains a manual, desktop-only option).
+ * edge-preserving filter. Milliseconds at 12 MP — the app's denoiser.
  */
 import { Gpu, Uniforms } from "../gpu/gpu.ts";
 import denoiseWgsl from "../gpu/shaders/denoise.wgsl?raw";

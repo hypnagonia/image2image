@@ -74,8 +74,6 @@ export const pt: Dict = {
   "stage.refine masks": "refinando máscaras",
   "stage.statistics": "estatísticas",
   "stage.denoise": "redução de ruído",
-  "stage.denoise (SCUNet)": "redução de ruído (SCUNet)",
-  "stage.restore (NAFNet)": "restauração (NAFNet)",
   "stage.detail enhancement": "realce de detalhes",
   "tab.upscale": "Ampliar",
   "tab.llm": "Perguntar à IA",
@@ -163,8 +161,6 @@ export const pt: Dict = {
   "adj.depth": "Profundidade",
   "adj.nearDetail": "Detalhe próximo",
   "adj.farDetail": "Detalhe distante",
-  "adj.scunet": "Redução de ruído neural (SCUNet, lenta)",
-  "adj.nafnet": "Restaurar (NAFNet)",
   "adj.reset": "Redefinir tudo para automático",
   "adj.curves": "Curvas (esta foto)",
   "adj.curvesHint": "Toque na curva para adicionar um ponto, arraste para movê-lo, arraste um ponto para fora da caixa para removê-lo. Atrás da curva: como os tons da foto se distribuem (esquerda = preto, direita = branco). O estilo tem suas próprias curvas (Estilo → Editar).",
@@ -182,7 +178,6 @@ export const pt: Dict = {
   "adj.grainRoughness": "Aspereza",
   "adj.grainColour": "Cor",
   "adj.grainHint": "O grão é aplicado por último, na foto pronta, e acompanha o tamanho da imagem. Reduzida, a pré-visualização mostra como ficará nesse tamanho; amplie para ver as partículas.",
-  "adj.networksHint": "As redes neurais rodam automaticamente só onde há ruído ou desfoque medido; estes botões as aplicam no quadro inteiro.",
   "adj.amberHint": "Valores em âmbar são os automáticos. Toque duas vezes em um rótulo para restaurá-lo.",
 
   // ---- Depth tab

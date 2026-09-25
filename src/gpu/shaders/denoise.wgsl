@@ -1,4 +1,4 @@
-// Fast, noise-adaptive GPU denoiser (replaces SCUNet on phones).
+// Fast, noise-adaptive GPU denoiser.
 //
 // Works on the encoded signal (gain k, sRGB curve) the noise was measured on,
 // split into luma Y' and chroma (Cb', Cr'):

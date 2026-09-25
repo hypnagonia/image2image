@@ -11,7 +11,7 @@ leave the device; models are served from this site and cached locally.
 |---|---|---|
 | Input/Decoder | `src/decode/` (LibRaw 0.22.2 → wasm in `native/libraw`, libheif-js, native `createImageBitmap`) | file bytes → sensor integers + DNG metadata, or display RGB |
 | RAW Development | `src/raw/develop.ts`, `develop.wgsl`, `src/color/dng.ts` | sensor data → linear Rec.2020 working texture (strip-wise upload) |
-| Neural Restoration | `src/neural/tiles.ts`, `tile_*.wgsl` (SCUNet, NAFNet) | working texture → denoised/restored texture (tiled, only where needed) |
+| Denoise | `src/restore/denoise.ts`, `denoise.wgsl` | working texture → denoised texture (noise-adaptive, full frame) |
 | Image Quality Analysis | `src/analysis/quality.ts` | restored texture → sharpness / noise / detail metrics and the 2× decision |
 | Upscaling (optional) | `src/restore/upscale.ts`, `display.ts` (Swin2SR lightweight ×2) | restored texture W×H → working texture 2W×2H (tiled, only when needed) |
 | Scene Analysis | `src/analysis/`, `blocks.wgsl`, `stats.wgsl` | textures → `AnalysisReport` (noise profile, blur map, per-region stats, histograms) |
@@ -40,7 +40,7 @@ DNG/ProRAW/HEIC → decode (LibRaw / native / libheif)
 → guided-filter refinement against the photograph
 → image statistics (GPU) → decision engine
 → [first preview]
-→ SCUNet (tiles with measured visible noise) → NAFNet (tiles measured as blurred)
+→ GPU denoise (noise-adaptive, full frame)
 → image quality analysis → optional 2× upscale (Swin2SR; the new working image)
 → render: denoise blend → white balance → depth-aware dehaze → exposure
   → local tone mapping → vignette (linear-light exposure falloff)
@@ -62,10 +62,10 @@ DNG/ProRAW/HEIC → decode (LibRaw / native / libheif)
    transform for camera neutral `n` (re-solved through the DNG model, including
    the illuminant-dependent matrix). This is algebraically the same as changing
    the camera-space gains and re-developing — without re-developing.
-3. **SCUNet/NAFNet run after segmentation, depth and the first preview.** The
+3. **Denoise runs after segmentation, depth and the first preview.** The
    analysis networks see a ≤768 px area-averaged image where sensor noise is
    already averaged away, so denoising first would not change their output but
-   would delay the first preview by the full cost of SCUNet on a phone.
+   would delay the first preview.
    Decisions about denoising use the noise measured on the undenoised image.
 4. **Dehaze in linear light before exposure and tone.** The haze model
    `I = J·t + A·(1−t)` holds for scene-linear radiance only.
@@ -157,11 +157,9 @@ provides spatial context. Every decision is recorded with the numbers it used
 
 Examples: denoise strength follows the measured noise σ per luminance bin
 (15th percentile of Immerkaer estimates per 32 px block) after the chosen
-exposure and shadow lift; restoration runs only on tiles whose estimated blur
-σ (noise-corrected Laplacian/gradient ratio, calibrated on Gaussian-blurred
-real frames: σ ≈ 0.7 / ratio) exceeds 1.6 px; NAFNet tiles whose output
-diverges are rejected by a sanity gate (NAFNet-GoPro is unstable on already
-sharp, sharpened content — measured, see `scripts/models/export.py`); dehaze
+exposure and shadow lift; sharpening follows the measured blur σ
+(noise-corrected Laplacian/gradient ratio, calibrated on Gaussian-blurred real
+frames: σ ≈ 0.7 / ratio) and is gated by noise; dehaze
 needs distant regions whose dark channel is raised relative to near ones and
 whose local contrast is lower, and is capped so atmosphere never disappears.
 
@@ -418,8 +416,9 @@ region can be highlighted on the photo.
 * Sensor data is uploaded strip-wise; the LibRaw heap is dropped right after.
 * Full-resolution masks are never stored: guide-resolution maps are
   joint-bilaterally upsampled per pixel at render time.
-* SCUNet/NAFNet tiles run only where needed; tile tensors stay on the GPU
-  (ONNX Runtime shares the engine's `GPUDevice` through an adapter shim).
+* Denoise is a GPU filter (milliseconds); the only full-resolution network is
+  the optional 2× upscale. The networks run in ONNX Runtime on the engine's own
+  `GPUDevice` (through an adapter shim).
 * The 2× upscale is limited to a 16 MP result on phones, keeps the crash
   guard armed while it runs (a memory kill leads to "Reopen at half size",
   which never upscales), and holds one 256 px tile plus a 512-row strip.

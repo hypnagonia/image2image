@@ -82,9 +82,6 @@ async function handle(m: ToWorker) {
       post({ type: "exported", blob: r.blob, name: r.name, ms: r.ms });
       break;
     }
-    case "restore":
-      await engine.forceRestore({ scunet: m.scunet, nafnet: m.nafnet });
-      break;
     case "thumbs":
       post({ type: "thumbs", items: await engine.thumbnails(m.profiles, m.long) });
       break;

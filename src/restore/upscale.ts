@@ -26,8 +26,21 @@
 import type { Gpu } from "../gpu/gpu.ts";
 import { floatsToHalves, halvesToFloats } from "../gpu/half.ts";
 import { ort } from "../neural/ort.ts";
-import { tileGrid, type TileGrid } from "../neural/tiles.ts";
 import { WHITE, fromDisplay, toDisplay } from "./display.ts";
+
+interface TileGrid { xs: number[]; ys: number[] }
+/** Tile origins covering w × h with overlapping tiles (the last one flush with the edge). */
+function tileGrid(w: number, h: number, tile: number, overlap: number): TileGrid {
+  const axis = (n: number) => {
+    if (n <= tile) return [0];
+    const stride = tile - overlap;
+    const out: number[] = [];
+    for (let p = 0; p + tile < n; p += stride) out.push(p);
+    out.push(n - tile);
+    return out;
+  };
+  return { xs: axis(w), ys: axis(h) };
+}
 
 export const SR_TILE = 256;
 export const SR_OVERLAP = 24;

@@ -79,8 +79,6 @@ export const en = {
   "stage.refine masks": "refine masks",
   "stage.statistics": "statistics",
   "stage.denoise": "denoise",
-  "stage.denoise (SCUNet)": "denoise (SCUNet)",
-  "stage.restore (NAFNet)": "restore (NAFNet)",
   "stage.detail enhancement": "detail enhancement",
   "tab.upscale": "Upscale",
   "tab.llm": "Ask AI",
@@ -168,8 +166,6 @@ export const en = {
   "adj.depth": "Depth",
   "adj.nearDetail": "Near detail",
   "adj.farDetail": "Far detail",
-  "adj.scunet": "Neural denoise (SCUNet, slow)",
-  "adj.nafnet": "Run restoration (NAFNet)",
   "adj.reset": "Reset all to automatic",
   "adj.curves": "Curves (this photo)",
   "adj.curvesHint": "Tap the curve to add a point, drag to move it, drag a point out of the box to remove it. Behind the curve: how the photo's tones are spread (left = black, right = white). The look has its own curves (Look → Edit look).",
@@ -187,7 +183,6 @@ export const en = {
   "adj.grainRoughness": "Roughness",
   "adj.grainColour": "Colour",
   "adj.grainHint": "Grain is added last, on the finished photo, and scales with the image. Zoomed out, the preview shows it as it will look at that size; zoom in to judge the particles.",
-  "adj.networksHint": "The networks run automatically only where noise or blur is measured; these buttons run them on the whole frame.",
   "adj.amberHint": "Values in amber are the automatic ones. Double-tap a label to restore it.",
 
   // ---- Depth tab

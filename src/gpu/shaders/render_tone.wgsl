@@ -3,7 +3,7 @@
 //
 //   masks/depth   joint-bilateral upsampling of the refined maps (guide res)
 //                 against this pixel, so region boundaries follow real edges
-//   denoise       SCUNet result blended in luma and chroma separately, with
+//   denoise       GPU denoiser result blended in luma and chroma separately, with
 //                 strength from noise, semantic class and shadow depth
 //   white balance 3×3 in working space  (= camera-space gains, see wb.ts)
 //   dehaze        depth-aware haze model  I = J·t + A·(1−t)   (linear light)

@@ -74,8 +74,6 @@ export const es: Dict = {
   "stage.refine masks": "refinando máscaras",
   "stage.statistics": "estadísticas",
   "stage.denoise": "reducción de ruido",
-  "stage.denoise (SCUNet)": "reducción de ruido (SCUNet)",
-  "stage.restore (NAFNet)": "restauración (NAFNet)",
   "stage.detail enhancement": "mejora de detalle",
   "tab.upscale": "Ampliar",
   "tab.llm": "Preguntar a la IA",
@@ -163,8 +161,6 @@ export const es: Dict = {
   "adj.depth": "Profundidad",
   "adj.nearDetail": "Detalle cercano",
   "adj.farDetail": "Detalle lejano",
-  "adj.scunet": "Reducción de ruido neuronal (SCUNet, lenta)",
-  "adj.nafnet": "Restaurar (NAFNet)",
   "adj.reset": "Restablecer todo a automático",
   "adj.curves": "Curvas (esta foto)",
   "adj.curvesHint": "Toca la curva para añadir un punto, arrástralo para moverlo y sácalo del recuadro para quitarlo. Detrás de la curva: cómo se reparten los tonos de la foto (izquierda = negro, derecha = blanco). El estilo tiene sus propias curvas (Estilo → Editar).",
@@ -182,7 +178,6 @@ export const es: Dict = {
   "adj.grainRoughness": "Aspereza",
   "adj.grainColour": "Color",
   "adj.grainHint": "El grano se añade al final, sobre la foto terminada, y escala con la imagen. Alejada, la vista previa lo muestra como se verá a ese tamaño; acércate para juzgar las partículas.",
-  "adj.networksHint": "Las redes neuronales se aplican automáticamente solo donde se mide ruido o desenfoque; estos botones las aplican a todo el encuadre.",
   "adj.amberHint": "Los valores en ámbar son los automáticos. Toca dos veces una etiqueta para restaurarla.",
 
   // ---- Depth tab

@@ -1,7 +1,7 @@
 # Shikarno
 
 On-device development of iPhone ProRAW/DNG and HEIC photographs in the browser:
-LibRaw (WebAssembly) decoding, WebGPU/WGSL processing, SCUNet · NAFNet ·
+LibRaw (WebAssembly) decoding, WebGPU/WGSL processing,
 SegFormer-B0 · Depth Anything V2 through ONNX Runtime Web, a deterministic and
 inspectable decision engine, and a look-profile system for creative grading.
 
@@ -24,7 +24,6 @@ Rebuilding native parts (checked-in outputs, only needed when changing them):
 
 ```sh
 LIBRAW_SRC=/path/to/LibRaw-0.22.2 npm run build:libraw          # needs emscripten
-python scripts/models/export.py --work <weights dir> --out public/models   # SCUNet/NAFNet → ONNX
 ```
 
 ## Deploy

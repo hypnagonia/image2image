@@ -15,7 +15,7 @@ import type { Gpu } from "../gpu/gpu.ts";
 export type Backend = "webgpu" | "wasm";
 
 export interface ModelSpec {
-  id: "scunet" | "nafnet" | "segformer" | "depth" | "swin2sr";
+  id: "segformer" | "depth" | "swin2sr";
   /** File for WebGPU with shader-f16. */
   f16: string;
   /** File for everything else. */
@@ -25,8 +25,6 @@ export interface ModelSpec {
 }
 
 export const MODELS: Record<ModelSpec["id"], ModelSpec> = {
-  scunet: { id: "scunet", f16: "scunet.fp16.onnx", f32: "scunet.fp32w16.onnx", bytes: 39e6 },
-  nafnet: { id: "nafnet", f16: "nafnet.fp16.onnx", f32: "nafnet.fp32w16.onnx", bytes: 35e6 },
   segformer: { id: "segformer", f16: "segformer-b0-ade.fp16.onnx", f32: "segformer-b0-ade.fp32.onnx", bytes: 8e6 },
   depth: { id: "depth", f16: "depth-anything-v2-small.q4f16.onnx", f32: "depth-anything-v2-small.q4.onnx", bytes: 20e6 },
   // Fixed 256×256 input, shape logic folded (see scripts/models/swin2sr.py). fp32 on every

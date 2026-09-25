@@ -64,7 +64,6 @@ export type ToWorker =
   | { type: "preview-zoom"; long: number }
   | { type: "export"; format: ExportFormat; quality: number; space: "srgb" | "p3"; stripRows?: number }
   | { type: "importLook"; name: string; text: string }
-  | { type: "restore"; scunet: boolean; nafnet: boolean }
   | { type: "thumbs"; profiles: LookProfile[]; long: number }
   | { type: "palette" }
   | { type: "reference"; file: File; mode: "create" | "match"; amount: number }

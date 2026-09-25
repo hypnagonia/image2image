@@ -17,7 +17,6 @@ import type { AutoCurveBands } from "./autoCurves.ts";
 import { GROUPS, type Group } from "../neural/scene.ts";
 import { defaultParams, neutralSemantic, type Decision, type Params } from "./params.ts";
 import type { AnalysisReport, RegionStats } from "../analysis/types.ts";
-import { noiseAt, BLUR_THRESHOLD } from "../analysis/analysis.ts";
 import { lchOf } from "../color/oklab.ts";
 import { checkBlacks } from "./blacks.ts";
 import { hdrKnee } from "../render/curves.ts";
@@ -56,12 +55,6 @@ export interface EngineContext {
 export interface Plan {
   /** Fast GPU denoise (always safe on phones). */
   denoise: boolean;
-  /** Neural denoise — never automatic; only when the user asks (desktop). */
-  scunet: boolean;
-  nafnet: boolean;
-  /** Tile strength for SCUNet / NAFNet given a tile rectangle (working px). */
-  denoiseTile: (x: number, y: number, size: number) => number;
-  deblurTile: (x: number, y: number, size: number) => number;
 }
 
 export interface DecisionResult {
@@ -270,18 +263,11 @@ export function decide(ctx: EngineContext): DecisionResult {
     (ctx.isProRaw ? " — ProRAW is already noise-reduced by Apple, so this is residual noise" : ""),
     { sigmaMid255: r2(sMid * 255), sigmaShadow255: r2(sSh * 255), sigmaChroma255: r2(sC * 255), iso: ctx.iso ?? 0 });
 
-  // --------------------------------------------------------------- deblur
-  const blur = R.blur;
-  p.deblur.strength = r2(smooth(BLUR_THRESHOLD, 2.6, blur.median) * 0.8);
-  note("deblur", p.deblur.strength, blur.edgeBlocks < 20 ? "too few edges to judge sharpness — restoration off" :
-    `median blur σ ≈ ${blur.median.toFixed(2)} px over ${blur.edgeBlocks} edge blocks; ${(blur.blurredFraction * 100).toFixed(0)}% above ${BLUR_THRESHOLD}px`,
-    { blurMedian: r2(blur.median), blurredFraction: r2(blur.blurredFraction), edgeBlocks: blur.edgeBlocks });
-  if (blur.edgeBlocks < 20) p.deblur.strength = 0;
-
   // --------------------------------------------------------------- sharpen
+  const blur = R.blur;
   const noiseGate = 1 - smooth(0.004, 0.015, sMid * (1 - p.denoise.luma * 0.7));
   const baseSharp = ctx.isProRaw ? 0.35 : ctx.referred === "display" ? 0.15 : 0.5;
-  p.sharpen.amount = r2(clamp(baseSharp + 0.25 * clamp(blur.median - 1.0, -0.5, 1.2), 0.05, 0.8) * noiseGate * (1 - 0.5 * p.deblur.strength));
+  p.sharpen.amount = r2(clamp(baseSharp + 0.25 * clamp(blur.median - 1.0, -0.5, 1.2), 0.05, 0.8) * noiseGate);
   p.sharpen.radius = r2(clamp(0.7 + 0.25 * (blur.median || 1), 0.7, 1.4));
   p.sharpen.threshold = r3(Math.max(0.003, 2.5 * sMid * (1 - 0.6 * p.denoise.luma)));
   note("sharpen", [p.sharpen.amount, p.sharpen.radius],
@@ -414,9 +400,9 @@ export function decide(ctx: EngineContext): DecisionResult {
   }
 
   // --------------------------------------------------------------- plan
-  const plan = makePlan(ctx, p);
-  note("plan", [plan.denoise ? "GPU denoise" : "-", plan.nafnet ? "NAFNet" : "-"].join(" "),
-    `${plan.denoise ? "noise-adaptive GPU denoise (blended per region by the decided strength)" : "noise below visibility — no denoise"}; ${plan.nafnet ? "restoration on tiles measured as blurred" : "image is sharp enough — NAFNet skipped"}`, {});
+  const plan = makePlan(p);
+  note("plan", plan.denoise ? "GPU denoise" : "-",
+    plan.denoise ? "noise-adaptive GPU denoise (blended per region by the decided strength)" : "noise below visibility — no denoise", {});
   return { params: p, decisions: D, plan, dofSuggestion: dof, exposureSuggestion };
 }
 
@@ -424,41 +410,7 @@ function approxTempTint(ctx: EngineContext, neutral: number[]): { temp: number; 
   return ctx.solveNeutral ? ctx.solveNeutral(neutral) : { temp: ctx.camera?.temp ?? 6504, tint: ctx.camera?.tint ?? 0 };
 }
 
-function makePlan(ctx: EngineContext, p: Params): Plan {
-  const R = ctx.report;
-  const g = R.blocks;
-  // Max over the blocks a tile covers.
-  const over = (x: number, y: number, size: number, f: (i: number) => number) => {
-    const b0x = Math.floor(x / g.size), b1x = Math.min(g.bw - 1, Math.floor((x + size - 1) / g.size));
-    const b0y = Math.floor(y / g.size), b1y = Math.min(g.bh - 1, Math.floor((y + size - 1) / g.size));
-    let m = 0;
-    for (let by = b0y; by <= b1y; by++) for (let bx = b0x; bx <= b1x; bx++) {
-      const v = f(by * g.bw + bx);
-      if (v > m) m = v;
-    }
-    return m;
-  };
+function makePlan(p: Params): Plan {
   const denoise = p.denoise.luma > 0.08 || p.denoise.chroma > 0.15;
-  const scunet = false;
-  const nafnet = p.deblur.strength > 0.05;
-  const expGain = Math.pow(2, Math.max(0, p.exposure) / 2.4) * (1 + p.tone.shadows);
-  return {
-    denoise,
-    scunet,
-    nafnet,
-    denoiseTile: (x, y, size) => {
-      if (!scunet) return 0;
-      // Local noise relative to visibility; the render-time blend applies the final strength.
-      const n = over(x, y, size, (i) => {
-        const r = g.data.subarray(i * 16, i * 16 + 16);
-        return Math.max(noiseAt(R.noise, r[0]), r[2] * 0.8) * expGain;
-      });
-      return n > 0.0022 ? 1 : 0;
-    },
-    deblurTile: (x, y, size) => {
-      if (!nafnet) return 0;
-      const s = over(x, y, size, (i) => (Number.isFinite(R.blur.perBlock[i]) ? R.blur.perBlock[i] : 0));
-      return smooth(BLUR_THRESHOLD, 2.6, s) * p.deblur.strength / 0.8;
-    },
-  };
+  return { denoise };
 }

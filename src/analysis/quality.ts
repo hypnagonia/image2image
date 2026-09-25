@@ -1,7 +1,7 @@
 /**
  * Module: Image quality analysis → the 2× upscale decision.
  *
- *   in:  the restored (denoised/deblurred) working texture, scene-linear
+ *   in:  the denoised working texture, scene-linear
  *   out: ImageQualityReport — measurements plus a deterministic, conservative
  *        decision whether 2× neural upscaling is worth running
  *
