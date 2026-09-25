@@ -17,10 +17,11 @@ import { AUTO_LAYERS_VERSION } from "./layers/auto.ts";
 import { histogramOf } from "./analysis/previewHist.ts";
 import { applyAutoCurves, type AutoCurveBands } from "./decision/autoCurves.ts";
 import { isFlat } from "./render/curves.ts";
-import { crashedWhileProcessing, lastStage, markCompleted, markInflight, noteStage, rememberParams, rememberPhoto, restorablePhoto } from "./ui/session.ts";
+import { crashedWhileProcessing, forgetPendingParams, lastStage, markCompleted, markInflight, noteStage, rememberParams, rememberPhoto, restorablePhoto } from "./ui/session.ts";
 import { LANGS, LANG_NAMES, lang, setLang, storedLang, t, tOr, type Lang } from "./ui/i18n.ts";
 import { el } from "./ui/dom.ts";
 import { installTouchSliders } from "./ui/touchSlider.ts";
+import { makeLayer } from "./layers/model.ts";
 
 const worker = new Worker(new URL("./engine/worker.ts", import.meta.url), { type: "module" });
 const send = (m: ToWorker) => worker.postMessage(m);
@@ -201,6 +202,8 @@ function offerSafeReopen(file: File, saved?: Params) {
   stage.append(box);
 }
 
+/** This photo's edits were restored from before a reload (automatic additions leave them alone). */
+let restored = false;
 /** Parameters to re-apply once a restored photo has been analysed. */
 let pendingRestore: Params | undefined;
 
@@ -210,7 +213,11 @@ let maskIndex: number | undefined;
 function baseView(): { type: "view"; view: 0 | 1 | 2 | 6; region?: number } {
   return maskIndex !== undefined ? { type: "view", view: 6, region: maskIndex } : { type: "view", view: currentView };
 }
+/** A photo is being opened (its analysis has not arrived): late messages about the previous one are ignored. */
+let opening = false;
 function openFile(f: File, restore?: Params, upscaleOverride?: UpscaleMode) {
+  opening = true;
+  forgetPendingParams();
   // A mask shown for the previous photo's layer must not colour the new one's first previews.
   if (maskIndex !== undefined) { maskIndex = undefined; send(baseView()); }
   pendingRestore = restore;
@@ -513,7 +520,7 @@ let dragging = false;
 /** Something was changed during this drag (a draft went out): the release renders the final preview. */
 let draftSent = false;
 installTouchSliders(); // a touch anywhere on a slider sets it (not only on its knob)
-document.addEventListener("pointerdown", (e) => { if ((e.target as HTMLElement).matches?.('input[type="range"], .curve-editor, .hs-range')) { dragging = true; draftSent = false; } }, true);
+document.addEventListener("pointerdown", (e) => { if ((e.target as HTMLElement).matches?.('input[type="range"], .curve-editor, .hs-range, .grad-handle, .grad-handle *')) { dragging = true; draftSent = false; } }, true);
 // A touch on a curve box that turned into a page scroll changed nothing: no render.
 const endDrag = () => { if (!dragging) return; dragging = false; if (draftSent) pushParams(); };
 document.addEventListener("pointerup", endDrag, true);
@@ -572,7 +579,7 @@ function pushParams() {
   clearTimeout(pushTimer);
   const draft = dragging;
   if (draft) draftSent = true;
-  pushTimer = window.setTimeout(() => send({ type: "params", params: structuredClone(params!), draft }), draft ? 0 : 16);
+  pushTimer = window.setTimeout(() => send({ type: "params", params: params!, draft }), draft ? 0 : 16); // postMessage copies
   rememberParams(params);
 }
 function getPath(o: unknown, path: string): number {
@@ -1185,7 +1192,8 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case "progress":
       setProgress(stageText(m.stage, m.detail), m.frac);
       noteStage(stageText(m.stage, m.detail));
-      if (m.stage === "segmentation" || m.stage === "depth") flag(() => sessionStorage, IN_ANALYSIS, true);
+      // Only a crash *inside* segmentation or depth marks the device for CPU analysis.
+      flag(() => sessionStorage, IN_ANALYSIS, m.stage === "segmentation" || m.stage === "depth");
       break;
     case "preview":
       if (m.final) finalPreviews++;
@@ -1198,6 +1206,8 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case "analysis":
       flag(() => sessionStorage, IN_ANALYSIS, false);
+      opening = false;
+      restored = false;
       summary = m.summary; decisions = m.decisions; autoParams = m.auto; params = m.params; dofInfo = m.dof;
       autoCurveBands = m.autoCurves;
       exportTop.disabled = busy;
@@ -1234,6 +1244,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
         // Regions saved by older versions lack newer fields: fill from today's automatic values.
         for (const g of Object.keys(params.semantic) as Array<keyof Params["semantic"]>) params.semantic[g] = { ...autoParams!.semantic[g], ...params.semantic[g] };
         pendingRestore = undefined;
+        restored = true;
         syncControls();
         pushParams();
       }
@@ -1244,11 +1255,36 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       histograms = m.data;
       layersPanel.refreshHistogram();
       break;
-    case "exposureCalibrated":
+    case "blackPointMatched": {
+      // The automatic "Black point" layer: just above the photo's own tone curve.
+      // Not over a restored session (the user's layers, perhaps without it on purpose),
+      // nor from the previous photo after another was opened.
+      if (restored || opening) break;
+      const flat = () => [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+      for (const p of [params, autoParams]) {
+        if (!p) continue;
+        const layer = makeLayer("curves", "Black point", { auto: "curves.black", params: { l: m.points, r: flat(), g: flat(), b: flat() } });
+        const i = p.layers.findIndex((l) => l.auto === "curves.black");
+        if (i >= 0) p.layers[i] = { ...layer, id: p.layers[i].id };
+        else p.layers.splice(p.layers.findIndex((l) => l.auto === "curves.photo") + 1, 0, layer);
+      }
+      if (params) {
+        if (!history.canUndo) history.reset(params, t("hist.open"));
+        send({ type: "params", params: structuredClone(params), draft: false });
+        rememberParams(params);
+      }
+      logLines.push(m.note);
+      syncControls();
+      break;
+    }
+    case "exposureCalibrated": {
       // Part of opening the photo, not an edit: the history's first step takes it too.
+      if (opening) break; // the previous photo's, arriving after another was opened
+      const before = autoParams?.exposure;
       exposureSuggestion = m.exposure;
       if (autoParams) autoParams.exposure = m.exposure;
-      if (params) {
+      // Not over an exposure the user set meanwhile.
+      if (params && params.exposure === before) {
         params.exposure = m.exposure;
         if (!history.canUndo) history.reset(params, t("hist.open"));
         rememberParams(params);
@@ -1257,6 +1293,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       logLines.push(m.note);
       syncControls();
       break;
+    }
     case "params":
       params = m.params;
       pendingAuto = undefined;
@@ -1294,6 +1331,8 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       lookPanel.onProfile(m.profile, m.reference, m.message);
       break;
     case "error":
+      flag(() => sessionStorage, IN_ANALYSIS, false); // a failure, not a crash of the analysis
+      opening = false;
       showError(m.message);
       busy = false;
       setExportEnabled(true);
@@ -1312,6 +1351,8 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
 // The worker itself failed: say so and let the page be used again (no endless progress).
 worker.onerror = (e) => {
   capsEl.textContent = t("err.worker", { msg: e.message });
+  flag(() => sessionStorage, IN_ANALYSIS, false);
+  opening = false;
   busy = false;
   setProgress(undefined);
   setExportEnabled(true);

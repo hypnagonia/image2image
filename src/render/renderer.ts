@@ -48,6 +48,8 @@ export interface RenderOptions {
   /** Region index highlighted by debug view 4. */
   region?: number;
   dither?: boolean;
+  /** A draft while a control is dragged: cheaper where it does not show (grain sampling). */
+  draft?: boolean;
   /** Compute the HDR gain (carried in alpha after the tone pass) at the photo's headroom. */
   hdr?: boolean;
   /** Also produce the 8-bit gain map for the gain-map JPEG: block size and range (log2 stops). */
@@ -190,6 +192,7 @@ export class Renderer {
   /** Cached by name, format *and* size, so preview, draft and thumbnail renders
    * (different sizes) don't reallocate each other's targets. Oldest entries are
    * evicted beyond a small budget. */
+  private dofMips?: { key: string; tex: GPUTexture };
   private target(name: string, w: number, h: number, fmt: GPUTextureFormat): GPUTexture {
     const key = `${name}|${fmt}|${w}x${h}`;
     let t = this.targets.get(key);
@@ -211,6 +214,8 @@ export class Renderer {
   releaseTargets() {
     for (const t of this.targets.values()) this.gpu.release(t);
     this.targets.clear();
+    this.dofMips?.tex.destroy();
+    this.dofMips = undefined;
   }
 
   private toneDispatch(enc: GPUCommandEncoder, temp: Array<GPUBuffer | GPUTexture>, src: RenderSource, maps: RefinedMaps, p: Params, o: RenderOptions,
@@ -302,7 +307,7 @@ export class Renderer {
       const sizePx = (0.7 + 2.3 * gr.size) * Math.max(W / scale, H / scale) / 4032;
       const out = this.target("grain", W, th, "rgba16float");
       await gpu.run("render.grain", (enc, temp) => {
-        const u = gpu.uniform(new Uniforms(12).u32(W, th, ty0, finalLinear ? 1 : 0).f32(gr.amount * 0.055, sizePx, gr.roughness, gr.color).f32(1 / scale, 0, 0, 0).bytes(), "grain.u");
+        const u = gpu.uniform(new Uniforms(12).u32(W, th, ty0, finalLinear ? 1 : 0).f32(gr.amount * 0.055, sizePx, gr.roughness, gr.color).f32(1 / scale, o.draft ? 1 : 0, 0, 0).bytes(), "grain.u");
         temp.push(u);
         gpu.dispatch(enc, gpu.pipeline("render.grain", grainWgsl), [u, final.createView(), out.createView()], Math.ceil(W / 8), Math.ceil(th / 8));
       });
@@ -366,10 +371,16 @@ export class Renderer {
     const gpu = this.gpu;
     // Same level count as a full-image render (a strip may be shorter), limited by what fits.
     const levels = Math.max(1, Math.min(fullLevels, Math.floor(Math.log2(Math.min(W, H))) + 1));
-    const mipTex = gpu.device.createTexture({
-      label: "dof.mips", size: { width: W, height: H }, format: "rgba16float", mipLevelCount: levels,
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
-    });
+    // Kept between renders (a 20 MB allocation and a GPU stall per frame otherwise).
+    const mipKey = `${W}x${H}x${levels}`;
+    if (this.dofMips?.key !== mipKey) {
+      this.dofMips?.tex.destroy();
+      this.dofMips = { key: mipKey, tex: gpu.device.createTexture({
+        label: "dof.mips", size: { width: W, height: H }, format: "rgba16float", mipLevelCount: levels,
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+      }) };
+    }
+    const mipTex = this.dofMips.tex;
     const out = this.target("dof", W, H, "rgba16float");
     await gpu.run("dof", (enc, temp) => {
       const u0 = gpu.uniform(new Uniforms(8).u32(W, H, 0, 0, 0, 0, 0, 0).bytes());
@@ -395,8 +406,6 @@ export class Renderer {
       temp.push(u);
       gpu.dispatch(enc, gpu.pipeline("render.dof", dofWgsl), [u, mipTex.createView(), distT.createView(), undefined, this.sampler, out.createView()], Math.ceil(W / 8), Math.ceil(H / 8));
     });
-    await gpu.device.queue.onSubmittedWorkDone();
-    mipTex.destroy();
     return out;
   }
 

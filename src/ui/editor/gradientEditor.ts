@@ -31,7 +31,7 @@ export function createGradientEditor(target: () => Target, changed: (label?: str
     (b.firstChild as HTMLElement).style.background = gradientCss(g);
     b.onclick = () => {
       const tg = target();
-      tg.gradient = g; tg.preset = p.id; selected = 0;
+      tg.gradient = gradientFrom(p.colors); tg.preset = p.id; selected = 0; // a fresh copy: later edits must not change the preset
       changed(t("grad.applied", { name: t(`grad.p.${p.id}` as never) }));
       render();
     };
@@ -73,7 +73,8 @@ export function createGradientEditor(target: () => Target, changed: (label?: str
         e.preventDefault();
         drag = { id: e.pointerId, y0: e.clientY, moved: false };
         h.setPointerCapture(e.pointerId);
-        if (selected !== i) { selected = i; renderStops(); renderStop(); }
+        // Select in place: re-rendering the handles here would drop this pointer's capture.
+        if (selected !== i) { selected = i; for (const [k, hh] of [...stopsRow.children].entries()) hh.classList.toggle("on", k === i); renderStop(); }
       });
       h.addEventListener("pointermove", (e) => {
         if (!drag || e.pointerId !== drag.id) return;
@@ -119,7 +120,8 @@ export function createGradientEditor(target: () => Target, changed: (label?: str
     stopBody.replaceChildren(
       el("div", { class: "grad-stoprow" }, el("label", { class: "grad-colorwrap" }, color), hex, el("span", { class: "grad-spacer" }), del),
       slider(t("grad.opacity"), 0, 1, 0.01, () => s.alpha, (v) => { s.alpha = v; tg.preset = undefined; renderStops(); }, (v) => `${Math.round(v * 100)}%`, 1),
-      slider(t("grad.location"), 0, 1, 0.005, () => s.pos, (v) => { s.pos = v; tg.preset = undefined; renderStops(); }, (v) => `${Math.round(v * 100)}%`, s.pos),
+      // As shown on the bar (reversed gradients are drawn mirrored).
+      slider(t("grad.location"), 0, 1, 0.005, () => shown(s.pos), (v) => { s.pos = shown(v); tg.preset = undefined; renderStops(); }, (v) => `${Math.round(v * 100)}%`, shown(s.pos)),
     );
   }
 

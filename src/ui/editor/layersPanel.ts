@@ -48,6 +48,7 @@ export function layerName(l: Layer): string {
   const [kind, what] = l.auto.split(".");
   const regionOrBand = (w: string) => (DEPTH_BANDS as string[]).includes(w) ? t(`band.${w as DepthBand}`) : tOr(`group.${w}`, w);
   if (l.auto === "curves.photo") return t("lay.photoTone");
+  if (l.auto === "curves.black") return t("lay.blackPoint");
   if (l.auto === "subject") return t("lay.subject");
   if (kind === "curves" && what) return t("lay.tone", { name: regionOrBand(what) });
   if (kind === "colour" && what) return t("lay.colour", { name: regionOrBand(what) });

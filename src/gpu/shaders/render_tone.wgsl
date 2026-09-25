@@ -634,23 +634,21 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       ab = vec2<f32>(ab.x * cs - ab.y * sn, ab.x * sn + ab.y * cs);
     }
     lab = vec3<f32>(lab.x, ab);
-    lin = oklab_to_lin_srgb(lab);
   }
+  // (The steps below stay in OkLab; one conversion back at the end.)
   // Per-region temperature / tint (OkLab b / a offsets, fading toward black and white).
   if (abs(sem.warmth) + abs(sem.tint) > 1e-4) {
-    var lab2 = lin_srgb_to_oklab(lin);
-    let edge = smoothstep(0.02, 0.15, lab2.x) * (1.0 - smoothstep(0.93, 1.0, lab2.x));
-    lab2 = vec3<f32>(lab2.x, lab2.y + edge * 0.03 * sem.tint, lab2.z + edge * 0.035 * sem.warmth);
-    lin = oklab_to_lin_srgb(lab2);
+    let edge = smoothstep(0.02, 0.15, lab.x) * (1.0 - smoothstep(0.93, 1.0, lab.x));
+    lab = vec3<f32>(lab.x, lab.y + edge * 0.03 * sem.tint, lab.z + edge * 0.035 * sem.warmth);
   }
   // Clean whites: very bright, nearly neutral surfaces (white clothing, a wedding
   // dress, paper, clouds) lose the colour casts reflected onto them by foliage, sky
   // or nearby objects. Clearly coloured tones (skin, a pastel wall) are untouched.
   {
-    var lw = lin_srgb_to_oklab(lin);
-    let kw = smoothstep(0.78, 0.92, lw.x) * (1.0 - smoothstep(0.03, 0.06, length(lw.yz))) * 0.5;
-    if (kw > 1e-3) { lw = vec3<f32>(lw.x, lw.yz * (1.0 - kw)); lin = oklab_to_lin_srgb(lw); }
+    let kw = smoothstep(0.78, 0.92, lab.x) * (1.0 - smoothstep(0.03, 0.06, length(lab.yz))) * 0.5;
+    if (kw > 1e-3) { lab = vec3<f32>(lab.x, lab.yz * (1.0 - kw)); }
   }
+  lin = oklab_to_lin_srgb(lab);
   // Back to P3 (inverse of P3_TO_SRGB).
   let S2P = mat3x3<f32>(
     vec3<f32>(0.8224621, 0.0331942, 0.0170827),

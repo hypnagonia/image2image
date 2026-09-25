@@ -69,6 +69,7 @@ export const en = {
   "grad.p.sepia": "Sepia",
   "grad.p.cyanotype": "Cyanotype",
   "grad.p.bw": "Black & white",
+  "lay.blackPoint": "Black point",
   "lay.photoTone": "Tone & black point",
   "lay.subject": "Subject priority",
   "lay.tone": "{name} tone",

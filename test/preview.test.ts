@@ -20,3 +20,18 @@ test("the camera's rendering: the largest colour picture JPEG, never the raw dat
   assert.deepEqual([p.width, p.height, p.components, p.offset], [4032, 3024, 3, 3]);
   assert.equal(findPreview(new Uint8Array(jpeg(0xc3, 4000, 3000, 3))), null);
 });
+
+import { shadowMatch } from "../src/decode/preview.ts";
+test("black point from the camera: lifted shadows go deeper, crushed ones open, bounded, midtones kept", () => {
+  const v = (a: number[]) => a.map((x) => x / 255);
+  const deeper = shadowMatch(v([35, 48, 67, 78, 104, 135]), v([18, 32, 50, 63, 87, 139]))!;
+  assert.ok(deeper[1].y < deeper[1].x, JSON.stringify(deeper));
+  const open = shadowMatch(v([4, 7, 10, 15, 41, 86]), v([5, 13, 22, 33, 63, 94]))!;
+  assert.ok(open.some((p) => p.y > p.x + 5 / 255), JSON.stringify(open));
+  for (const c of [deeper, open]) {
+    for (let i = 1; i < c.length; i++) assert.ok(c[i].y > c[i - 1].y && c[i].x > c[i - 1].x, "monotone");
+    for (const p of c) assert.ok(Math.abs(p.y - p.x) <= 20 / 255 + 1e-3, "bounded");
+    assert.deepEqual(c[c.length - 1], { x: 1, y: 1 });
+  }
+  assert.equal(shadowMatch(v([20, 30, 40, 50, 80, 120]), v([21, 30, 41, 50, 81, 120])), undefined, "already matching");
+});

@@ -77,6 +77,8 @@ export type FromWorker =
   | { type: "params"; params: Params }
   /** Automatic exposure corrected after measuring the first preview against the camera's rendering. */
   | { type: "exposureCalibrated"; exposure: number; note: string }
+  /** Black point matched to the camera's rendering: the master curve of the automatic "Black point" layer. */
+  | { type: "blackPointMatched"; points: Array<{ x: number; y: number }>; note: string }
   /** Intensity histograms of the rendered preview (previewHist.ts), for the curve boxes. */
   | { type: "histograms"; data: Float32Array }
   | { type: "log"; text: string }

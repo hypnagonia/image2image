@@ -64,6 +64,7 @@ export const es: Dict = {
   "grad.p.sepia": "Sepia",
   "grad.p.cyanotype": "Cianotipia",
   "grad.p.bw": "Blanco y negro",
+  "lay.blackPoint": "Punto negro",
   "lay.photoTone": "Tono y punto negro",
   "lay.subject": "Prioridad del sujeto",
   "lay.tone": "Tono: {name}",

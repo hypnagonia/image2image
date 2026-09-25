@@ -29,7 +29,7 @@ export interface PackedLayers { records: Float32Array; count: number; atlas: Flo
 export function layerModule(l: Layer): "curves" | "semantic" {
   if (!l.auto) return "curves";
   const [kind, what] = l.auto.split(".");
-  if (kind === "curves" && (what === "photo" || (DEPTH_BANDS as string[]).includes(what))) return "curves";
+  if (kind === "curves" && (what === "photo" || what === "black" || (DEPTH_BANDS as string[]).includes(what))) return "curves";
   return "semantic";
 }
 

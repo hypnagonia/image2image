@@ -45,7 +45,7 @@ export interface AnalysisImage {
 
 export interface SceneMaps {
   seg: { width: number; height: number; probs: Float32Array /* NG planes */ };
-  depth: { width: number; height: number; dist: Float32Array /* 0 near … 1 far */; raw: Float32Array };
+  depth: { width: number; height: number; dist: Float32Array /* 0 near … 1 far */; raw: Float32Array; /** No depth could be computed: everything reads as one distance. */ flat?: boolean };
   /** Area share of each group (argmax), for the log. */
   coverage: Record<Group, number>;
   timings: Record<string, number>;
@@ -378,7 +378,7 @@ export async function analyseScene(neural: Neural, img: AnalysisImage, onStage?:
   const depthRun = await firstWorking(neural, prefer, "Depth", log, runDepth);
   if (!depthRun) {
     log.push("Depth unavailable: the photo opens with a flat distance map (no automatic depth effects)");
-    return { seg: { width: lw, height: lh, probs }, depth: { width: 1, height: 1, dist: new Float32Array(1).fill(0.5), raw: new Float32Array(1) }, coverage, timings, log };
+    return { seg: { width: lw, height: lh, probs }, depth: { width: 1, height: 1, dist: new Float32Array(1).fill(0.5), raw: new Float32Array(1), flat: true }, coverage, timings, log };
   }
   const { disp, ow, oh, dw, dh } = depthRun;
   // Relative inverse depth → robust 0..1 distance (0 = nearest, 1 = farthest).

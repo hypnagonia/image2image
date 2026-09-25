@@ -47,15 +47,53 @@ export function findPreview(head: Uint8Array): JpegInfo | null {
 }
 
 
-/** Median display-encoded luminance of rendered 8-bit P3 pixels (rgba), subsampled. */
-export function renderedMedian(px: Uint8Array, stride = 7): number {
+/**
+ * The levels compared with the camera's rendering: the shadows (black point) and
+ * the median (exposure, last). Both sides are measured at exactly these.
+ */
+export const REF_QS = [0.005, 0.02, 0.05, 0.1, 0.25, 0.5];
+export const MEDIAN = REF_QS.length - 1;
+
+/** Display-encoded luminance quantiles of rendered 8-bit P3 pixels (rgba), subsampled. */
+export function renderedQuantiles(px: Uint8Array, qs: number[] = REF_QS, stride = 7): number[] {
   const ys: number[] = [];
   for (let k = 0; k < px.length; k += 4 * stride) {
     const Y = 0.229 * eotf(px[k] / 255) + 0.6917 * eotf(px[k + 1] / 255) + 0.0793 * eotf(px[k + 2] / 255);
     ys.push(oetf(Y));
   }
   ys.sort((a, b) => a - b);
-  return ys.length ? ys[ys.length >> 1] : 0;
+  return qs.map((q) => (ys.length ? ys[Math.min(ys.length - 1, Math.floor(q * ys.length))] : 0));
+}
+
+/**
+ * Black point from the camera's rendering: a curve taking our rendered shadow
+ * levels (`ours`, at REF_QS) to the camera's (`ref`) — deeper where ours are
+ * lifted, opened where ours are crushed — and identity from the median up.
+ * The deep tones only (to the darkest 10 %: lower midtones and the exposure stay),
+ * 70 % of the way (embedded previews can be deeper than the camera's own full
+ * rendering), each level at most 20/255; the result is monotone with a sane slope.
+ * Undefined when the shadows already agree (within 3/255).
+ */
+export function shadowMatch(ours: number[], ref: number[]): Array<{ x: number; y: number }> | undefined {
+  const MAX = 20 / 255, SHARE = 0.7, DEEP = REF_QS.indexOf(0.1);
+  const pts: Array<{ x: number; y: number }> = [{ x: 0, y: 0 }];
+  let moved = 0;
+  for (let i = 0; i <= DEEP; i++) {
+    const x = ours[i];
+    if (x <= pts[pts.length - 1].x + 0.01 || x >= ours[MEDIAN] - 0.02) continue;
+    const prev = pts[pts.length - 1];
+    let y = x + Math.max(-MAX, Math.min(MAX, SHARE * (ref[i] - x)));
+    // Monotone, no flat or near-vertical stretch between points.
+    y = Math.max(y, prev.y + (x - prev.x) * 0.35, 1 / 255);
+    y = Math.min(y, prev.y + (x - prev.x) * 2.5);
+    moved = Math.max(moved, Math.abs(y - x));
+    pts.push({ x, y });
+  }
+  if (moved < 3 / 255) return undefined;
+  const m = ours[MEDIAN];
+  if (m > pts[pts.length - 1].x + 0.02) pts.push({ x: m, y: m });
+  pts.push({ x: 1, y: 1 });
+  return pts.map((p) => ({ x: Math.round(p.x * 1000) / 1000, y: Math.round(p.y * 1000) / 1000 }));
 }
 
 export interface PreviewStats {
@@ -72,7 +110,9 @@ export async function embeddedPreviewStats(file: Blob, qs: number[], maxMP = Inf
   if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas === "undefined") return undefined;
   // Previews sit in the first part of the file (before the raw data in Apple's layout,
   // but not always): read up to 48 MB, which also covers most cameras' layouts.
-  const head = new Uint8Array(await file.slice(0, Math.min(file.size, (maxMP < Infinity ? 24 : 48) << 20)).arrayBuffer());
+  let head: Uint8Array;
+  try { head = new Uint8Array(await file.slice(0, Math.min(file.size, (maxMP < Infinity ? 24 : 48) << 20)).arrayBuffer()); }
+  catch { return undefined; } // no memory for it: the photo opens without the reference
   const best = findPreview(head);
   // A phone's browser may decode the whole picture before shrinking it (48 MP ≈ 200 MB).
   if (!best || (best.width * best.height) / 1e6 > maxMP) return undefined;

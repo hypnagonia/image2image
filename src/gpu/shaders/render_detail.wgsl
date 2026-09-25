@@ -32,10 +32,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let sigma = max(u.s.y, 0.4);
   var acc = 0.0; var wsum = 0.0;
   var mn = 1e9; var mx = -1e9;
+  // Six distinct squared distances in a 5×5 window (0, 1, 2, 4, 5, 8): weights once, not 25 exp.
+  let s2 = -1.0 / (2.0 * sigma * sigma);
+  var wk = array<f32, 9>(1.0, exp(s2), exp(2.0 * s2), 0.0, exp(4.0 * s2), exp(5.0 * s2), 0.0, 0.0, exp(8.0 * s2));
   for (var dy = -2; dy <= 2; dy++) {
     for (var dx = -2; dx <= 2; dx++) {
       let y = Y(p + vec2<i32>(dx, dy));
-      let w = exp(-f32(dx * dx + dy * dy) / (2.0 * sigma * sigma));
+      let w = wk[dx * dx + dy * dy];
       acc += w * y; wsum += w;
       if (abs(dx) <= 1 && abs(dy) <= 1) { mn = min(mn, y); mx = max(mx, y); }
     }

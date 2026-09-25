@@ -34,6 +34,7 @@ export async function rememberPhoto(file: File) {
   try {
     sessionStorage.setItem(ACTIVE, "1");
     localStorage.setItem(META, JSON.stringify({ name: file.name, type: file.type, savedAt: Date.now() } satisfies Meta));
+    forgetPendingParams();
     localStorage.removeItem(PARAMS);
     const d = await dir();
     if (!d) return;
@@ -47,6 +48,8 @@ export async function rememberPhoto(file: File) {
 }
 
 let timer = 0;
+/** A save still waiting belongs to the previous photo: drop it. */
+export function forgetPendingParams() { clearTimeout(timer); }
 export function rememberParams(p: Params | undefined) {
   if (!p) return;
   clearTimeout(timer);

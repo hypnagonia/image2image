@@ -37,6 +37,8 @@ export function installTouchSliders(root: Document | HTMLElement = document) {
     let mode: "undecided" | "drag" | "scroll" = "undecided";
     const move = (m: PointerEvent) => {
       if (m.pointerId !== e.pointerId) return;
+      // The panel was rebuilt under the finger: this slider is gone (its box would read as 0 wide).
+      if (!input.isConnected) { stop(); return; }
       if (mode === "undecided") {
         const dx = Math.abs(m.clientX - x0), dy = Math.abs(m.clientY - y0);
         if (Math.max(dx, dy) < SLOP) return;
@@ -44,11 +46,15 @@ export function installTouchSliders(root: Document | HTMLElement = document) {
       }
       if (mode === "drag") set(input, m.clientX);
     };
-    const end = (u: PointerEvent) => {
-      if (u.pointerId !== e.pointerId) return;
+    const stop = () => {
       removeEventListener("pointermove", move, true);
       removeEventListener("pointerup", end, true);
       removeEventListener("pointercancel", end, true);
+    };
+    const end = (u: PointerEvent) => {
+      if (u.pointerId !== e.pointerId) return;
+      stop();
+      if (!input.isConnected) return;
       if (u.type === "pointerup" && mode === "undecided") set(input, u.clientX); // a tap
       if (mode !== "scroll") input.dispatchEvent(new Event("change", { bubbles: true }));
     };

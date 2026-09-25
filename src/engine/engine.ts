@@ -31,7 +31,7 @@ import type { AnalysisReport } from "../analysis/types.ts";
 import { decide, type DecisionResult } from "../decision/engine.ts";
 import { autoFocus, objectDepthRange } from "../decision/focus.ts";
 import { buildAutoLayers } from "../layers/auto.ts";
-import { embeddedPreviewStats, renderedMedian } from "../decode/preview.ts";
+import { embeddedPreviewStats, MEDIAN, REF_QS, renderedQuantiles, shadowMatch } from "../decode/preview.ts";
 import { displayQuantiles } from "../decision/autoCurves.ts";
 import { allMask, makeLayer } from "../layers/model.ts";
 import { depthZones } from "../decision/zones.ts";
@@ -70,7 +70,7 @@ interface Session {
    * final previews are measured and the automatic exposure corrected (≤ 2 rounds),
    * unless the exposure was changed by then.
    */
-  calib?: { ref: number; rounds: number };
+  calib?: { ref: number[]; rounds: number; black: boolean };
   /** Preview proxy. `owned` is false when it aliases the working textures (image ≤ preview size). */
   proxy?: { base: GPUTexture; denoised: GPUTexture; w: number; h: number; owned: boolean };
   /** Quarter-pixel proxy used while a slider is being dragged. */
@@ -127,16 +127,20 @@ export class Engine {
   }
   private renderQueued = false;
   private queuedDraft = false;
+  private queuedFinal = false;
   /** Schedules a preview render; bursts of slider changes coalesce into one
    * render with the latest parameters (a final request overrides a draft). */
   requestRender(final = true, draft = false) {
     if (!this.s) return;
     this.queuedDraft = draft;
+    this.queuedFinal ||= final; // a release arriving while a draft waits makes it final
     if (this.renderQueued) return;
     this.renderQueued = true;
     void this.exclusive(async () => {
       this.renderQueued = false;
-      await this.renderNow(final, this.queuedDraft);
+      const fin = this.queuedFinal;
+      this.queuedFinal = false;
+      await this.renderNow(fin, this.queuedDraft);
     }).catch((e) => this.post({ type: "error", message: e instanceof Error ? e.message : String(e) }));
   }
 
@@ -327,8 +331,8 @@ export class Engine {
     // --- decisions ----------------------------------------------------------------------
     const colorInput = src.kind !== "rgb" ? src.color : undefined;
     // The camera's own rendering (the JPEG inside a DNG): the brightness reference.
-    const reference = src.kind !== "rgb" && /\.dng$/i.test(file.name) ? await P.time("camera rendering", () => embeddedPreviewStats(file, [0.5], isMobile() ? 24 : Infinity)) : undefined;
-    if (reference) this.log(`camera rendering: ${reference.width}×${reference.height} embedded JPEG, median ${(reference.q[0] * 255).toFixed(0)}/255`);
+    const reference = src.kind !== "rgb" && /\.dng$/i.test(file.name) ? await P.time("camera rendering", () => embeddedPreviewStats(file, REF_QS, isMobile() ? 24 : Infinity)) : undefined;
+    if (reference) this.log(`camera rendering: ${reference.width}×${reference.height} embedded JPEG, median ${(reference.q[MEDIAN] * 255).toFixed(0)}/255, shadows ${reference.q.slice(0, MEDIAN).map((v) => Math.round(v * 255)).join("/")}`);
     const decideWith = (referenceExposure?: { ev: number; note: string }) => decide({
       report,
       camera: work.camera,
@@ -354,9 +358,9 @@ export class Engine {
       for (let k = 0; k < 2; k++) {
         const m = (e: number) => displayQuantiles(report.global.hist, { tone: d.params.tone, exposure: e, local: { ...d.params.local, anchorEV: d.params.local.anchorEV + d.params.exposure - e } }, [0.5])[0];
         let lo = -1.5, hi = 2.5;
-        for (let it = 0; it < 30; it++) { const mid = (lo + hi) / 2; if (m(mid) < reference.q[0]) lo = mid; else hi = mid; }
+        for (let it = 0; it < 30; it++) { const mid = (lo + hi) / 2; if (m(mid) < reference.q[MEDIAN]) lo = mid; else hi = mid; }
         const ev = Math.round(((lo + hi) / 2) * 100) / 100;
-        d = decideWith({ ev, note: `matched to the camera's rendering (median ${(reference.q[0] * 255).toFixed(0)}/255)` });
+        d = decideWith({ ev, note: `matched to the camera's rendering (median ${(reference.q[MEDIAN] * 255).toFixed(0)}/255)` });
       }
       return d;
     });
@@ -365,12 +369,14 @@ export class Engine {
     const A = decision.params.dehaze.light.map((v) => srgbEotf(v) / gain) as [number, number, number];
 
     const s: Session = { name: file.name, decoded, work, denoised: work.tex, gain, scene, maps, report, decision, params, lightLinear: A, scale: 1, skin: skinTex };
-    if (reference && autoExposure) s.calib = { ref: reference.q[0], rounds: 0 };
+    if (reference && autoExposure) s.calib = { ref: reference.q, rounds: 0, black: false };
     this.s = s;
     await this.cacheDistance();
     // Automatic focus: subject from refined depth + segmentation + composition.
     const af = autoFocus(s.distCPU!, scene.seg, { blur: { bw: report.blocks.bw, bh: report.blocks.bh, data: report.blur.perBlock }, longPx: Math.max(work.width, work.height) });
-    decision.dofSuggestion = { justified: af.justified, focus: af.focus, strength: af.strength, reason: af.reason, x: af.x, y: af.y };
+    // Without a depth map (it failed on this device) nothing can be separated by distance.
+    const flatDepth = !!scene.depth.flat;
+    decision.dofSuggestion = { justified: af.justified && !flatDepth, focus: af.focus, strength: af.strength, reason: flatDepth ? "no depth map on this device — no automatic blur" : af.reason, x: af.x, y: af.y };
     // Depth zones by natural breaks of this photo's depth (boundaries fall in the
     // gaps between layers). Initial blur per zone follows the automatic focus
     // curve at the zone's mean distance, so switching to zones is seamless.
@@ -397,7 +403,7 @@ export class Engine {
       // (hazy scenes already have it): the distance a little quieter and cooler.
       const nearShare = z3[0].share, farShare = z3[2].share;
       // Outdoors only (visible sky): the far side of a room is not atmosphere.
-      if (nearShare >= 0.1 && farShare >= 0.2 && params.dehaze.strength < 0.15 && report.groups.sky.area >= 0.03) {
+      if (!flatDepth && nearShare >= 0.1 && farShare >= 0.2 && params.dehaze.strength < 0.15 && report.groups.sky.area >= 0.03) {
         for (const p of [decision.params, params]) p.distance = { ...p.distance, far: { ...p.distance.far, saturation: -0.06, warmth: -0.04, clarity: 0.9, texture: 0.9 } };
         decision.decisions.push({ id: "distance.far", value: "atmospheric perspective", reason: `depth: ${Math.round(nearShare * 100)}% near, ${Math.round(farShare * 100)}% far, clear air → the distance slightly less saturated, textured and cooler`, inputs: { near: nearShare, far: farShare } });
       }
@@ -426,7 +432,7 @@ export class Engine {
         chroma: report.global.chroma, haze: params.dehaze.strength,
         photo: { hist: report.global.hist, area: 1 },
         regions: { sky: st("sky"), vegetation: st("vegetation"), water: st("water"), building: st("building"), person: st("person"), ground: st("ground") },
-        bands: bandHist,
+        bands: flatDepth ? undefined : bandHist, // one distance everywhere: no near / far curves
       });
       decision.autoCurves = { photo: ac.photo, regions: ac.regions, depth: ac.depth };
       for (const p of [decision.params, params]) applyAutoCurves(p, decision.autoCurves, p.autoCurves ?? 1);
@@ -698,28 +704,40 @@ export class Engine {
     const p = this.effectiveParams();
     const src = draft && s.proxy ? await this.draftSource() : this.renderSource(false);
     const dof = p.enable.dof && p.dof.strength > 0;
-    const r = await this.renderer.render(src, s.maps, p, { wb: this.wbFor(p), gain: s.gain, lightLinear: s.lightLinear, output: "p38", debugView: this.view, region: this.region, zoneRange: this.zoneRange() }, dof);
+    const r = await this.renderer.render(src, s.maps, p, { wb: this.wbFor(p), gain: s.gain, lightLinear: s.lightLinear, output: "p38", debugView: this.view, region: this.region, zoneRange: this.zoneRange(), draft }, dof);
     const data = await this.gpu.readTexture(r.tex, 0, 0, src.width, src.height, 4);
     // Histograms for the curve boxes (the edit as rendered; not for "before" or debug views),
     // computed after the preview is on its way so they never delay it.
     const wantHist = final && !draft && !this.before && this.view === 0;
     const pixels = wantHist ? new Uint8Array(data.slice(0)) : undefined;
-    const calib = final && !draft && !this.before && this.view === 0 && s.calib && s.calib.rounds < 2 && Math.abs(p.exposure - s.decision.params.exposure) < 1e-6
-      ? renderedMedian(new Uint8Array(data.slice(0))) : undefined;
+    const calib = final && !draft && !this.before && this.view === 0 && s.calib && (s.calib.rounds < 2 || !s.calib.black) && Math.abs(p.exposure - s.decision.params.exposure) < 1e-6
+      ? renderedQuantiles(new Uint8Array(data)) : undefined; // read before `data` is transferred
     this.post({ type: "preview", width: src.width, height: src.height, data, space: "p3", final, ms: performance.now() - t0 }, [data]);
     if (calib !== undefined && s.calib) {
       // The display model misjudges some scenes (backlight, night): correct on what was rendered.
-      const d = Math.log2(Math.max(srgbEotf(s.calib.ref), 1e-4) / Math.max(srgbEotf(calib), 1e-4));
-      s.calib.rounds++;
-      if (Math.abs(calib - s.calib.ref) > 6 / 255) {
+      const ours = calib[MEDIAN], ref = s.calib.ref[MEDIAN];
+      if (s.calib.rounds < 2 && Math.abs(ours - ref) > 6 / 255) {
+        s.calib.rounds++;
+        const d = Math.log2(Math.max(srgbEotf(ref), 1e-4) / Math.max(srgbEotf(ours), 1e-4));
         const ev = Math.round(Math.min(2.5, Math.max(-1.5, p.exposure + 0.9 * d)) * 100) / 100;
-        const note = `measured on the preview: median ${Math.round(calib * 255)}/255 vs the camera's ${Math.round(s.calib.ref * 255)}/255 → ${ev > 0 ? "+" : ""}${ev} EV`;
+        const note = `measured on the preview: median ${Math.round(ours * 255)}/255 vs the camera's ${Math.round(ref * 255)}/255 → ${ev > 0 ? "+" : ""}${ev} EV`;
         this.log(`exposure calibration: ${note}`);
         s.decision.params.exposure = ev;
-        s.params = { ...s.params, exposure: ev };
+        // Not over an edit that arrived while this frame rendered.
+        if (s.params.exposure === p.exposure) s.params = { ...s.params, exposure: ev };
         this.post({ type: "exposureCalibrated", exposure: ev, note });
         this.requestRender(true);
-      } else s.calib.rounds = 2;
+      } else {
+        // Exposure settled: now the black point, on the same rendering.
+        s.calib.rounds = 2;
+        s.calib.black = true;
+        const points = shadowMatch(calib, s.calib.ref);
+        if (points) {
+          const note = `black point matched to the camera's rendering: shadows ${calib.slice(0, MEDIAN).map((v) => Math.round(v * 255)).join("/")} → ${s.calib.ref.slice(0, MEDIAN).map((v) => Math.round(v * 255)).join("/")}`;
+          this.log(note);
+          this.post({ type: "blackPointMatched", points, note });
+        }
+      }
     }
     if (pixels) {
       const hist = previewHistograms(pixels, src.width, src.height, s.scene.seg, s.distCPU, p.depthBands ?? [0.33, 0.66]);

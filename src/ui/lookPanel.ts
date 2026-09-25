@@ -446,7 +446,8 @@ export function createLookPanel(root: HTMLElement, ctx: Ctx) {
 
   return {
     /** New photo / technical change: previews must be regenerated. */
-    invalidate() { thumbs.clear(); thumbsStale = true; renderBrowser(); },
+    // Every edit invalidates: rebuild only when the panel is on the page (it is hidden for now).
+    invalidate() { thumbs.clear(); thumbsStale = true; if (root.isConnected && root.offsetParent !== null) renderBrowser(); },
     requestThumbs,
     onThumbs(items: Array<{ id: string; width: number; height: number; data: ArrayBuffer }>) {
       for (const t of items) {

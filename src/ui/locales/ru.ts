@@ -64,6 +64,7 @@ export const ru: Dict = {
   "grad.p.sepia": "Сепия",
   "grad.p.cyanotype": "Цианотипия",
   "grad.p.bw": "Чёрно-белая",
+  "lay.blackPoint": "Точка чёрного",
   "lay.photoTone": "Тон и точка чёрного",
   "lay.subject": "Приоритет объекта",
   "lay.tone": "Тон: {name}",

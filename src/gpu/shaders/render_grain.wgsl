@@ -69,7 +69,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // The full-image pixels this output pixel covers: their grain, averaged.
   let F = max(u.f.x, 1.0);
   let o = (vec2<f32>(id.xy) + vec2<f32>(0.0, f32(u.size.z))) * F;
-  let k = min(5u, u32(ceil(F - 1e-3)));
+  // Drafts (u.f.y = 1) average fewer grain samples: the grain is too fine to see while dragging.
+  let k = min(select(5u, 2u, u.f.y > 0.5), u32(ceil(F - 1e-3)));
   let colour = u.g.w > 0.0;
   var gl = 0.0;
   var gc = vec3<f32>(0.0);

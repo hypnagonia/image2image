@@ -64,6 +64,7 @@ export const zh: Dict = {
   "grad.p.sepia": "棕褐",
   "grad.p.cyanotype": "蓝晒",
   "grad.p.bw": "黑白",
+  "lay.blackPoint": "黑场",
   "lay.photoTone": "影调与黑场",
   "lay.subject": "主体优先",
   "lay.tone": "{name}影调",
