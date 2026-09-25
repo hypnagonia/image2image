@@ -10,7 +10,8 @@
  * compare those against comfortable ranges:
  *
  *   photo       flat (narrow p5–p95) → gentle contrast around its own median;
- *               whites that never reach near-white (and nothing clipped) → opened
+ *               whites that never reach near-white (and nothing clipped) → opened;
+ *               real black that renders grey → deepened at the bottom only (deep, not dark)
  *   sky         washed out (median high) → lights/highlights down: a deeper sky
  *   skin        faces (people's upper tones) too dark → lifted; too bright → eased
  *   ground      always a contrast curve (house style, with its lower saturation)
@@ -24,11 +25,25 @@
  * ±0.35 (≈ ±0.04 of output level), and a rule fires only when its measurement
  * is outside its range — a photograph that already renders well gets flat curves.
  */
-import { curveFromBands, toneCurve, type CurveBands, TONE_BANDS } from "../render/curves.ts";
+import { BAND_RANGE, curveFromBands, toneCurve, type CurveBands, TONE_BANDS } from "../render/curves.ts";
 import type { CurvePoint, Curves, DepthBand, Params, Region } from "./params.ts";
 
 const HIST_MIN = -14, HIST_RANGE = 18;
 const CAP = 0.35;
+/** Where the darkest 1% of a photo with real black should render (display-encoded ≈ 17/255): deep, shadows still separated. */
+const BLACK_TARGET = 0.067;
+
+/** A quantile of a histogram as scene EV (bin interpolation). */
+function evQuantile(hist: number[], q: number): number {
+  const n = hist.length, w = HIST_RANGE / n, total = hist.reduce((a, b) => a + b, 0) || 1;
+  let acc = 0;
+  for (let k = 0; k < n; k++) {
+    const next = acc + hist[k] / total;
+    if (next >= q) return HIST_MIN + (k + (hist[k] > 0 ? (q - acc) / (hist[k] / total) : 0)) * w;
+    acc = next;
+  }
+  return HIST_MIN + HIST_RANGE;
+}
 
 export interface HistStats { hist: number[]; area: number; localContrast?: number }
 export interface AutoCurvesInput {
@@ -121,7 +136,21 @@ export function autoCurves(i: AutoCurvesInput): AutoCurvesResult {
       b.bands[4] += o; b.bands[3] += o * 0.5;
       reasons.push(`whites never reach white: p99 renders at ${p99.toFixed(2)} and nothing is clipped → highlights opened`);
     }
-    if (reasons.length) put(b, (c) => (out.photo = c), "curves.photo", reasons.join("; "), { p05: r2(p05), p50: r2(p50), p95: r2(p95), p99: r2(p99) });
+    // Deep blacks, not a dark photo: the darkest 1% toward ≈ 12/255 by lowering only
+    // the bottom of the curve (the shadows point); darks and mid-tones stay. Only
+    // where the scene has real black (≥ 8.5 EV below white — not haze, fog or
+    // overcast), less in dark photos, and never past near-black.
+    const [q001, q01] = q(i.photo, [0.001, 0.01]);
+    const rangeEV = evQuantile(i.photo.hist, 0.999) - evQuantile(i.photo.hist, 0.001);
+    if (rangeEV >= 8.5 && q01 > BLACK_TARGET + 0.02 && q001 > 0.012) {
+      const want = (BLACK_TARGET - q01) / BAND_RANGE;                        // band units at the shadows point
+      const deepen = Math.max(-CAP, want) * smooth(0.25, 0.42, p50) * smooth(0.012, 0.03, q001);
+      if (deepen < -0.02) {
+        b.bands[0] += deepen;
+        reasons.push(`blacks: darkest 1% renders at ${(q01 * 255).toFixed(0)}/255 → deepened toward ${(BLACK_TARGET * 255).toFixed(0)}/255 at the bottom of the curve only (scene range ${rangeEV.toFixed(1)} EV)`);
+      }
+    }
+    if (reasons.length) put(b, (c) => (out.photo = c), "curves.photo", reasons.join("; "), { p05: r2(p05), p50: r2(p50), p95: r2(p95), p99: r2(p99), p1: r2(q01) });
   }
 
   // --- sky ---------------------------------------------------------------------------

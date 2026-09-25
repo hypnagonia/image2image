@@ -11,9 +11,11 @@ function hist(ev: number, sd: number): number[] {
   return h.map((v) => v / s);
 }
 const p = defaultParams();
+/** A well-exposed photo with real black: the main body plus a small deep-shadow tail. */
+const good = hist(-2.5, 2.2).map((v, k) => 0.97 * v + 0.03 * hist(-11, 0.6)[k]);
 const base = (over: Partial<AutoCurvesInput> = {}): AutoCurvesInput => ({
   tone: p.tone, exposure: 0, local: p.local, clipHi: 0,
-  photo: { hist: hist(-2.5, 2.2), area: 1 }, regions: {}, ...over,
+  photo: { hist: good, area: 1 }, regions: {}, ...over,
 });
 const G = Math.log2(0.18);
 
@@ -96,4 +98,12 @@ test("ground always gets a contrast curve around its own median", () => {
   const b = r.regions.ground!.bands;
   assert.ok(b[0] < 0 && b[4] > 0, `S: ${b}`);
   assert.equal(autoCurves(base({ regions: { ground: { hist: hist(G, 1), area: 0.01 } } })).regions.ground, undefined, "not on a sliver of ground");
+});
+
+test("real black that renders grey is deepened at the bottom only; haze is left alone", () => {
+  const milky = autoCurves(base({ photo: { hist: hist(-2.5, 1.5), area: 1 } }));
+  assert.ok(milky.photo && milky.photo.bands[0] < -0.1, JSON.stringify(milky.photo));
+  assert.ok(Math.abs(milky.photo!.bands[1]) < 0.2, "darks barely move");
+  const haze = autoCurves(base({ photo: { hist: hist(-2.5, 0.9), area: 1 } }));
+  assert.ok(!haze.notes.some((n) => n.reason.includes("blacks")), "no real black (short range): not deepened");
 });
