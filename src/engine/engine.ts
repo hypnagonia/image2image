@@ -495,7 +495,7 @@ export class Engine {
     const metrics = await measureQuality(this.gpu, s.denoised, W, H, s.gain);
     const q = decideUpscale(metrics, {
       width: W, height: H, iso: s.decoded.meta.iso, reducedByUser, mode,
-      maxOutputMP: UPSCALE_MAX_MP(), maxTextureDimension: this.gpu.info.maxTextureDimension2D,
+      maxOutputMP: UPSCALE_MAX_MP(), maxTextureDimension: this.gpu.info.maxTextureDimension2D, mobile: isMobile(),
     });
     s.upscale = { state: q.needsUpscale ? "pending" : "skipped", upscaleApplied: false, upscaleFactor: 1, upscaleReason: q.reason, code: q.code, vars: q.vars, report: q };
     const m = q.metrics;

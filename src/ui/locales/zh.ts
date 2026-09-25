@@ -222,6 +222,7 @@ export const zh: Dict = {
   "llm.parseError": "无法读取回复：{msg}",
   "llm.noPhoto": "请先打开一张照片。",
   "up.offSkip": "保持原始尺寸",
+  "up.r.mobile": "手机上不会自动运行（较耗资源）——点按“立即放大 2×”",
   "up.r.off": "已关闭",
   "up.r.forced": "按要求",
   "upt.modeAuto": "自动（推荐）",

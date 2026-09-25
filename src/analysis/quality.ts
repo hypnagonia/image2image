@@ -47,7 +47,7 @@ export interface QualityMetrics {
 
 export type UpscaleReasonCode =
   | "sufficient" | "sharp-12" | "adequate" | "severe-blur" | "noise" | "no-detail"
-  | "reduced" | "memory" | "below-target" | "soft" | "resolution-limited" | "off" | "forced";
+  | "reduced" | "memory" | "below-target" | "soft" | "resolution-limited" | "off" | "forced" | "mobile";
 
 /** User setting: automatic decision, always 2× (memory permitting), or never. */
 export type UpscaleMode = "auto" | "always" | "off";
@@ -83,6 +83,8 @@ export interface QualityContext {
   targetMP?: number;
   /** "always" overrides every quality reason (never the memory budget); "off" never upscales. */
   mode?: UpscaleMode;
+  /** A phone or tablet: the neural 2× is too heavy to run on its own (only when asked: "always" / "Upscale 2× now"). */
+  mobile?: boolean;
 }
 
 const PATCH = 256;
@@ -199,6 +201,7 @@ export function decideUpscale(m: QualityMetrics, ctx: QualityContext): ImageQual
   const auto = decideAuto(m, ctx);
   const mode = ctx.mode ?? "auto";
   if (mode === "off") return { ...auto, needsUpscale: false, code: "off", reason: "upscaling is switched off", vars: {} };
+  if (mode === "auto" && ctx.mobile && auto.needsUpscale) return { ...auto, needsUpscale: false, code: "mobile", reason: `not run automatically on a phone or tablet (heavy): ${auto.reason}`, vars: {} };
   if (mode === "always" && !auto.needsUpscale && auto.code !== "memory") {
     const outMP = auto.megapixels * 4;
     if (outMP > ctx.maxOutputMP || 2 * Math.max(ctx.width, ctx.height) > ctx.maxTextureDimension)

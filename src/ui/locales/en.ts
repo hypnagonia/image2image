@@ -227,6 +227,7 @@ export const en = {
   "llm.parseError": "Could not read the reply: {msg}",
   "llm.noPhoto": "Open a photo first.",
   "up.offSkip": "kept at original size",
+  "up.r.mobile": "not run automatically on phones (heavy) — tap “Upscale 2× now” to run it",
   "up.r.off": "switched off",
   "up.r.forced": "requested",
   "upt.modeAuto": "Automatic (recommended)",

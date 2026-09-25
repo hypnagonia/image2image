@@ -222,6 +222,7 @@ export const es: Dict = {
   "llm.parseError": "No se pudo leer la respuesta: {msg}",
   "llm.noPhoto": "Abre una foto primero.",
   "up.offSkip": "se mantiene el tamaño original",
+  "up.r.mobile": "no se ejecuta automáticamente en el móvil (pesado): toca «Ampliar 2× ahora»",
   "up.r.off": "desactivada",
   "up.r.forced": "solicitada",
   "upt.modeAuto": "Automático (recomendado)",

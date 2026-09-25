@@ -96,3 +96,12 @@ test("modes: off never upscales, always overrides quality reasons but not memory
   assert.equal(decideUpscale(base, ctx(4032, 3024, { mode: "always", maxOutputMP: 16 })).code, "memory");
   assert.equal(decideUpscale({ ...base, edgeSigma: 3.4 }, ctx(2000, 1500, { mode: "always" })).needsUpscale, true);
 });
+
+test("phones and tablets: no automatic 2×, but it runs when asked", () => {
+  const m = { ...base };
+  assert.equal(decideUpscale(m, ctx(2000, 1500)).needsUpscale, true, "desktop: small frame → 2×");
+  const phone = decideUpscale(m, ctx(2000, 1500, { mobile: true }));
+  assert.equal(phone.needsUpscale, false);
+  assert.equal(phone.code, "mobile");
+  assert.equal(decideUpscale(m, ctx(2000, 1500, { mobile: true, mode: "always" })).needsUpscale, true);
+});
