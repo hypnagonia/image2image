@@ -15,6 +15,7 @@ import detailWgsl from "../gpu/shaders/render_detail.wgsl?raw";
 import dofWgsl from "../gpu/shaders/render_dof.wgsl?raw";
 import outputWgsl from "../gpu/shaders/output.wgsl?raw";
 import grainWgsl from "../gpu/shaders/render_grain.wgsl?raw";
+import gainmapWgsl from "../gpu/shaders/render_gainmap.wgsl?raw";
 import { floatsToHalves } from "../gpu/half.ts";
 import { CURVE_LUT_SIZE, TONE_LUT_SIZE, curveLUT, isFlat, toneCurveLUT } from "./curves.ts";
 import { buildLUT, LOOKS, type Look } from "./looks.ts";
@@ -45,6 +46,10 @@ export interface RenderOptions {
   /** Region index highlighted by debug view 4. */
   region?: number;
   dither?: boolean;
+  /** Compute the HDR gain (carried in alpha after the tone pass) at the photo's headroom. */
+  hdr?: boolean;
+  /** Also produce the 8-bit gain map for the gain-map JPEG: block size and range (log2 stops). */
+  gainMap?: { scale: number; stops: number };
 }
 
 const MIDDLE_GREY_EV = Math.log2(0.18);
@@ -105,13 +110,14 @@ export class Renderer {
   addLook(l: Look) { this.customLooks.set(l.id, l); }
   looks(): Look[] { return [...LOOKS, ...this.customLooks.values()]; }
 
-  private ensureLuts(p: Params) {
+  private ensureLuts(p: Params, hdrStops = 0) {
     const gpu = this.gpu;
-    const tk = JSON.stringify(p.tone);
+    // g channel: the HDR gain at this headroom (1 everywhere for an SDR render).
+    const tk = JSON.stringify([p.tone, hdrStops]);
     if (tk !== this.toneKey) {
       this.toneKey = tk;
       if (!this.toneLut) this.toneLut = gpu.tex("toneLUT", TONE_LUT_SIZE, 1, "rgba16float", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
-      gpu.device.queue.writeTexture({ texture: this.toneLut }, floatsToHalves(toneCurveLUT(p.tone)), { bytesPerRow: TONE_LUT_SIZE * 8 }, { width: TONE_LUT_SIZE, height: 1 });
+      gpu.device.queue.writeTexture({ texture: this.toneLut }, floatsToHalves(toneCurveLUT(p.tone, hdrStops)), { bytesPerRow: TONE_LUT_SIZE * 8 }, { width: TONE_LUT_SIZE, height: 1 });
     }
     // Curve table: row 0 = the photo's curves, rows 1…11 = the regions', 12 = skin, 13…15 = near / middle / far.
     const ck = JSON.stringify([p.curves, p.regionCurves, p.depthCurves]);
@@ -209,18 +215,19 @@ export class Renderer {
   }
 
   private toneDispatch(enc: GPUCommandEncoder, temp: Array<GPUBuffer | GPUTexture>, src: RenderSource, maps: RefinedMaps, p: Params, o: RenderOptions,
-    lutSize: number, lutOn: boolean, profileOn: boolean, dst: GPUTexture, distT: GPUTexture, ty0: number, th: number) {
+    lutSize: number, lutOn: boolean, profileOn: boolean, dst: GPUTexture, distT: GPUTexture, ty0: number, th: number, gainT?: GPUTexture) {
     const gpu = this.gpu;
     // Tone uniforms followed by the target rectangle (tgt: offset x/y, width, height).
     const base = this.toneUniforms(p, src, maps, o, lutSize, lutOn);
-    // Tone uniforms, then tgt, hl, vig (amount, midpoint, feather, roundness), vig2 (vignette highlights, depth band edges near|middle, middle|far, band crossfade).
-    const buf = new ArrayBuffer(base.byteLength + 64);
+    // Tone uniforms, then tgt, hl, vig (amount, midpoint, feather, roundness), vig2 (vignette highlights, depth band edges near|middle, middle|far, band crossfade), hdr (on).
+    const buf = new ArrayBuffer(base.byteLength + 80);
     new Uint8Array(buf).set(new Uint8Array(base));
     new Int32Array(buf, base.byteLength, 4).set([0, ty0, src.width, th]);
     new Float32Array(buf, base.byteLength + 16, 4).set([o.zoneRange?.[0] ?? 0, o.zoneRange?.[1] ?? 1, 0, 0]);
     const v = p.vignette ?? { amount: 0, midpoint: 0.5, feather: 0.6, roundness: 0.3, highlights: 0.5 };
     const db = p.depthBands ?? [0.33, 0.66];
     new Float32Array(buf, base.byteLength + 32, 8).set([v.amount, v.midpoint, v.feather, v.roundness, v.highlights, db[0], db[1], 0.06]);
+    new Float32Array(buf, base.byteLength + 64, 4).set([gainT ? 1 : 0, 0, 0, 0]);
     const u = gpu.uniform(buf, "tone.u");
     const profU = gpu.uniform(profileUniforms(p.profile, profileOn, lutOn, lutSize), "profile.u");
     temp.push(u, profU);
@@ -232,6 +239,7 @@ export class Renderer {
       this.sampler, dst.createView(), distT.createView(),
       profU, this.profCurve!.createView(), this.depthTab!.createView(), this.hueTab!.createView(),
       (src.skin ?? this.noSkin()).createView(),
+      (gainT ?? this.target("gainDummy", 1, 1, "r32float")).createView(),
     ], Math.ceil(src.width / 8), Math.ceil(th / 8));
   }
 
@@ -242,10 +250,11 @@ export class Renderer {
    * sharpening / depth-of-field neighbourhoods). Rendering in strips keeps the
    * extra memory of a full-resolution export to a few tens of MB.
    */
-  async render(src: RenderSource, maps: RefinedMaps, p: Params, o: RenderOptions, dofOn: boolean, strip?: { y0: number; rows: number }): Promise<{ tex: GPUTexture; top: number; rows: number }> {
+  async render(src: RenderSource, maps: RefinedMaps, p: Params, o: RenderOptions, dofOn: boolean, strip?: { y0: number; rows: number }): Promise<{ tex: GPUTexture; top: number; rows: number; gm?: GPUTexture; gmW?: number; gmRows?: number }> {
     const gpu = this.gpu;
     const { width: W, height: H } = src;
-    const { size: lutSize, identity } = this.ensureLuts(p);
+    const hdrStops = o.hdr ? (p.hdr?.headroom ?? 0) : 0;
+    const { size: lutSize, identity } = this.ensureLuts(p, hdrStops);
     const dof = dofOn && p.dof.strength > 0;
     const maxRadius = p.dof.strength * 0.022 * Math.max(W, H);
     const y0 = strip?.y0 ?? 0, rows = strip?.rows ?? H;
@@ -261,16 +270,17 @@ export class Renderer {
     const top = y0 - ty0;
     const t1 = this.target("tone", W, th, "rgba16float");
     const t2 = this.target("detail", W, th, "rgba16float");
+    const gainT = hdrStops > 0 ? this.target("gain", W, th, "r32float") : undefined;
     const distT = dof ? this.target("dist", W, th, "r32float") : this.target("distDummy", 1, 1, "r32float");
     const scale = W / src.fullWidth;
     await gpu.run("render.tone+detail", (enc, temp) => {
-      this.toneDispatch(enc, temp, src, maps, p, o, lutSize, !identity, p.enable.lut && !isNeutral(p.profile), t1, distT, ty0, th);
+      this.toneDispatch(enc, temp, src, maps, p, o, lutSize, !identity, p.enable.lut && !isNeutral(p.profile), t1, distT, ty0, th, gainT);
       // Sharpening radius is defined at full resolution; a preview sees it scaled.
       const radius = p.sharpen.radius * Math.max(scale, 0.35);
       const amount = p.enable.sharpen ? p.sharpen.amount * Math.min(1, scale * 1.5 + 0.2) : 0;
-      const ud = gpu.uniform(new Uniforms(8).u32(W, th, 0, 0).f32(amount, radius, p.sharpen.threshold, 0).bytes(), "detail.u");
+      const ud = gpu.uniform(new Uniforms(8).u32(W, th, gainT ? 1 : 0, 0).f32(amount, radius, p.sharpen.threshold, 0).bytes(), "detail.u");
       temp.push(ud);
-      gpu.dispatch(enc, gpu.pipeline("render.detail", detailWgsl), [ud, t1.createView(), t2.createView()], Math.ceil(W / 8), Math.ceil(th / 8));
+      gpu.dispatch(enc, gpu.pipeline("render.detail", detailWgsl), [ud, t1.createView(), t2.createView(), (gainT ?? this.target("gainDummy", 1, 1, "r32float")).createView()], Math.ceil(W / 8), Math.ceil(th / 8));
     });
     let final = t2;
     let finalLinear = false;
@@ -291,15 +301,27 @@ export class Renderer {
       });
       final = out;
     }
-    if (o.output === "p3f16" && !finalLinear) return { tex: final, top, rows };
-    if (o.output === "p3f16") return { tex: await this.encodeF16(final, W, th), top, rows };
+    // Gain map for the requested rows (alpha of `final` is the HDR gain).
+    let gm: GPUTexture | undefined, gmW = 0, gmRows = 0;
+    if (o.gainMap && gainT) {
+      const s = o.gainMap.scale;
+      gmW = Math.ceil(W / s); gmRows = Math.ceil(rows / s);
+      gm = this.target("gm8", gmW, gmRows, "rgba8unorm");
+      await gpu.run("render.gainmap", (enc, temp) => {
+        const u = gpu.uniform(new Uniforms(12).u32(W, th, top, s).u32(finalLinear ? 1 : 0, gmW, rows, 0).f32(0, o.gainMap!.stops, 1, 1 / 64).bytes(), "gainmap.u");
+        temp.push(u);
+        gpu.dispatch(enc, gpu.pipeline("render.gainmap", gainmapWgsl), [u, final.createView(), gm!.createView()], Math.ceil(gmW / 8), Math.ceil(gmRows / 8));
+      });
+    }
+    if (o.output === "p3f16" && !finalLinear) return { tex: final, top, rows, gm, gmW, gmRows };
+    if (o.output === "p3f16") return { tex: await this.encodeF16(final, W, th), top, rows, gm, gmW, gmRows };
     const out = this.target("out8", W, th, "rgba8unorm");
     await gpu.run("render.output", (enc, temp) => {
       const u = gpu.uniform(new Uniforms(8).u32(W, th, 0, 0, o.output === "srgb8" ? 0 : 1, o.dither === false ? 0 : 1, finalLinear ? 1 : 0, ty0).bytes());
       temp.push(u);
       gpu.dispatch(enc, gpu.pipeline("output.encode", outputWgsl, "encode"), [u, final.createView(), out.createView()], Math.ceil(W / 8), Math.ceil(th / 8));
     });
-    return { tex: out, top, rows };
+    return { tex: out, top, rows, gm, gmW, gmRows };
   }
 
   /** Scene-linear Rec.2020 (after denoise, WB, dehaze, exposure) for the linear DNG export; same strip contract as render(). */

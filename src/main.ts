@@ -538,6 +538,7 @@ adjustPane.append(
   slider({ path: "tone.blacks", label: t("adj.blacks"), min: -1, max: 1, step: 0.01, fmt: pct }),
   slider({ path: "tone.contrast", label: t("adj.contrast"), min: -1, max: 1, step: 0.01, fmt: pct }),
   slider({ path: "tone.rolloff", label: t("adj.rolloff"), min: 0, max: 1, step: 0.01, fmt: pct }),
+  slider({ path: "hdr.headroom", label: t("adj.hdrHeadroom"), min: 0, max: 3, step: 0.25, fmt: (v) => (v ? `+${v.toFixed(2)} EV` : t("adj.hdrOff")) }),
   el("div", { class: "group-title", text: t("adj.wb") }),
   slider({ path: "wb.temp", label: t("adj.temp"), min: 2000, max: 12000, step: 10, fmt: (v) => `${Math.round(v)}K` }),
   slider({ path: "wb.tint", label: t("adj.tint"), min: -60, max: 60, step: 0.5 }),
@@ -799,7 +800,7 @@ depthPane.append(
 renderBands();
 
 // Export
-const fmtSel = el("select", {}, el("option", { value: "jpeg", text: "JPEG" }), el("option", { value: "heic", text: "HEIC" }), el("option", { value: "tiff16", text: t("exp.tiff") }), el("option", { value: "dng", text: t("exp.dng") }));
+const fmtSel = el("select", {}, el("option", { value: "jpeg", text: "JPEG" }), el("option", { value: "jpeg-hdr", text: t("exp.jpegHdr") }), el("option", { value: "heic", text: "HEIC" }), el("option", { value: "tiff16", text: t("exp.tiff") }), el("option", { value: "dng", text: t("exp.dng") }));
 const spaceSel = el("select", {}, el("option", { value: "p3", text: "Display P3" }), el("option", { value: "srgb", text: "sRGB" }));
 const qualitySl = el("input", { type: "range", min: "0.6", max: "1", step: "0.01", value: "0.92" });
 const qualityOut = el("output", { text: "92" });
@@ -817,10 +818,13 @@ exportBtn.onclick = () => {
 };
 const resSel = el("select", {}, el("option", { value: "auto", text: t("exp.resAuto") }), el("option", { value: "full", text: t("exp.resFull") }), el("option", { value: "half", text: t("exp.resHalf") }));
 resSel.onchange = () => (resolution = resSel.value as typeof resolution);
+const hdrHint = el("p", { class: "muted", text: t("exp.jpegHdrHint") });
+hdrHint.hidden = true;
 exportPane.append(
   el("div", { class: "row" }, el("label", { text: t("exp.format") }), fmtSel, el("span")),
   el("div", { class: "row" }, el("label", { text: t("exp.colour") }), spaceSel, el("span")),
   el("div", { class: "row" }, el("label", { text: t("exp.quality") }), qualitySl, qualityOut),
+  hdrHint,
   el("div", { class: "actions" }, exportBtn),
   exportInfo,
   el("div", { class: "group-title", text: t("exp.next") }),
@@ -829,7 +833,8 @@ exportPane.append(
 );
 fmtSel.onchange = () => {
   const f = fmtSel.value;
-  qualitySl.disabled = !(f === "jpeg" || f === "heic");
+  qualitySl.disabled = !(f === "jpeg" || f === "jpeg-hdr" || f === "heic");
+  hdrHint.hidden = f !== "jpeg-hdr";
   spaceSel.disabled = f === "tiff16" || f === "dng";
 };
 

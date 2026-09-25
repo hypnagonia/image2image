@@ -42,7 +42,7 @@ import { neutralProfile, normalizeProfile, type LookProfile } from "../looks/pro
 import { analyseColors, type ColorStats } from "../looks/palette.ts";
 import { matchProfile, profileFromReference, type RegionColors } from "../looks/reference.ts";
 import { GROUPS, type Group } from "../neural/scene.ts";
-import { canEncodeHeic, encodeHeic, encodeJpeg, encodeLinearDng, encodeTiff16 } from "../output/encoders.ts";
+import { canEncodeHeic, encodeGainMapJpeg, encodeHeic, encodeJpeg, encodeLinearDng, encodeTiff16 } from "../output/encoders.ts";
 import { Profiler } from "./profiler.ts";
 import type { Capabilities, ExportFormat, FromWorker, Summary, UpscaleInfo } from "./protocol.ts";
 import type { CameraColor } from "../color/dng.ts";
@@ -801,6 +801,29 @@ export class Engine {
         const blob = await P.time("encode TIFF", () => encodeTiff16(f, W, H, s.decoded.meta));
         this.post({ type: "profile", stages: P.stages });
         return { blob, name: `${base}-edit.tif`, ms: performance.now() - t0 };
+      }
+      if (format === "jpeg-hdr") {
+        // SDR image + gain map, strip by strip. The gain map is ½ size (¼ above 24 MP);
+        // strips start on multiples of the block size so its rows line up.
+        const s2 = W * H > 24e6 ? 4 : 2;
+        const stops = p.hdr?.headroom || 2;
+        const gw = Math.ceil(W / s2), gh = Math.ceil(H / s2);
+        const rgba = new Uint8ClampedArray(W * H * 4);
+        const gain = new Uint8ClampedArray(gw * gh * 4);
+        const HS = Math.max(64, Math.round(STRIP / s2) * s2);
+        await P.time("export render (HDR)", async () => {
+          for (let y0 = 0; y0 < H; y0 += HS) {
+            this.progress("export", `rendering ${Math.round((y0 / H) * 100)}%`, y0 / H);
+            const rows = Math.min(HS, H - y0);
+            const r = await this.renderer.render(src, s.maps, { ...p, hdr: { headroom: stops } }, { ...o, output: space === "p3" ? "p38" : "srgb8", hdr: true, gainMap: { scale: s2, stops } }, dof, { y0, rows });
+            rgba.set(new Uint8Array(await gpu.readTexture(r.tex, 0, r.top, W, rows, 4)), y0 * W * 4);
+            if (r.gm) gain.set(new Uint8Array(await gpu.readTexture(r.gm, 0, 0, r.gmW!, r.gmRows!, 4)), (y0 / s2) * gw * 4);
+          }
+        }, () => `${W}×${H} + gain map ${gw}×${gh}, +${stops} EV`);
+        this.progress("export", "encoding JPEG (HDR)");
+        const blob = await P.time("encode JPEG (HDR)", () => encodeGainMapJpeg(rgba, W, H, gain, gw, gh, stops, space, quality, s.decoded.meta));
+        this.post({ type: "profile", stages: P.stages });
+        return { blob, name: `${base}-edit-hdr.jpg`, ms: performance.now() - t0 };
       }
       const rgba = new Uint8ClampedArray(W * H * 4);
       await P.time("export render", () => strips(async (y0, rows) => {

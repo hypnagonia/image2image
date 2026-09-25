@@ -4,6 +4,8 @@
  *   JPEG   browser encoder (OffscreenCanvas.convertToBlob), then our own EXIF
  *          (APP1) and ICC (APP2) segments — the browser's metadata handling
  *          differs between engines, ours does not.
+ *   JPEG (HDR)  the same SDR JPEG plus a gain map (ultrahdr.ts): HDR screens
+ *          show brighter highlights, everything else shows the SDR image.
  *   HEIC   offered only when the browser's canvas encoder actually produces
  *          HEIC (probed at startup; Safari may, Chrome does not).
  *   TIFF   16-bit/channel, Display P3 (sRGB curve) with embedded ICC — the
@@ -16,17 +18,35 @@
 import type { PhotoMetadata } from "../decode/types.ts";
 import { buildExifApp1, captureEntries, injectJpegSegments, SOFTWARE } from "./exif.ts";
 import { buildIcc } from "./icc.ts";
+import { muxGainMapJpeg } from "./ultrahdr.ts";
 import { IfdWriter, T, tiffHeader, concat, srational, type Entry } from "./tiffWriter.ts";
 import { XYZ_TO_REC2020, REC2020_TO_XYZ, bradford, D65_XY, D50_XY } from "../color/spaces.ts";
 import { mul } from "../color/mat3.ts";
 
-export async function encodeJpeg(rgba: Uint8ClampedArray, w: number, h: number, space: "srgb" | "p3", quality: number, meta: PhotoMetadata): Promise<Blob> {
+/** The browser's JPEG encoding of these pixels, as bytes (its own metadata is replaced by the callers). */
+export async function encodeJpegRaw(rgba: Uint8ClampedArray, w: number, h: number, space: "srgb" | "p3", quality: number): Promise<Uint8Array> {
   const canvas = new OffscreenCanvas(w, h);
   const ctx = canvas.getContext("2d", { colorSpace: space === "p3" ? "display-p3" : "srgb" }) as OffscreenCanvasRenderingContext2D;
   ctx.putImageData(new ImageData(rgba as Uint8ClampedArray<ArrayBuffer>, w, h, { colorSpace: space === "p3" ? "display-p3" : "srgb" }), 0, 0);
   const blob = await canvas.convertToBlob({ type: "image/jpeg", quality });
-  const bytes = new Uint8Array(await blob.arrayBuffer());
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+export async function encodeJpeg(rgba: Uint8ClampedArray, w: number, h: number, space: "srgb" | "p3", quality: number, meta: PhotoMetadata): Promise<Blob> {
+  const bytes = await encodeJpegRaw(rgba, w, h, space, quality);
   const out = injectJpegSegments(bytes, buildExifApp1(meta, space), buildIcc(space));
+  return new Blob([out as BlobPart], { type: "image/jpeg" });
+}
+
+/**
+ * HDR gain-map JPEG: the SDR image (exactly the plain JPEG export) plus an
+ * 8-bit gain map (grey, R = G = B — the canvas cannot write single-channel
+ * JPEGs; its constant chroma decodes as a mono map). See ultrahdr.ts.
+ */
+export async function encodeGainMapJpeg(rgba: Uint8ClampedArray, w: number, h: number, gain: Uint8ClampedArray, gw: number, gh: number, stops: number, space: "srgb" | "p3", quality: number, meta: PhotoMetadata): Promise<Blob> {
+  const base = await encodeJpegRaw(rgba, w, h, space, quality);
+  const gm = await encodeJpegRaw(gain, gw, gh, "srgb", 0.9);
+  const out = muxGainMapJpeg(base, gm, { min: 0, max: stops, gamma: 1, offSdr: 1 / 64, offHdr: 1 / 64, capMin: 0, capMax: stops }, buildExifApp1(meta, space), buildIcc(space));
   return new Blob([out as BlobPart], { type: "image/jpeg" });
 }
 

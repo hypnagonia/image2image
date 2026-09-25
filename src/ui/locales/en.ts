@@ -233,6 +233,10 @@ export const en = {
   // ---- Export tab
   "exp.tiff": "TIFF 16-bit (P3)",
   "exp.dng": "DNG (processed, linear)",
+  "adj.hdrHeadroom": "HDR headroom",
+  "adj.hdrOff": "off",
+  "exp.jpegHdr": "JPEG (HDR)",
+  "exp.jpegHdrHint": "An ordinary JPEG plus a gain map: HDR screens (iPhone, iPad, Mac, Chrome and Android) show highlights brighter than white; every other screen and app shows the normal JPEG. Headroom is set in Adjust → Light (2 stops if it is off).",
   "exp.button": "Export full resolution",
   "exp.done": "{file} — {mb} MB in {s} s",
   "exp.resAuto": "Working size: automatic",

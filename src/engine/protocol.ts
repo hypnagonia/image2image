@@ -5,7 +5,7 @@ import type { ColorStats } from "../looks/palette.ts";
 import type { ImageQualityReport, UpscaleMode, UpscaleReasonCode } from "../analysis/quality.ts";
 export type { UpscaleMode };
 
-export type ExportFormat = "jpeg" | "heic" | "tiff16" | "dng";
+export type ExportFormat = "jpeg" | "jpeg-hdr" | "heic" | "tiff16" | "dng";
 
 export interface Capabilities {
   webgpu: boolean;

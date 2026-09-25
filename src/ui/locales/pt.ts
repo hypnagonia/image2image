@@ -228,6 +228,10 @@ export const pt: Dict = {
   // ---- Export tab
   "exp.tiff": "TIFF 16 bits (P3)",
   "exp.dng": "DNG (processado, linear)",
+  "adj.hdrHeadroom": "Margem HDR",
+  "adj.hdrOff": "desl.",
+  "exp.jpegHdr": "JPEG (HDR)",
+  "exp.jpegHdrHint": "Um JPEG comum com um mapa de ganho: telas HDR (iPhone, iPad, Mac, Chrome e Android) mostram realces mais claros que o branco; outras telas e apps mostram o JPEG normal. A margem fica em Ajustes → Luz (2 stops se estiver desligada).",
   "exp.button": "Exportar em resolução total",
   "exp.done": "{file} — {mb} MB em {s} s",
   "exp.resAuto": "Tamanho de trabalho: automático",

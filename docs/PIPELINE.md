@@ -80,6 +80,21 @@ DNG/ProRAW/HEIC → decode (LibRaw / native / libheif)
    them at output resolution; masks and depth are sampled in normalised
    coordinates, so they stay aligned.
 
+## HDR output (gain-map JPEG)
+
+The SDR rendering is unchanged; an HDR rendition is defined on top of it as a
+per-pixel luminance gain (`hdrGain`, `src/render/curves.ts`): exactly 1 below
+the knee (where the SDR curve reaches display-linear 0.5), then a second
+Naka–Rushton curve with the same contrast, anchored at the knee and peaking
+at 2^headroom, blended in over one stop. The tone pass writes the gain; it is
+carried in alpha through sharpening, depth of field (as additive excess
+luminance, so blurred highlights keep it) and grain. "JPEG (HDR)" writes the
+SDR JPEG plus an 8-bit gain map (½ size, ¼ above 24 MP; each map pixel is the
+block's *minimum* gain, so nothing glows onto dark edges) with Ultra HDR XMP,
+MPF and ISO 21496-1 metadata (`src/output/ultrahdr.ts`). Headroom is chosen
+from how far the brightest 0.1% sits above the knee (0 for scenes without real
+highlights and for display-referred sources); "HDR headroom" in Adjust.
+
 ## Optional 2× upscale
 
 Runs only when the analysis says it helps; otherwise the model is never

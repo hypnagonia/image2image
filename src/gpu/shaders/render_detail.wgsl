@@ -7,10 +7,14 @@
 //   Y'      clamped to the 3×3 min/max ± a small margin: no overshoot, no halos
 // `mult` is the per-pixel semantic × depth multiplier written by pass 1 (alpha).
 
-struct U { size: vec4<u32>, s: vec4<f32> } // s: amount, radius, threshold, _
+struct U { size: vec4<u32>, s: vec4<f32> } // size: W, H, HDR (1: alpha = HDR gain), _; s: amount, radius, threshold, _
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var src: texture_2d<f32>;
 @group(0) @binding(2) var dst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var gain: texture_2d<f32>; // HDR gain (r32float), or a 1×1 dummy
+
+/** Output alpha: the HDR gain from here on (1 when HDR is off). */
+fn alpha_at(p: vec2<i32>) -> f32 { return select(1.0, textureLoad(gain, p, 0).r, u.size.z != 0u); }
 
 fn ld(p: vec2<i32>) -> vec4<f32> {
   return textureLoad(src, clamp(p, vec2<i32>(0), vec2<i32>(i32(u.size.x) - 1, i32(u.size.y) - 1)), 0);
@@ -24,7 +28,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let c = ld(p);
   let mult = c.a;
   let amount = u.s.x * mult;
-  if (amount <= 0.001) { textureStore(dst, p, vec4<f32>(c.rgb, 1.0)); return; }
+  if (amount <= 0.001) { textureStore(dst, p, vec4<f32>(c.rgb, alpha_at(p))); return; }
   let sigma = max(u.s.y, 0.4);
   var acc = 0.0; var wsum = 0.0;
   var mn = 1e9; var mx = -1e9;
@@ -44,5 +48,5 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let margin = 0.012 * amount;
   y1 = clamp(y1, mn - margin, mx + margin);
   let outc = clamp(c.rgb + vec3<f32>(y1 - y0), vec3<f32>(0.0), vec3<f32>(1.0));
-  textureStore(dst, p, vec4<f32>(outc, 1.0));
+  textureStore(dst, p, vec4<f32>(outc, alpha_at(p)));
 }

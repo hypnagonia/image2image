@@ -20,6 +20,7 @@ import type { AnalysisReport, RegionStats } from "../analysis/types.ts";
 import { noiseAt, BLUR_THRESHOLD } from "../analysis/analysis.ts";
 import { lchOf } from "../color/oklab.ts";
 import { checkBlacks } from "./blacks.ts";
+import { hdrKnee } from "../render/curves.ts";
 import type { CameraColor } from "../color/dng.ts";
 import { mulVec, inverse } from "../color/mat3.ts";
 
@@ -226,6 +227,20 @@ export function decide(ctx: EngineContext): DecisionResult {
   p.tone.contrast = r2(clamp((1.6 - spread) * 0.12, -0.1, 0.18));
   p.tone.rolloff = r2(clamp(0.45 + 0.4 * smooth(0.5, 2.5, hiEV), 0.4, 0.9));
   note("tone.contrast", p.tone.contrast, `log-luminance spread ${spread.toFixed(2)} EV (flat < 1.6 EV)`, { sdEV: r2(spread) });
+
+  // HDR headroom: how far the brightest meaningful highlights sit above the level
+  // where the HDR rendition starts to differ (the knee, curves.ts), after what
+  // local tone does to them. Scenes without real highlights — and display-referred
+  // sources, whose highlights are already rendered — stay SDR.
+  {
+    const kneeRel = Math.log2(hdrKnee(p.tone) / 0.18);
+    const hiRel = (Math.log2(R.lum.p999) - p.local.anchorEV) * (1 - p.local.compression) + 1.6 * Math.min(0, p.tone.highlights);
+    const excess = hiRel - kneeRel;
+    p.hdr.headroom = ctx.referred === "display" || excess < 1 ? 0 : Math.round(clamp(1 + 0.6 * (excess - 1), 1, 3) * 4) / 4;
+    note("hdr.headroom", p.hdr.headroom, ctx.referred === "display"
+      ? "display-referred source — highlights already rendered, SDR"
+      : `brightest 0.1% sits ${excess.toFixed(1)} EV above the HDR knee` + (p.hdr.headroom ? ` → +${p.hdr.headroom} EV on HDR screens` : " — no real highlights, SDR"), { excessEV: r2(excess) });
+  }
 
   const lc = R.global.localContrast;
   p.local.clarity = r2(clamp((0.32 - lc) * 0.9, -0.1, 0.25));

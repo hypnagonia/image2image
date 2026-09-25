@@ -1,5 +1,5 @@
 // Output transform.
-//   linearize: display-encoded P3 → linear P3 (for DoF mips and blending)
+//   linearize: display-encoded P3 → linear P3 (for DoF mips and blending); alpha: HDR gain → excess luminance
 //   mip:       2× box reduction into the next mip level
 //   encode:    (encoded or linear) P3 → target space, dithered, rgba8unorm
 //              target 0 = sRGB, 1 = Display P3; input_linear flag in cfg.z
@@ -14,7 +14,10 @@ struct U { size: vec4<u32>, cfg: vec4<u32> } // cfg: x target, y dither, z input
 fn linearize(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= u.size.x || id.y >= u.size.y) { return; }
   let c = textureLoad(src, vec2<i32>(id.xy), 0);
-  textureStore(dst16, vec2<i32>(id.xy), vec4<f32>(srgb_eotf(c.rgb), 1.0));
+  // Alpha = the HDR gain; carried as additive "excess luminance" Y·(gain − 1), so
+  // mips and the blur average it like light (a blurred highlight keeps its HDR).
+  let lin = srgb_eotf(c.rgb);
+  textureStore(dst16, vec2<i32>(id.xy), vec4<f32>(lin, dot(lin, LUMAP3) * (c.a - 1.0)));
 }
 
 @compute @workgroup_size(8, 8)

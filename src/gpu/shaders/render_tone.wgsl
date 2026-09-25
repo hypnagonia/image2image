@@ -43,6 +43,7 @@ struct U {
   hl: vec4<f32>,            // view 5: highlighted depth range (lo, hi)
   vig: vec4<f32>,           // vignette: amount, midpoint, feather, roundness
   vig2: vec4<f32>,          // vignette highlight protection; distance band edges (near|middle, middle|far) and crossfade
+  hdr: vec4<f32>,           // x: write the HDR gain (1) or not (0)
 }
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -83,6 +84,9 @@ struct Prof {
 @group(0) @binding(18) var hue_tab: texture_2d<f32>;      // 360×2: row 0 hue curves (hue shift rad, chroma ×, L shift), row 1 lightness → chroma ×
 // Apple's own skin matte (ProRAW), full frame, or a 1×1 zero when the file has none.
 @group(0) @binding(19) var skin_tex: texture_2d<f32>;
+// HDR: linear luminance gain of the HDR rendition over the SDR one (curves.ts
+// hdrGain), per pixel; a 1×1 dummy when HDR is off (out-of-bounds stores are discarded).
+@group(0) @binding(20) var gain_out: texture_storage_2d<r32float, write>;
 
 const PI = 3.14159265;
 const P3_FROM_SRGB = mat3x3<f32>(
@@ -421,6 +425,11 @@ fn tone_curve(ev: f32) -> f32 {
   let x = clamp((ev + 14.0) / 20.0, 0.0, 1.0);
   return textureSampleLevel(tone_lut, lsamp, vec2<f32>(x, 0.5), 0.0).r;
 }
+/** HDR gain at this scene level (1 below the knee; the table's g channel). */
+fn tone_gain(ev: f32) -> f32 {
+  let x = clamp((ev + 14.0) / 20.0, 0.0, 1.0);
+  return max(textureSampleLevel(tone_lut, lsamp, vec2<f32>(x, 0.5), 0.0).g, 1.0);
+}
 
 fn soft_detail(d: f32, gain: f32, k: f32) -> f32 {
   // Boost small detail by `gain`, large (edge-sized) detail progressively less — halo guard.
@@ -551,6 +560,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
   // --- tone curve (display rendering), luminance ratio -----------------------------
   let Yd = tone_curve(log2(Y));
+  // HDR: the gain of the extended rendition over this SDR one. Everything after this
+  // (curves, colour, look, sharpening, grain) stays on the SDR base; HDR = SDR × gain.
+  if (u.hdr.x > 0.5) {
+    let dbg = u.flags.w == 1u || u.flags.w == 2u || u.flags.w == 4u || u.flags.w == 5u;
+    textureStore(gain_out, tp, vec4<f32>(select(tone_gain(log2(Y)), 1.0, dbg), 0.0, 0.0, 0.0));
+  }
   var cd = c * (Yd / Y);
   // Path to white: chroma rolls off as display luminance approaches 1.
   let wmix = smoothstep(0.82, 1.0, Yd);

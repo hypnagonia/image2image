@@ -84,6 +84,11 @@ export interface Params {
   regionCurves: Partial<Record<Region, Curves>>;
   /** Curves per distance band, blended by soft band weights (only bands that have them). */
   depthCurves: Partial<Record<DepthBand, Curves>>;
+  /**
+   * HDR: how far highlights may rise above SDR white on HDR screens (stops,
+   * 0 … 3; 0 = SDR only). The SDR rendering does not depend on it.
+   */
+  hdr: { headroom: number };
   /** Strength of the automatic curves (0 … 1.5; 1 = as measured, 0 = none). */
   autoCurves: number;
   /** Where near ends and far begins, in refined distance (0 near … 1 far): this photo's own depth layers. */
@@ -160,6 +165,7 @@ export function defaultParams(): Params {
     depthCurves: {},
     depthBands: [0.33, 0.66],
     autoCurves: 1,
+    hdr: { headroom: 0 },
     depth: { near: 1, far: 1 },
     vignette: { amount: 0, midpoint: 0.5, feather: 0.6, roundness: 0.3, highlights: 0.5 },
     grain: { amount: 0, size: 0.35, roughness: 0.5, color: 0 },

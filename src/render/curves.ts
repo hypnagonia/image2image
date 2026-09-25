@@ -52,14 +52,56 @@ export function toneCurve(tone: Params["tone"]) {
   };
 }
 
-export function toneCurveLUT(tone: Params["tone"]): Float32Array {
+/**
+ * HDR rendition as a gain over the SDR tone curve (for HDR screens and the
+ * gain-map JPEG). Below the knee — the scene level the SDR curve shows at
+ * display-linear 0.5, well above middle grey — the gain is exactly 1, so
+ * shadows and mid-tones are the SDR rendering. Above it, a second
+ * Naka–Rushton curve with the same contrast exponent, anchored at the knee and
+ * peaking at the headroom H = 2^stops, takes over across one stop (C¹ at the
+ * knee): skies a stop or two above get ≈ 1.3–1.7×, speculars and the sun
+ * approach H. HDR = SDR × gain, monotone because both factors are.
+ */
+export const HDR_KNEE = 0.5;
+
+/** Scene luminance at which the SDR curve reaches HDR_KNEE (bisection in log2). */
+export function hdrKnee(tone: Params["tone"]): number {
   const f = toneCurve(tone);
+  let lo = -20, hi = 10;
+  for (let k = 0; k < 60; k++) { const m = (lo + hi) / 2; if (f(Math.pow(2, m)) < HDR_KNEE) lo = m; else hi = m; }
+  return Math.pow(2, (lo + hi) / 2);
+}
+
+/** Linear gain HDR / SDR at scene luminance Y (1 below the knee, ≤ 2^stops). */
+export function hdrGain(tone: Params["tone"], stops: number): (Y: number) => number {
+  if (!(stops > 0)) return () => 1;
+  const sdr = toneCurve(tone);
+  const H = Math.pow(2, stops);
+  const c = 1.02 + 0.35 * tone.contrast;
+  const Yk = hdrKnee(tone);
+  const kch = Math.pow(Yk, c) * (H / HDR_KNEE - 1);
+  return (Y: number) => {
+    if (Y <= Yk) return 1;
+    const yc = Math.pow(Y, c);
+    const nr = (H * yc) / (yc + kch);
+    const d = Math.max(0, Math.log2(nr / Math.max(sdr(Y), 1e-6)));
+    const t = Math.min(1, Math.max(0, Math.log2(Y / Yk)));
+    const w = t * t * (3 - 2 * t);
+    return Math.min(H, Math.max(1, Math.pow(2, w * d)));
+  };
+}
+
+/** Tone table: r = SDR display luminance, g = HDR gain (1 when `hdrStops` is 0), b = SDR, a = 1. */
+export function toneCurveLUT(tone: Params["tone"], hdrStops = 0): Float32Array {
+  const f = toneCurve(tone);
+  const g = hdrGain(tone, hdrStops);
   const out = new Float32Array(TONE_LUT_SIZE * 4);
   for (let i = 0; i < TONE_LUT_SIZE; i++) {
     const ev = TONE_EV_MIN + (i / (TONE_LUT_SIZE - 1)) * TONE_EV_RANGE;
-    const v = f(Math.pow(2, ev));
+    const Y = Math.pow(2, ev);
+    const v = f(Y);
     out[i * 4] = v;
-    out[i * 4 + 1] = v; out[i * 4 + 2] = v; out[i * 4 + 3] = 1;
+    out[i * 4 + 1] = g(Y); out[i * 4 + 2] = v; out[i * 4 + 3] = 1;
   }
   return out;
 }

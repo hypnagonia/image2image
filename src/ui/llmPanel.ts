@@ -61,6 +61,7 @@ const NUMS: Num[] = [
   { path: "grain.size", min: 0, max: 1, what: "grain particle size relative to the image (0 = fine 100-ISO, 1 = coarse 3200-ISO)" },
   { path: "grain.roughness", min: 0, max: 1, what: "grain clumping (0 = even, 1 = clumpy)" },
   { path: "grain.color", min: 0, max: 1, what: "0 = monochrome grain, 1 = colour (dye-cloud) grain" },
+  { path: "hdr.headroom", min: 0, max: 3, what: "HDR: how far highlights may rise above SDR white on HDR screens and in the JPEG (HDR) export, in stops; 0 = SDR only; the SDR rendering does not change" },
   { path: "profile.intensity", min: 0, max: 1, what: "strength of the active look (0 = technical rendering only)" },
 ];
 

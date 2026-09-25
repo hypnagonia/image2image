@@ -228,6 +228,10 @@ export const ru: Dict = {
   // ---- Export tab
   "exp.tiff": "TIFF 16 бит (P3)",
   "exp.dng": "DNG (обработанный, линейный)",
+  "adj.hdrHeadroom": "HDR-запас",
+  "adj.hdrOff": "выкл.",
+  "exp.jpegHdr": "JPEG (HDR)",
+  "exp.jpegHdrHint": "Обычный JPEG плюс карта усиления: HDR-экраны (iPhone, iPad, Mac, Chrome и Android) показывают света ярче белого; остальные экраны и приложения — обычный JPEG. Запас задаётся в «Коррекция → Свет» (2 ступени, если выключен).",
   "exp.button": "Экспорт в полном размере",
   "exp.done": "{file} — {mb} МБ за {s} с",
   "exp.resAuto": "Рабочий размер: авто",

@@ -65,9 +65,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let dc = dist_at(px);
   let rc = coc(dc);
   let center = textureLoad(src, vec2<i32>(id.xy), 0);
-  if (rc < 0.6) { textureStore(dst, vec2<i32>(id.xy), center); return; }
+  // Alpha arrives as HDR excess luminance (output.wgsl linearize) and leaves as a gain again.
+  if (rc < 0.6) { textureStore(dst, vec2<i32>(id.xy), vec4<f32>(center.rgb, 1.0 + center.a / max(dot(center.rgb, LUMAP3), 1e-6))); return; }
   let size = vec2<f32>(f32(W), f32(H));
-  var acc = center.rgb; var ws = 1.0;
+  var acc = center; var ws = 1.0;
   let N = 48;
   let golden = 2.39996323;
   let level = clamp(log2(max(rc, 1.0) / 5.0), 0.0, u.f.z - 1.0);
@@ -83,8 +84,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     var w = smoothstep(r - 1.0, r + 1.0, rs);
     // …and background behind a sharper centre may not spill onto it.
     if (ds > dc + 0.04) { w *= smoothstep(r - 1.0, r + 1.0, rc); w = min(w, smoothstep(0.0, 0.1, rc / max(u.d.y, 1.0))); }
-    let s = textureSampleLevel(src, samp, sp / size, level).rgb;
+    let s = textureSampleLevel(src, samp, sp / size, level);
     acc += s * w; ws += w;
   }
-  textureStore(dst, vec2<i32>(id.xy), vec4<f32>(acc / ws, 1.0));
+  let m = acc / ws;
+  textureStore(dst, vec2<i32>(id.xy), vec4<f32>(m.rgb, 1.0 + m.a / max(dot(m.rgb, LUMAP3), 1e-6)));
 }
