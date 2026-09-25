@@ -190,7 +190,8 @@ export function curveFromBands(b: CurveBands): CurvePoint[] {
   let from = 0;
   if (b.toe && b.toe[1] < b.toe[0] - 1e-4) {
     const [x1, y1] = b.toe;
-    const x2 = Math.min(0.45, x1 * 2.2), y2 = x2 - (x1 - y1) * 0.3;
+    // Rejoins the curve soon above the floor, so midtones keep their level.
+    const x2 = Math.min(0.4, x1 * 1.8), y2 = x2 - (x1 - y1) * 0.2;
     pts.push({ x: x1, y: y1 }, { x: x2, y: y2 });
     from = x2 + 0.05;
   }

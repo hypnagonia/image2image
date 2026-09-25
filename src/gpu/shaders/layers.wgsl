@@ -16,16 +16,61 @@ fn atlas_at(row: f32, x: f32) -> vec4<f32> {
   return textureSampleLevel(atlas, lsamp, vec2<f32>(clamp(x, 0.0, 1.0), (row + 0.5) / f32(max(u.lay.y, 1u))), 0.0);
 }
 
-/** The layer's smart mask at this pixel (0…1), before opacity. */
-fn layer_mask(L: LayerRec, g: array<f32, 12>, dist: f32, skin_w: f32, e: vec3<f32>) -> f32 {
+/**
+ * Sky at pixel level. The segmentation is coarse: at branch scale (a tree line,
+ * gaps in a canopy) its sky probability fades out early and leaves an unedited
+ * pale halo. Where the map says "maybe sky", the pixel decides: bright and not
+ * green is sky, dark (branches, trunks) is not. Where the map is sure, it stays.
+ * `e` is the colour before the layers (so earlier layers do not move the mask).
+ */
+fn sky_mask(p: f32, e: vec3<f32>, uv: vec2<f32>, other: f32) -> f32 {
+  // Only near sky the map already sees (not water or a white wall far from it):
+  // where the map itself is unsure, or confident sky lies within ≈ 7 % of the
+  // picture (sky seen through a canopy or between trunks, next to open sky).
+  let gp = uv * vec2<f32>(gsz());
+  let R = 0.07 * f32(max(gsz().x, gsz().y));
+  // The most confident sky around, and its colour (both in the analysis encoding).
+  var near = 0.0;
+  var sky_c = vec3<f32>(0.0);
+  for (var k = 0; k < 12; k++) {
+    let a = f32(k) * 0.5235988;
+    let d = vec2<f32>(cos(a), sin(a));
+    for (var r = 0; r < 2; r++) {
+      let q = vec2<i32>(gp + d * R * select(1.0, 0.45, r == 1));
+      let s = gl(m0, q).x;
+      if (s > near) { near = s; sky_c = gl(guide, q).rgb; }
+    }
+  }
+  // Reaching out only to what looks like that sky (white paint next to blue sky does not).
+  // Same colour, any brightness: sky seen through a canopy is often brighter than the
+  // open sky beside it. The brightness offset is removed before comparing.
+  let dc = pix_enc - sky_c;
+  let same = 1.0 - smoothstep(0.03, 0.09, length(dc - vec3<f32>((dc.r + dc.g + dc.b) / 3.0)));
+  let nearSky = smoothstep(0.6, 0.95, near) * same;
+  // Never into what the map sees as water (it mirrors the sky's colour) or buildings.
+  let reach = max(smoothstep(0.12, 0.45, p), 0.95 * nearSky) * (1.0 - smoothstep(0.2, 0.5, other));
+  let y = dot(e, LUMAP3);
+  // Sky's own colours: bright and neutral (overcast), or clearly blue even when darker;
+  // not green (leaves), not warm (lit walls, signs, skin). Next to known sky the
+  // brightness bar is lower, so pixels half sky, half twig are not left as pale fringes.
+  let lo = mix(0.35, 0.22, nearSky);
+  let blue = smoothstep(0.04, 0.12, e.b - e.r) * smoothstep(0.12, 0.25, y);
+  let skyish = max(smoothstep(lo, lo + 0.25, y), blue) * (1.0 - smoothstep(0.02, 0.1, e.g - max(e.r, e.b))) * (1.0 - smoothstep(0.0, 0.06, e.r - e.b));
+  return max(smoothstep(0.75, 0.97, p), reach * skyish);
+}
+
+/** The layer's smart mask at this pixel (0…1), before opacity. `e0`: the colour before the layers. */
+fn layer_mask(L: LayerRec, g: array<f32, 12>, dist: f32, skin_w: f32, e: vec3<f32>, e0: vec3<f32>, uv: vec2<f32>) -> f32 {
   var gs = g;
   let kind = u32(L.m0.x);
   let reg = u32(L.m0.y);
   let bw = band_w(dist);
   var m = 1.0;
-  if (kind == 1u) { m = select(clamp(gs[min(reg, 10u)], 0.0, 1.0), skin_w, reg == 11u); }
+  var pr = clamp(gs[min(reg, 10u)], 0.0, 1.0);
+  if (reg == 0u && (kind == 1u || kind == 3u)) { pr = sky_mask(pr, e0, uv, max(gs[5], gs[2])); }
+  if (kind == 1u) { m = select(pr, skin_w, reg == 11u); }
   else if (kind == 2u) { m = bw[min(u32(L.m0.z), 2u)]; }
-  else if (kind == 3u) { m = clamp(gs[min(reg, 10u)], 0.0, 1.0) * bw[min(u32(L.m0.z), 2u)]; }
+  else if (kind == 3u) { m = pr * bw[min(u32(L.m0.z), 2u)]; }
   else if (kind == 4u) {
     let y = dot(e, LUMAP3);
     let s = max(L.m1.z, 1e-3);
@@ -44,15 +89,34 @@ fn layer_mask(L: LayerRec, g: array<f32, 12>, dist: f32, skin_w: f32, e: vec3<f3
 
 /**
  * Exposure gain `g` on display-linear colour with a highlight shoulder: brightening
- * maps white to white (y·g / (1 + (g − 1)·y³)) instead of clipping, midtones get
- * almost the full gain; applied to luminance, so colours keep their saturation.
+ * maps full to full (m·g / (1 + (g − 1)·m³)) instead of clipping, midtones get
+ * almost the full gain. The shoulder follows the brightest channel, not luminance:
+ * a warm highlight (blonde hair against the sun) has red far above its luminance
+ * and would clip to flat yellow-white first. One ratio for all channels keeps the hue.
  * Darkening is a plain multiply. g = 1 leaves the colour untouched.
  */
 fn expose(lin: vec3<f32>, g: f32) -> vec3<f32> {
   if (g <= 1.0) { return lin * g; }
-  let y = max(dot(lin, LUMAP3), 1e-6);
-  let y2 = y * g / (1.0 + (g - 1.0) * y * y * y);
-  return lin * (y2 / y);
+  let m = clamp(max(lin.r, max(lin.g, lin.b)), 1e-6, 1.0);
+  let m2 = m * g / (1.0 + (g - 1.0) * m * m * m);
+  return lin * (m2 / m);
+}
+
+/**
+ * Highlight protection: what the layers added above the colour's own brightest
+ * channel (before the layers) is compressed so it approaches white but does not
+ * clip; already clipped colours and everything that got darker are untouched.
+ */
+fn protect_highlights(e0: vec3<f32>, e: vec3<f32>) -> vec3<f32> {
+  let m0 = max(e0.r, max(e0.g, e0.b));
+  let m1 = max(e.r, max(e.g, e.b));
+  let head = 1.0 - m0;
+  if (m1 <= m0 || m1 < 0.8 || head < 1e-3) { return e; }
+  // f: share of the headroom the layers used (≥ 1 = clipped); keep at most ~85 % of it.
+  let f = (m1 - m0) / head;
+  let fk = 0.85 * (1.0 - exp(-f / 0.85));
+  let mt = m0 + head * min(f, fk);
+  return e * (mt / m1);
 }
 
 fn op_curves(L: LayerRec, e: vec3<f32>) -> vec3<f32> {
@@ -160,13 +224,35 @@ fn blend_modes(mode: u32, b: vec3<f32>, t: vec3<f32>) -> vec3<f32> {
   return lab_to_enc(o);
 }
 
+/** Gradient Map: brightness → a colour of the gradient (alpha in .a). */
+fn op_gradient_map(L: LayerRec, e: vec3<f32>) -> vec4<f32> {
+  let y = clamp(dot(e, LUMAP3), 0.0, 1.0);
+  return atlas_at(L.a.w, select(y, 1.0 - y, L.p0.x > 0.5));
+}
+
+/** Gradient Fill at picture position uv (0…1), picture aspect w/h. */
+fn op_gradient_fill(L: LayerRec, uv: vec2<f32>, aspect: f32) -> vec4<f32> {
+  let d = vec2<f32>((uv.x - L.p1.x) * aspect, uv.y - L.p1.y);
+  var t = 0.0;
+  if (L.p0.x > 0.5) {
+    // radial: 1 at the picture's far corner (scale 1)
+    t = length(d) / (L.p0.z * 0.5 * length(vec2<f32>(aspect, 1.0)));
+  } else {
+    let dir = vec2<f32>(cos(L.p0.y), sin(L.p0.y)); // 90° = downwards
+    let ext = 0.5 * (abs(dir.x) * aspect + abs(dir.y));
+    t = 0.5 + dot(d, dir) / (2.0 * ext * L.p0.z);
+  }
+  t = clamp(t, 0.0, 1.0);
+  return atlas_at(L.a.w, select(t, 1.0 - t, L.p0.w > 0.5));
+}
+
 /** Runs every visible layer, bottom to top. */
-fn apply_layers(e0: vec3<f32>, g: array<f32, 12>, dist: f32, skin_w: f32) -> vec3<f32> {
+fn apply_layers(e0: vec3<f32>, g: array<f32, 12>, dist: f32, skin_w: f32, uv: vec2<f32>, aspect: f32) -> vec3<f32> {
   var e = e0;
   let n = u.lay.x;
   for (var i = 0u; i < n; i++) {
     let L = layers[i];
-    let w = L.a.z * layer_mask(L, g, dist, skin_w, e);
+    var w = L.a.z * layer_mask(L, g, dist, skin_w, e, e0, uv);
     if (w < 1e-4) { continue; }
     var t = e;
     switch u32(L.a.x) {
@@ -175,9 +261,12 @@ fn apply_layers(e0: vec3<f32>, g: array<f32, 12>, dist: f32, skin_w: f32) -> vec
       case 2u: { t = op_bright_contrast(L, e); }
       case 3u: { t = op_exposure(L, e); }
       case 4u: { t = op_basic(L, e); }
+      case 5u: { let c = op_gradient_map(L, e); t = c.rgb; w *= c.a; }
+      case 6u: { let c = op_gradient_fill(L, uv, aspect); t = c.rgb; w *= c.a; }
       default: { }
     }
     e = mix(e, clamp(blend_modes(u32(L.a.y), e, t), vec3<f32>(0.0), vec3<f32>(1.0)), w);
   }
+  if (u.lay.w != 0u) { e = protect_highlights(e0, e); }
   return e;
 }

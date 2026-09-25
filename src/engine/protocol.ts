@@ -75,6 +75,8 @@ export type FromWorker =
   | { type: "preview"; width: number; height: number; data: ArrayBuffer; space: "p3" | "srgb"; final: boolean; ms: number }
   | { type: "analysis"; summary: Summary; decisions: Decision[]; auto: Params; params: Params; dof: { justified: boolean; focus: number; strength: number; reason: string; x?: number; y?: number; zoneEdges?: number[]; zones?: Array<{ share: number; label: string; lo: number; hi: number }>; bands?: Array<{ share: number; label: string; lo: number; hi: number }> }; exposureSuggestion: number; autoCurves?: AutoCurveBands; cellCoverage?: Record<string, number> }
   | { type: "params"; params: Params }
+  /** Automatic exposure corrected after measuring the first preview against the camera's rendering. */
+  | { type: "exposureCalibrated"; exposure: number; note: string }
   /** Intensity histograms of the rendered preview (previewHist.ts), for the curve boxes. */
   | { type: "histograms"; data: Float32Array }
   | { type: "log"; text: string }

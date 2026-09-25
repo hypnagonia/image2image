@@ -9,9 +9,11 @@
  * to store. Stack order: first in the array = bottom (applied first).
  */
 import type { CurvePoint, Curves, DepthBand, Region } from "../decision/params.ts";
+import { presetGradient, type Gradient } from "./gradient.ts";
 
-export type LayerType = "curves" | "hueSat" | "brightContrast" | "exposure" | "basic";
-export const LAYER_TYPES: LayerType[] = ["curves", "hueSat", "brightContrast", "exposure", "basic"];
+export type LayerType = "curves" | "hueSat" | "brightContrast" | "exposure" | "basic" | "gradientMap" | "gradientFill";
+/** GPU type index = position here (layers.wgsl). */
+export const LAYER_TYPES: LayerType[] = ["curves", "hueSat", "brightContrast", "exposure", "basic", "gradientMap", "gradientFill"];
 
 export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "softLight" | "hardLight" | "darken" | "lighten"
   | "hue" | "saturation" | "color" | "luminosity";
@@ -46,6 +48,14 @@ export interface LayerParams {
   exposure: { exposure: number; offset: number; gamma: number };
   /** Local light & colour (as Lightroom's local adjustments): exposure EV, temperature, tint, saturation, vibrance, hue (degrees). */
   basic: { exposure: number; temp: number; tint: number; saturation: number; vibrance: number; hue: number };
+  /** Gradient Map: the pixel's brightness picks a colour (left = shadows). `preset`: the palette it came from. */
+  gradientMap: { gradient: Gradient; reverse: boolean; preset?: string };
+  /**
+   * Gradient Fill: a gradient laid over the photo. Linear: across the picture at
+   * `angle` (degrees, 90 = top → bottom); radial: from the centre (`x`, `y`, 0…1) out.
+   * `scale` 1 = the gradient spans the picture.
+   */
+  gradientFill: { gradient: Gradient; style: "linear" | "radial"; angle: number; scale: number; x: number; y: number; reverse: boolean; preset?: string };
 }
 
 export interface Layer<T extends LayerType = LayerType> {
@@ -72,6 +82,9 @@ export function defaultParams<T extends LayerType>(type: T): LayerParams[T] {
     brightContrast: { brightness: 0, contrast: 0 },
     exposure: { exposure: 0, offset: 0, gamma: 1 },
     basic: { exposure: 0, temp: 0, tint: 0, saturation: 0, vibrance: 0, hue: 0 },
+    gradientMap: { gradient: presetGradient("tealGold"), reverse: false, preset: "tealGold" },
+    // Foreground to transparent from the top: a graduated filter (darker sky).
+    gradientFill: { gradient: { stops: [{ pos: 0, color: "#101820", alpha: 0.75 }, { pos: 0.55, color: "#101820", alpha: 0 }] }, style: "linear", angle: 90, scale: 1, x: 0.5, y: 0.5, reverse: false },
   };
   return structuredClone(d[type]) as LayerParams[T];
 }
@@ -81,6 +94,12 @@ export function newId(): string { return `l${Date.now().toString(36)}${(counter+
 
 export function makeLayer<T extends LayerType>(type: T, name: string, over: Partial<Omit<Layer<T>, "type">> = {}): Layer<T> {
   return { id: newId(), type, name, visible: true, opacity: 1, blend: "normal", mask: allMask(), params: defaultParams(type), ...over };
+}
+
+/** How a new layer of this type starts (Photopea starts every layer Normal 100 %; a colour grade reads better softer). */
+export function newLayerDefaults(type: LayerType): Partial<Layer> {
+  if (type === "gradientMap") return { blend: "softLight", opacity: 0.7 };
+  return {};
 }
 
 /** A layer that changes nothing (all parameters at their neutral value). */

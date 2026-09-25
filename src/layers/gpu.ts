@@ -12,6 +12,7 @@ import { GROUPS } from "../neural/scene.ts";
 import { DEPTH_BANDS, type Curves } from "../decision/params.ts";
 import { curveLUT, CURVE_LUT_SIZE } from "../render/curves.ts";
 import { BLEND_MODES, hueSatTable, LAYER_TYPES, type Layer, type LayerParams } from "./model.ts";
+import { gradientTable } from "./gradient.ts";
 
 export const RECORD = 32;
 export const ATLAS_W = CURVE_LUT_SIZE; // 1024
@@ -74,6 +75,21 @@ export function packLayers(layers: Layer[], autoStrength = 1, enable?: { curves?
         for (let k = 0; k < ATLAS_W; k++) { row[k * 4] = (t[k * 3] * Math.PI) / 180; row[k * 4 + 1] = t[k * 3 + 1]; row[k * 4 + 2] = t[k * 3 + 2]; row[k * 4 + 3] = 1; }
         r[3] = rows.length;
         rows.push(row);
+        break;
+      }
+      case "gradientMap": {
+        const g = l.params as LayerParams["gradientMap"];
+        p[0] = g.reverse ? 1 : 0;
+        r[3] = rows.length;
+        rows.push(gradientTable(g.gradient, ATLAS_W));
+        break;
+      }
+      case "gradientFill": {
+        const g = l.params as LayerParams["gradientFill"];
+        p[0] = g.style === "radial" ? 1 : 0; p[1] = (g.angle * Math.PI) / 180; p[2] = Math.max(0.02, g.scale); p[3] = g.reverse ? 1 : 0;
+        p[4] = g.x; p[5] = g.y;
+        r[3] = rows.length;
+        rows.push(gradientTable(g.gradient, ATLAS_W));
         break;
       }
       case "brightContrast": { const b = l.params as LayerParams["brightContrast"]; p[0] = b.brightness; p[1] = b.contrast; break; }

@@ -143,12 +143,15 @@ export function autoCurves(i: AutoCurvesInput): AutoCurvesResult {
     else put(b, (c) => (out.depth[t] = c), `curves.${t}`, why, {});
   }
   {
-    const [p99] = q(i.photo, [0.99]);
-    if (p99 < 0.88 && i.clipHi < 0.001) {
+    // The brightest tones that are not clipped (clipped sun or sky does not count:
+    // it is rolled off and would otherwise say "the whites are there").
+    const at = Math.max(0.9, Math.min(0.99, 1 - i.clipHi - 0.005));
+    const [p99] = q(i.photo, [at]);
+    if (p99 < 0.88) {
       const o = 0.35 * smooth(0.88, 0.7, p99);
       const b = flat();
       b.bands[4] = o; b.bands[3] = o * 0.5;
-      put(b, (c) => (out.photo = c), "curves.photo", `whites never reach white: p99 renders at ${p99.toFixed(2)} and nothing is clipped → highlights opened`, { p99: r2(p99) });
+      put(b, (c) => (out.photo = c), "curves.photo", `whites never reach white: the brightest unclipped tones (p${Math.round(at * 1000) / 10}) render at ${p99.toFixed(2)} → highlights opened`, { p99: r2(p99) });
     }
   }
 

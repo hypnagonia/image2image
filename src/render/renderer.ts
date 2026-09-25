@@ -233,7 +233,7 @@ export class Renderer {
     new Float32Array(buf, base.byteLength + 80, 36).set(DEPTH_BANDS.flatMap((b) => semVec(p.distance?.[b])));
     let dbits = 0;
     DEPTH_BANDS.forEach((b, i) => { if (p.enable.semantic && !semNeutral(p.distance?.[b])) dbits |= 1 << i; });
-    new Uint32Array(buf, base.byteLength + 224, 4).set([this.layerCount, this.atlasRows, dbits, 0]);
+    new Uint32Array(buf, base.byteLength + 224, 4).set([this.layerCount, this.atlasRows, dbits, p.protectHighlights === false ? 0 : 1]);
     const u = gpu.uniform(buf, "tone.u");
     const profU = gpu.uniform(profileUniforms(p.profile, profileOn, lutOn, lutSize), "profile.u");
     temp.push(u, profU);

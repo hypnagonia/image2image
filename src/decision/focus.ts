@@ -56,7 +56,7 @@ export interface BlurContext {
 /** How much a kind of subject calls for background blur (portraits most, architecture little). */
 const BLUR_BY_KIND: Record<string, number> = { person: 1, animal: 1, object: 0.9, vehicle: 0.7, building: 0.3 };
 /** Background blur radius per unit (magnification × depth behind), as a fraction of the long edge. */
-const LENS_K = 0.035; // a close portrait (size 0.85, background 0.6 behind) → ≈ 1.8 % of the long edge
+const LENS_K = 0.018; // a close portrait (size 0.85, background 0.6 behind) → ≈ 0.9 % of the long edge (subtle: an iPhone portrait, not a fast prime)
 
 export function autoFocus(
   dist: { w: number; h: number; data: Float32Array },
@@ -162,7 +162,7 @@ export function autoFocus(
   // would over-blur whatever lies farther, so the conversion splits the difference
   // (square root of the ramp).
   const ramp = smoothstep01(behindD / clamp((1 - hiD) * 0.9, 0.12, 0.55));
-  const strength = clamp(add / (0.022 * Math.sqrt(Math.max(ramp, 0.1))), 0, 0.9);
+  const strength = clamp(add / (0.022 * Math.sqrt(Math.max(ramp, 0.1))), 0, 0.5);
   const justified = separable && strength >= 0.12;
   const blurWhy = `blur: subject ${Math.round(size * 100)}% of the frame, background ${behindD.toFixed(2)} behind, ${kindF < 1 ? `${obj?.kind ?? "subject"} ×${kindF}, ` : ""}background ${Math.round(busy * 100)}% busy` +
     (existing > 0.002 ? `, already ${(existing * 100).toFixed(1)}% blurred by the lens` : "") + ` → ${(add * 100).toFixed(1)}% of the frame (strength ${strength.toFixed(2)})`;

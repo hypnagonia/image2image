@@ -621,6 +621,14 @@ function refreshSlider(s: { def: SliderDef; input: HTMLInputElement; out: HTMLOu
 }
 const pct = (v: number) => `${v > 0 ? "+" : ""}${Math.round(v * 100)}`;
 
+// Highlight protection (on by default): layers may not clip highlights that were not clipped.
+const protectToggle = el("input", { type: "checkbox" });
+protectToggle.onchange = () => {
+  if (!params) return;
+  params.protectHighlights = protectToggle.checked;
+  nextLabel = t("adj.protectHighlights");
+  pushParams();
+};
 const aeToggle = el("input", { type: "checkbox" });
 aeToggle.checked = autoExposure;
 const aeNote = el("span", { class: "muted" });
@@ -639,6 +647,7 @@ adjustPane.append(
   slider({ path: "tone.blacks", label: t("adj.blacks"), min: -1, max: 1, step: 0.01, fmt: pct }),
   slider({ path: "tone.contrast", label: t("adj.contrast"), min: -1, max: 1, step: 0.01, fmt: pct }),
   slider({ path: "tone.rolloff", label: t("adj.rolloff"), min: 0, max: 1, step: 0.01, fmt: pct }),
+  el("label", { class: "toggle" }, el("span", {}, t("adj.protectHighlights") + " ", el("span", { class: "muted", text: t("adj.protectHighlightsNote") })), protectToggle),
   slider({ path: "hdr.headroom", label: t("adj.hdrHeadroom"), min: 0, max: 3, step: 0.25, fmt: (v) => (v ? `+${v.toFixed(2)} EV` : t("adj.hdrOff")) }),
   el("div", { class: "group-title", text: t("adj.wb") }),
   slider({ path: "wb.temp", label: t("adj.temp"), min: 2000, max: 12000, step: 10, fmt: (v) => `${Math.round(v)}K` }),
@@ -677,7 +686,9 @@ adjustPane.append(
 let histograms: Float32Array | undefined;
 /** Dev builds only: a read-only view of the state for the automated photo checks (scripts, not the UI). */
 let finalPreviews = 0;
-if (import.meta.env.DEV) (globalThis as unknown as { __shk: unknown }).__shk = () => ({ summary, decisions, params, autoParams, finalPreviews, busy, log: logLines });
+if (import.meta.env.DEV) (globalThis as unknown as { __shk: unknown }).__shk = () => ({ summary, decisions, params, autoParams, finalPreviews, busy, log: logLines,
+  /** Test harness: change the parameters and render. */
+  apply: (f: (p: Params) => void) => { if (params) { f(params); syncControls(); pushParams(); } } });
 /** Share of the frame (%) of each region at each distance. */
 let cellCov: Record<string, number> | undefined;
 const photoCurves = createToneCurves({
@@ -1059,11 +1070,14 @@ function renderUpscale() {
   add(t("upt.blur"), r.severeBlur ? t("upt.yes") : t("upt.no"));
 }
 
+/** "WebGPU · fp16 · 11 threads": what this device runs on (Info). */
+let capsText = "";
 function renderAuto() {
   const s = summary;
   const kv = el("dl", { class: "kv" });
+  const add = (k: string, v: string | number) => kv.append(el("dt", { text: k }), el("dd", { text: String(v) }));
+  if (capsText) add(t("auto.engine"), capsText);
   if (s) {
-    const add = (k: string, v: string | number) => kv.append(el("dt", { text: k }), el("dd", { text: String(v) }));
     add(t("auto.source"), s.source);
     add(t("auto.size"), `${s.width}×${s.height}` + (s.working.factor > 1 ? ` (${t("auto.working", { w: s.working.width, h: s.working.height })})` : ""));
     for (const [k, v] of Object.entries(s.meta)) add(k, v);
@@ -1086,7 +1100,7 @@ function syncControls() {
   layersPanel.render();
   renderLooks();
   renderStageToggles();
-  if (params) { dofToggle.checked = params.enable.dof; }
+  if (params) { dofToggle.checked = params.enable.dof; protectToggle.checked = params.protectHighlights !== false; }
   renderRings();
   renderZones();
   renderBands();
@@ -1137,7 +1151,10 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       caps = m.caps;
       looks = m.looks;
       lookPanel.onLuts(looks);
-      capsEl.textContent = `${caps.backend === "webgpu" ? "WebGPU" : "WASM"}${caps.f16 ? " · fp16" : ""}${caps.crossOriginIsolated ? ` · ${t("app.threads", { n: caps.threads })}` : ""}`;
+      capsEl.textContent = ""; // "Starting…" done; the header keeps only errors
+      // Shown in Info.
+      capsText = `${caps.backend === "webgpu" ? "WebGPU" : "WASM"}${caps.f16 ? " · fp16" : ""}${caps.crossOriginIsolated ? ` · ${t("app.threads", { n: caps.threads })}` : ""}`;
+      renderAuto();
       if (!caps.heicEncode) (fmtSel.querySelector('option[value="heic"]') as HTMLOptionElement).disabled = true;
       renderLooks();
       // After Safari evicted this tab (memory) or the GPU was reset: reopen where we were —
@@ -1227,6 +1244,19 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case "histograms":
       histograms = m.data;
       layersPanel.refreshHistogram();
+      break;
+    case "exposureCalibrated":
+      // Part of opening the photo, not an edit: the history's first step takes it too.
+      exposureSuggestion = m.exposure;
+      if (autoParams) autoParams.exposure = m.exposure;
+      if (params) {
+        params.exposure = m.exposure;
+        if (!history.canUndo) history.reset(params, t("hist.open"));
+        rememberParams(params);
+      }
+      aeNote.textContent = t("adj.suggests", { ev: `${m.exposure > 0 ? "+" : ""}${m.exposure.toFixed(2)}` });
+      logLines.push(m.note);
+      syncControls();
       break;
     case "params":
       params = m.params;

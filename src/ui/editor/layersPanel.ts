@@ -14,10 +14,11 @@ import type { Params, Region, DepthBand } from "../../decision/params.ts";
 import { DEPTH_BANDS } from "../../decision/params.ts";
 import { GROUPS } from "../../neural/scene.ts";
 import type { HistTarget } from "../../analysis/previewHist.ts";
-import { BLEND_MODES, HUE_RANGES, RANGE_CENTRE, makeLayer, newId, type HueRange, type Layer, type LayerParams, type LayerType, type SmartMask } from "../../layers/model.ts";
+import { BLEND_MODES, HUE_RANGES, RANGE_CENTRE, makeLayer, newLayerDefaults, newId, type HueRange, type Layer, type LayerParams, type LayerType, type SmartMask } from "../../layers/model.ts";
 import { createToneCurves } from "../toneCurves.ts";
 import { t, tOr } from "../i18n.ts";
 import { icon } from "./icons.ts";
+import { createGradientEditor } from "./gradientEditor.ts";
 import { liveLayers } from "../../layers/gpu.ts";
 
 type Ctx = {
@@ -37,7 +38,7 @@ type Ctx = {
 };
 
 /** Layer types in the ＋ sheet (each type's icon has the type's name). */
-const ADD: LayerType[] = ["curves", "hueSat", "basic", "brightContrast", "exposure"];
+const ADD: LayerType[] = ["curves", "hueSat", "basic", "gradientMap", "gradientFill", "brightContrast", "exposure"];
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, string> = {}, ...kids: Array<Node | string>): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -151,7 +152,7 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
     b.onclick = () => {
       const p = ctx.params(); if (!p) return;
       const n = p.layers.filter((l) => l.type === type).length + 1;
-      const l = makeLayer(type, `${typeName(type)} ${n}`);
+      const l = makeLayer(type, `${typeName(type)} ${n}`, newLayerDefaults(type));
       const at = p.layers.findIndex((x) => x.id === selected);
       p.layers.splice(at + 1, 0, l); // above the selected one (Develop: at the bottom of the stack)
       selected = l.id; tab = "adjust"; addSheet.hidden = true;
@@ -227,6 +228,22 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
         }
         out.push(toggle(t("hs.colorize"), h.colorize, (v) => { h.colorize = v; edit(); renderProps(); }));
         return out;
+      }
+      case "gradientMap": {
+        const g = l.params as LayerParams["gradientMap"];
+        return [createGradientEditor(() => g, (label) => edit(label), slider),
+          el("div", { class: "muted grad-tip", text: t("grad.mapTip") })];
+      }
+      case "gradientFill": {
+        const g = l.params as LayerParams["gradientFill"];
+        const pctv = (v: number) => `${Math.round(v * 100)}%`;
+        return [createGradientEditor(() => g, (label) => edit(label), slider),
+          el("div", { class: "group-title", text: t("grad.shape") }),
+          chips([{ id: "linear", label: t("grad.linear") }, { id: "radial", label: t("grad.radial") }] as const, g.style, (v) => { g.style = v; edit(); renderProps(); }),
+          ...(g.style === "linear" ? [slider(t("grad.angle"), -180, 180, 1, () => g.angle, (v) => (g.angle = v), (v) => `${Math.round(v)}°`, 90)] : []),
+          slider(t("grad.scale"), 0.1, 2, 0.01, () => g.scale, (v) => (g.scale = v), pctv, 1),
+          slider(t("grad.x"), 0, 1, 0.01, () => g.x, (v) => (g.x = v), pctv, 0.5),
+          slider(t("grad.y"), 0, 1, 0.01, () => g.y, (v) => (g.y = v), pctv, 0.5)];
       }
       case "brightContrast": {
         const b = l.params as LayerParams["brightContrast"];

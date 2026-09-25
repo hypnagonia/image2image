@@ -53,6 +53,11 @@ export interface EngineContext {
   sceneEV?: number;
   /** Apply the suggested exposure correction. */
   autoExposure?: boolean;
+  /**
+   * Exposure that renders the photo as bright as the camera's own rendering (the
+   * JPEG embedded in the DNG), with a note. Replaces the comfortable-band rule.
+   */
+  referenceExposure?: { ev: number; note: string };
   /** Camera neutral → rendering temperature/tint (DNG colour model). */
   solveNeutral?: (neutral: number[]) => { temp: number; tint: number };
 }
@@ -119,6 +124,9 @@ export function decide(ctx: EngineContext): DecisionResult {
   if (sug > 0) sug = Math.min(sug, Math.max(headroomEV + 1.0, 0)); // don't blow highlights to lift shadows
   sug = clamp(sug, -1, 1);
   if (Math.abs(sug) < 0.15) sug = 0;
+  // The camera's own rendering is the better reference when the file carries it:
+  // "as bright as the original", including its night and backlit choices.
+  if (ctx.referenceExposure) sug = clamp(ctx.referenceExposure.ev, -1.5, 2.5);
   exposureSuggestion = Math.round(sug * 100) / 100;
   p.exposure = ctx.autoExposure ? exposureSuggestion : 0;
   // Local tone compression pulls the scene toward this anchor, so it must be the
@@ -136,6 +144,7 @@ export function decide(ctx: EngineContext): DecisionResult {
     (ctx.autoExposure ? "auto exposure on: " : "camera exposure kept; ") +
     `subject key ${keyEV.toFixed(2)} EV (comfortable band ${bandLo.toFixed(1)}…${bandHi.toFixed(1)} EV)` +
     (exposureSuggestion !== 0 ? `; suggested ${exposureSuggestion > 0 ? "+" : ""}${exposureSuggestion} EV` : "; no correction needed") +
+    (ctx.referenceExposure ? `; ${ctx.referenceExposure.note}` : "") +
     (dim > 0.05 ? `; dim scene (${(dim * 100).toFixed(0)}%)` : "") + (night ? "; night scene" : "") + (ctx.sceneEV !== undefined ? `; scene EV ${ctx.sceneEV.toFixed(1)}` : ""),
     { keyEV: r2(keyEV), p50EV: r2(Math.log2(R.lum.p50)), p95EV: r2(Math.log2(p95)), p999EV: r2(Math.log2(R.lum.p999)), dim: r2(dim), suggested: exposureSuggestion });
 

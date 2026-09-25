@@ -273,6 +273,37 @@ header.top .btn.icon { color: var(--text); }
 .hs-range-label { font-variant-numeric: tabular-nums; font-size: 11.5px; margin-top: 2px; }
 .develop > .group-title:first-child { margin-top: 0; }
 
+/* Gradient editor (src/ui/editor/gradientEditor.ts) */
+.grad .group-title:first-child { margin-top: 0; }
+.grad-presets { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; padding: 2px 2px 6px; margin: 0 -2px; scroll-snap-type: x proximity; }
+.grad-presets::-webkit-scrollbar { display: none; }
+.grad-preset { flex: none; width: 74px; border: 0; background: none; padding: 0; display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 11.5px; scroll-snap-align: start; }
+.grad-swatch { display: block; height: 40px; border-radius: 10px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.06); transition: box-shadow .15s, transform .12s; }
+.grad-preset:active .grad-swatch { transform: scale(.96); }
+.grad-preset.on { color: var(--text); font-weight: 560; }
+.grad-preset.on .grad-swatch { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--text); }
+.grad-pname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+.grad-head { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; }
+.grad-head .group-title { margin: 8px 0 4px; }
+.grad-head .chip { padding: 5px 11px; font-size: 12px; }
+.grad-bar { position: relative; height: 36px; border-radius: 10px; overflow: hidden; cursor: copy; touch-action: manipulation;
+  background: repeating-conic-gradient(#3a3a3f 0 25%, #2a2a2e 0 50%) 0 0 / 12px 12px; }
+.grad-fill { position: absolute; inset: 0; }
+.grad-stops { position: relative; height: 34px; margin: 0 0 2px; }
+.grad-handle { position: absolute; top: 4px; width: 28px; height: 28px; margin-left: -14px; display: flex; align-items: center; justify-content: center; touch-action: none; cursor: grab; transition: opacity .12s; }
+.grad-handle::before { content: ""; position: absolute; top: -4px; left: 50%; margin-left: -5px; border: 5px solid transparent; border-bottom-color: var(--muted); border-top: 0; }
+.grad-handle i { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--panel-3); box-shadow: 0 1px 3px rgba(0,0,0,.5); }
+.grad-handle.on i { border-color: var(--text); }
+.grad-handle.on::before { border-bottom-color: var(--text); }
+.grad-handle.remove { opacity: .3; }
+.grad-hint { font-size: 11.5px; margin-bottom: 8px; }
+.grad-tip { font-size: 11.5px; margin-top: 10px; }
+.grad-stoprow { display: flex; align-items: center; gap: 10px; margin: 4px 0 2px; }
+.grad-colorwrap { width: 40px; height: 40px; border-radius: 12px; overflow: hidden; flex: none; box-shadow: inset 0 0 0 1px rgba(255,255,255,.1); }
+.grad-color { width: 60px; height: 60px; margin: -10px; border: 0; padding: 0; background: none; cursor: pointer; }
+.grad-hex { width: 100px; font-variant-numeric: tabular-nums; text-transform: uppercase; }
+.grad-spacer { flex: 1; }
+
 /* More: info, history, export, upscale, debug — a full sheet on phones, a panel on desktops. */
 .more { position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,.5); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); display: flex; flex-direction: column; justify-content: flex-end; }
 .more[hidden] { display: none; }

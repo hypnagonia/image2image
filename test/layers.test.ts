@@ -82,3 +82,31 @@ test("module switches: auto grade follows Regions, the photo curve and user laye
   assert.deepEqual(liveLayers(q.layers, 1, { curves: true, semantic: false }).map((l) => l.name), ["Tone & black point", "Mine"]);
   assert.deepEqual(liveLayers(q.layers, 0, { curves: true, semantic: true }).map((l) => l.name), ["Mine"]);
 });
+
+import { gradientAt, gradientTable, GRADIENT_PRESETS, presetGradient, srgbToP3Encoded } from "../src/layers/gradient.ts";
+test("gradients: interpolation, presets dark → light, P3 table", () => {
+  const g = { stops: [{ pos: 0, color: "#000000", alpha: 1 }, { pos: 1, color: "#FFFFFF", alpha: 0 }] };
+  const m = gradientAt(g, 0.5);
+  assert.ok(Math.abs(m[0] - 0.5) < 1e-6 && Math.abs(m[3] - 0.5) < 1e-6);
+  const tg = presetGradient("tealGold");
+  assert.deepEqual(tg.stops.map((s) => s.color), ["#006C77", "#008182", "#B7850E", "#CC9802", "#DBA620"]);
+  const luma = (c: string) => { const v = parseInt(c.slice(1), 16); return 0.2126 * (v >> 16) + 0.7152 * ((v >> 8) & 255) + 0.0722 * (v & 255); };
+  for (const p of GRADIENT_PRESETS) {
+    for (let i = 1; i < p.colors.length; i++) assert.ok(luma(p.colors[i]) >= luma(p.colors[i - 1]) - 1, `${p.id} runs dark → light`);
+  }
+  const w = srgbToP3Encoded(1, 1, 1);
+  assert.ok(w.every((v) => Math.abs(v - 1) < 1e-4), "white stays white");
+  const t = gradientTable(g, 16);
+  assert.equal(t.length, 64);
+  assert.ok(t[0] < 1e-6 && Math.abs(t[15 * 4] - 1) < 1e-4 && Math.abs(t[15 * 4 + 3]) < 1e-6);
+});
+test("gradient layers pack a table row each", () => {
+  const a = makeLayer("gradientMap", "Map");
+  const b = makeLayer("gradientFill", "Fill");
+  const pk = packLayers([a, b]);
+  assert.equal(pk.rows, 2);
+  assert.equal(pk.records[3], 0);
+  assert.equal(pk.records[RECORD + 3], 1);
+  assert.equal(pk.records[0], 5);
+  assert.equal(pk.records[RECORD], 6);
+});

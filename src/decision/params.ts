@@ -113,6 +113,12 @@ export interface Params {
   autoLayersVersion?: number;
   /** Strength of the automatic curves (0 … 1.5; 1 = as measured, 0 = none). */
   autoCurves: number;
+  /**
+   * Highlight protection: the layers (automatic and the user's) may not push a
+   * colour that was below clipping into it; they approach white on a soft shoulder.
+   * Undefined = on (sessions saved before it existed).
+   */
+  protectHighlights?: boolean;
   /** Where near ends and far begins, in refined distance (0 near … 1 far): this photo's own depth layers. */
   depthBands: [number, number];
   /** The creative layer: one look profile on top of the technical base. */
@@ -201,6 +207,7 @@ export function defaultParams(): Params {
     depthCurves: {},
     depthBands: [0.33, 0.66],
     autoCurves: 1,
+    protectHighlights: true,
     layers: [],
     hdr: { headroom: 0 },
     depth: { near: 1, far: 1 },

@@ -18,6 +18,8 @@ export const ICON = {
   basic: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
   brightContrast: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 3v18M12 8h4M12 12h5M12 16h4",
   exposure: "M4 4h16v16H4zM4 20 20 4M7 8h4M9 6v4M13 16h4",
+  gradientMap: "M3 7h18v7H3zM7 14v3M12 14v3M17 14v3M9 7v7M15 7v7",
+  gradientFill: "M4 4h16v16H4zM4 9h16M4 13h16M4 16.5h16M4 19h16",
 } as const;
 export type IconName = keyof typeof ICON;
 

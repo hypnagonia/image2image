@@ -336,6 +336,8 @@ const EN_DENOISE = 1u; const EN_WB = 2u; const EN_EXPOSURE = 4u; const EN_LOCAL 
 const EN_SEMANTIC = 16u; const EN_DEHAZE = 32u; const EN_SHARPEN = 64u; const EN_CURVES = 128u; // adjustment layers
 
 struct Maps { g: array<f32, 12>, dist: f32 }
+/** This pixel in the analysis encoding (the guide's): what the layer masks compare colours in. */
+var<private> pix_enc: vec3<f32>;
 
 fn gsz() -> vec2<i32> { return vec2<i32>(i32(u.size.z), i32(u.size.w)); }
 fn gl(t: texture_2d<f32>, q: vec2<i32>) -> vec4<f32> { return textureLoad(t, clamp(q, vec2<i32>(0), gsz() - 1), 0); }
@@ -469,6 +471,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let k = u.a.y;
   let enc0 = srgb_oetf(clamp(c0 * k, vec3<f32>(0.0), vec3<f32>(1.0)));
   let gp = (vec2<f32>(px) + 0.5) * vec2<f32>(f32(u.size.z), f32(u.size.w)) / vec2<f32>(f32(W), f32(H));
+  pix_enc = enc0;
   var maps = maps_at(gp, enc0);
   var sem = sem_at(maps);
   // Skin: Apple's matte where the file has one, else person × skin colour (of the
@@ -613,7 +616,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // --- adjustment layers (layers.wgsl): the automatic grade and the user's own ---------------
   // Where the tone curves always ran: before the global colour stage and clean whites.
   // Which layers are live (module switches, auto strength) is decided when packing (src/layers/gpu.ts).
-  if (u.lay.x > 0u) { e = apply_layers(e, maps.g, dist, skin_w); }
+  let e_pre = e; // before the layers: what the masks are keyed on
+  if (u.lay.x > 0u) { e = apply_layers(e, maps.g, dist, skin_w, uv, f32(W) / f32(H)); }
 
   // --- colour: saturation / vibrance / per-region hue & saturation (OkLab) ----------------
   var lin = P3_TO_SRGB * srgb_eotf(e);
@@ -662,7 +666,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // layer does not reach is tinted red, as in Photoshop's quick-mask overlay.
   if (u.flags.w == 6u && u.lay.x > 0u) {
     let Lm = layers[min(u32(u.color.z), u.lay.x - 1u)];
-    let mw = layer_mask(Lm, maps.g, dist, skin_w, e);
+    let mw = layer_mask(Lm, maps.g, dist, skin_w, e, e_pre, uv);
     e = mix(mix(e, vec3<f32>(1.0, 0.12, 0.12), 0.55), e, mw);
   }
 

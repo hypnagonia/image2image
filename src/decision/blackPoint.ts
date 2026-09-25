@@ -110,7 +110,9 @@ export function blackPoint(i: BlackPointInput): BlackPointResult {
       return f(q005) >= MIN_DEEP && f(q02) - f(q005) >= 0.6 * (q02 - q005) && f(q15) - f(q01) >= 0.85 * (q15 - q01);
     };
     let y = x1;
-    for (let y1 = x1 - 0.004; y1 >= Math.max(target, x1 * 0.45); y1 -= 0.004) { if (!ok(y1)) break; y = y1; }
+    // At most ≈ 15/255 lower: a deeper anchor, not a darker photo (a lifted floor of
+    // 54/255 pulled to 24/255 took the whole lower half down with it).
+    for (let y1 = x1 - 0.004; y1 >= Math.max(target, x1 * 0.6, x1 - 0.06); y1 -= 0.004) { if (!ok(y1)) break; y = y1; }
     if (x1 - y > 0.008) {
       photo.toe = [Math.round(x1 * 1000) / 1000, Math.round(y * 1000) / 1000];
       toeDrop = x1 - y;

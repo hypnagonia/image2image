@@ -31,6 +31,8 @@ import type { AnalysisReport } from "../analysis/types.ts";
 import { decide, type DecisionResult } from "../decision/engine.ts";
 import { autoFocus, objectDepthRange } from "../decision/focus.ts";
 import { buildAutoLayers } from "../layers/auto.ts";
+import { embeddedPreviewStats, renderedMedian } from "../decode/preview.ts";
+import { displayQuantiles } from "../decision/autoCurves.ts";
 import { allMask, makeLayer } from "../layers/model.ts";
 import { depthZones } from "../decision/zones.ts";
 import { cellCoverage, previewHistograms } from "../analysis/previewHist.ts";
@@ -62,6 +64,12 @@ interface Session {
   report: AnalysisReport;
   decision: DecisionResult;
   params: Params;
+  /**
+   * Exposure calibration against the camera's rendering (DNG preview): the first
+   * final previews are measured and the automatic exposure corrected (≤ 2 rounds),
+   * unless the exposure was changed by then.
+   */
+  calib?: { ref: number; rounds: number };
   /** Preview proxy. `owned` is false when it aliases the working textures (image ≤ preview size). */
   proxy?: { base: GPUTexture; denoised: GPUTexture; w: number; h: number; owned: boolean };
   /** Quarter-pixel proxy used while a slider is being dragged. */
@@ -317,7 +325,10 @@ export class Engine {
 
     // --- decisions ----------------------------------------------------------------------
     const colorInput = src.kind !== "rgb" ? src.color : undefined;
-    const decision = await P.time("decision engine", () => decide({
+    // The camera's own rendering (the JPEG inside a DNG): the brightness reference.
+    const reference = src.kind !== "rgb" && /\.dng$/i.test(file.name) ? await P.time("camera rendering", () => embeddedPreviewStats(file, [0.5])) : undefined;
+    if (reference) this.log(`camera rendering: ${reference.width}×${reference.height} embedded JPEG, median ${(reference.q[0] * 255).toFixed(0)}/255`);
+    const decideWith = (referenceExposure?: { ev: number; note: string }) => decide({
       report,
       camera: work.camera,
       referred: work.referred,
@@ -332,12 +343,28 @@ export class Engine {
       })(),
       autoExposure,
       solveNeutral: colorInput ? (n) => neutralToTempTint(colorInput, n) : undefined,
-    }));
+      referenceExposure,
+    });
+    const decision = await P.time("decision engine", () => {
+      let d = decideWith();
+      if (!reference || !autoExposure) return d;
+      // Exposure at which our rendering's median matches the camera's: solved on the
+      // display model, then decided again (tone and local settings follow exposure).
+      for (let k = 0; k < 2; k++) {
+        const m = (e: number) => displayQuantiles(report.global.hist, { tone: d.params.tone, exposure: e, local: { ...d.params.local, anchorEV: d.params.local.anchorEV + d.params.exposure - e } }, [0.5])[0];
+        let lo = -1.5, hi = 2.5;
+        for (let it = 0; it < 30; it++) { const mid = (lo + hi) / 2; if (m(mid) < reference.q[0]) lo = mid; else hi = mid; }
+        const ev = Math.round(((lo + hi) / 2) * 100) / 100;
+        d = decideWith({ ev, note: `matched to the camera's rendering (median ${(reference.q[0] * 255).toFixed(0)}/255)` });
+      }
+      return d;
+    });
     const params = structuredClone(decision.params);
     // Atmospheric light: dark-channel estimate is in the analysis encoding → linear working.
     const A = decision.params.dehaze.light.map((v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)) / gain) as [number, number, number];
 
     const s: Session = { name: file.name, decoded, work, denoised: work.tex, gain, scene, maps, report, decision, params, lightLinear: A, scale: 1, skin: skinTex };
+    if (reference && autoExposure) s.calib = { ref: reference.q[0], rounds: 0 };
     this.s = s;
     await this.cacheDistance();
     // Automatic focus: subject from refined depth + segmentation + composition.
@@ -676,7 +703,24 @@ export class Engine {
     // computed after the preview is on its way so they never delay it.
     const wantHist = final && !draft && !this.before && this.view === 0;
     const pixels = wantHist ? new Uint8Array(data.slice(0)) : undefined;
+    const calib = final && !draft && !this.before && this.view === 0 && s.calib && s.calib.rounds < 2 && Math.abs(p.exposure - s.decision.params.exposure) < 1e-6
+      ? renderedMedian(new Uint8Array(data.slice(0))) : undefined;
     this.post({ type: "preview", width: src.width, height: src.height, data, space: "p3", final, ms: performance.now() - t0 }, [data]);
+    if (calib !== undefined && s.calib) {
+      // The display model misjudges some scenes (backlight, night): correct on what was rendered.
+      const dec = (v: number) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
+      const d = Math.log2(Math.max(dec(s.calib.ref), 1e-4) / Math.max(dec(calib), 1e-4));
+      s.calib.rounds++;
+      if (Math.abs(calib - s.calib.ref) > 6 / 255) {
+        const ev = Math.round(Math.min(2.5, Math.max(-1.5, p.exposure + 0.9 * d)) * 100) / 100;
+        const note = `measured on the preview: median ${Math.round(calib * 255)}/255 vs the camera's ${Math.round(s.calib.ref * 255)}/255 → ${ev > 0 ? "+" : ""}${ev} EV`;
+        this.log(`exposure calibration: ${note}`);
+        s.decision.params.exposure = ev;
+        s.params = { ...s.params, exposure: ev };
+        this.post({ type: "exposureCalibrated", exposure: ev, note });
+        this.requestRender(true);
+      } else s.calib.rounds = 2;
+    }
     if (pixels) {
       const hist = previewHistograms(pixels, src.width, src.height, s.scene.seg, s.distCPU, p.depthBands ?? [0.33, 0.66]);
       this.post({ type: "histograms", data: hist }, [hist.buffer]);
