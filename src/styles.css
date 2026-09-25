@@ -149,7 +149,7 @@ select { background: var(--panel-2); border: 1px solid var(--line); border-radiu
 .look-editor { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 4px; }
 .look-editor[hidden] { display: none; }
 .curve-wrap { display: flex; justify-content: center; margin: 6px 0; }
-.curve-editor { background: var(--panel-2); border-radius: 10px; touch-action: none; }
+.curve-editor { background: var(--panel-2); border-radius: 10px; touch-action: pan-y; } /* scrolls unless a touch starts on the curve (curveEditor.ts) */
 /* The big curve windows (Adjust, Regions, Depth): the pane's width, square. */
 .curve-editor.big { width: 100%; max-width: 440px; height: auto; aspect-ratio: 1; }
 input.text { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; min-width: 0; }

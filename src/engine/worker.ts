@@ -21,6 +21,11 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
 };
 
 async function handle(m: ToWorker) {
+  // Without a GPU nothing else can run: report why it did not start, not a crash inside the pipeline.
+  if (m.type !== "init" && !engine.ready) {
+    if (m.type === "open" || m.type === "export") throw new Error(engine.initError ?? "The GPU is not ready yet.");
+    return;
+  }
   switch (m.type) {
     case "init": {
       const caps = await engine.init(m.base, m.forceCpu);

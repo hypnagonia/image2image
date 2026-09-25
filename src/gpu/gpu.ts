@@ -61,20 +61,38 @@ export class Gpu {
     if (!nav?.gpu) return undefined;
     const adapter = await nav.gpu.requestAdapter({ powerPreference: "high-performance" });
     if (!adapter) return undefined;
-    const f16 = adapter.features.has("shader-f16");
+    let f16 = adapter.features.has("shader-f16");
     const want = (k: keyof GPUSupportedLimits) => adapter.limits[k] as number;
-    const device = await adapter.requestDevice({
-      requiredFeatures: f16 ? ["shader-f16"] : [],
-      requiredLimits: {
-        maxBufferSize: want("maxBufferSize"),
-        maxStorageBufferBindingSize: want("maxStorageBufferBindingSize"),
-        maxTextureDimension2D: want("maxTextureDimension2D"),
-        maxComputeWorkgroupStorageSize: want("maxComputeWorkgroupStorageSize"),
-        maxComputeInvocationsPerWorkgroup: want("maxComputeInvocationsPerWorkgroup"),
-        maxStorageTexturesPerShaderStage: want("maxStorageTexturesPerShaderStage"),
-        maxStorageBuffersPerShaderStage: want("maxStorageBuffersPerShaderStage"),
-      },
-    });
+    const limits = {
+      maxBufferSize: want("maxBufferSize"),
+      maxStorageBufferBindingSize: want("maxStorageBufferBindingSize"),
+      maxTextureDimension2D: want("maxTextureDimension2D"),
+      maxComputeWorkgroupStorageSize: want("maxComputeWorkgroupStorageSize"),
+      maxComputeInvocationsPerWorkgroup: want("maxComputeInvocationsPerWorkgroup"),
+      maxStorageTexturesPerShaderStage: want("maxStorageTexturesPerShaderStage"),
+      maxStorageBuffersPerShaderStage: want("maxStorageBuffersPerShaderStage"),
+    };
+    // The adapter's own maxima first; some devices / browser versions refuse a
+    // request that is technically within them, so fall back step by step to
+    // the defaults (everything the pipeline needs fits the WebGPU defaults on
+    // a phone-sized working image) and finally without shader-f16.
+    const attempts: GPUDeviceDescriptor[] = [
+      { requiredFeatures: f16 ? ["shader-f16"] : [], requiredLimits: limits },
+      { requiredFeatures: f16 ? ["shader-f16"] : [], requiredLimits: { maxBufferSize: limits.maxBufferSize, maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize, maxTextureDimension2D: limits.maxTextureDimension2D } },
+      { requiredFeatures: f16 ? ["shader-f16"] : [] },
+      {},
+    ];
+    let device: GPUDevice | undefined;
+    let lastErr: unknown;
+    for (const [i, d] of attempts.entries()) {
+      try {
+        device = await adapter.requestDevice(d);
+        if (i > 0) console.warn(`WebGPU device created with fallback settings #${i}`, lastErr);
+        if (i === attempts.length - 1) f16 = false;
+        break;
+      } catch (e) { lastErr = e; }
+    }
+    if (!device) throw new Error(`The GPU could not be set up on this device: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
     const ai = (adapter as GPUAdapter & { info?: GPUAdapterInfo }).info;
     return new Gpu(adapter, device, {
       vendor: ai?.vendor ?? "unknown",

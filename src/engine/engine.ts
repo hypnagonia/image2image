@@ -151,10 +151,17 @@ export class Engine {
     return { base: d.base, denoised: d.denoised, width: d.w, height: d.h, fullWidth: s.work.width };
   }
 
+  /** Why the engine could not start (kept, so every later request reports the real reason). */
+  initError?: string;
+  get ready(): boolean { return !!this.gpu; }
+
   async init(base: string, forceCpu = false): Promise<Capabilities> {
-    const gpu = forceCpu ? undefined : await Gpu.create();
+    let gpu: Gpu | undefined;
+    try { gpu = forceCpu ? undefined : await Gpu.create(); }
+    catch (e) { this.initError = e instanceof Error ? e.message : String(e); throw e; }
     if (!gpu) {
-      throw new Error("WebGPU is not available in this browser. On iPhone, use Safari on iOS 26 or later (Settings → Apps → Safari → Advanced → Feature Flags → WebGPU on older versions).");
+      this.initError = "WebGPU is not available in this browser. On iPhone, use Safari on iOS 26 or later (Settings → Apps → Safari → Advanced → Feature Flags → WebGPU on older versions).";
+      throw new Error(this.initError);
     }
     this.gpu = gpu;
     gpu.onError = (m) => this.log("GPU error: " + m);

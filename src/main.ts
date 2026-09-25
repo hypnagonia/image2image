@@ -476,8 +476,11 @@ let pushTimer = 0;
 // While a slider is held, previews render at a quarter of the pixels (drafts);
 // releasing it renders the full preview once.
 let dragging = false;
-document.addEventListener("pointerdown", (e) => { if ((e.target as HTMLElement).matches?.('input[type="range"], .curve-editor')) dragging = true; }, true);
-const endDrag = () => { if (!dragging) return; dragging = false; pushParams(); };
+/** Something was changed during this drag (a draft went out): the release renders the final preview. */
+let draftSent = false;
+document.addEventListener("pointerdown", (e) => { if ((e.target as HTMLElement).matches?.('input[type="range"], .curve-editor')) { dragging = true; draftSent = false; } }, true);
+// A touch on a curve box that turned into a page scroll changed nothing: no render.
+const endDrag = () => { if (!dragging) return; dragging = false; if (draftSent) pushParams(); };
 document.addEventListener("pointerup", endDrag, true);
 document.addEventListener("pointercancel", endDrag, true);
 
@@ -485,6 +488,7 @@ function pushParams() {
   if (!params) return;
   clearTimeout(pushTimer);
   const draft = dragging;
+  if (draft) draftSent = true;
   pushTimer = window.setTimeout(() => send({ type: "params", params: structuredClone(params!), draft }), draft ? 0 : 16);
   rememberParams(params);
 }

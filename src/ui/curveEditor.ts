@@ -50,8 +50,28 @@ export class CurveEditor {
     if (!fluid) this.el.style.width = this.el.style.height = size + "px";
     this.el.addEventListener("pointerdown", (e) => this.down(e));
     this.el.addEventListener("pointermove", (e) => this.move(e));
-    this.el.addEventListener("pointerup", () => this.up());
-    this.el.addEventListener("pointercancel", () => this.up());
+    this.el.addEventListener("pointerup", (e) => this.up(e));
+    this.el.addEventListener("pointercancel", () => { this.tap = undefined; this.up(); });
+    // A finger on the page's scrollable pane: only a touch that starts on a point
+    // or on the curve itself edits it (and stops the page from scrolling); a
+    // touch anywhere else scrolls the page — a quick tap there still adds a point.
+    this.el.addEventListener("touchstart", (e) => {
+      const t = e.touches[0];
+      if (e.touches.length === 1 && this.grabs(this.posAt(t.clientX, t.clientY))) e.preventDefault();
+    }, { passive: false });
+  }
+
+  /** A touch that started away from the curve: becomes a new point if it ends as a tap. */
+  private tap?: { id: number; x: number; y: number; cx: number; cy: number };
+
+  /** Is this spot on a point or on the curve line (i.e. an edit, not a scroll)? */
+  private grabs([x, y]: Pt): boolean {
+    if (this.pts.some((p) => Math.hypot(p[0] - x, p[1] - y) < 0.07)) return true;
+    return Math.abs(this.curveAt(x) - y) < 0.07;
+  }
+  private curveAt(x: number): number {
+    const f = this.mode === "rainbow" ? periodicCurve(this.pts) : monotoneCurve(this.pts.map(([px, py]) => ({ x: px, y: py })));
+    return f(Math.min(1, Math.max(0, x)));
   }
 
   set(pts: Pt[], color: string, mode: Mode = "curve") {
@@ -64,14 +84,20 @@ export class CurveEditor {
     this.draw();
   }
 
-  private pos(e: PointerEvent): Pt {
+  private pos(e: PointerEvent): Pt { return this.posAt(e.clientX, e.clientY); }
+  private posAt(cx: number, cy: number): Pt {
     const r = this.el.getBoundingClientRect();
-    return [(e.clientX - r.left) / r.width, 1 - (e.clientY - r.top) / r.height];
+    return [(cx - r.left) / r.width, 1 - (cy - r.top) / r.height];
   }
 
   private down(e: PointerEvent) {
-    this.el.setPointerCapture(e.pointerId);
     const [x, y] = this.pos(e);
+    if (e.pointerType === "touch" && !this.grabs([x, y])) {
+      // Away from the curve: the page may scroll; decide on release.
+      this.tap = { id: e.pointerId, x, y, cx: e.clientX, cy: e.clientY };
+      return;
+    }
+    this.el.setPointerCapture(e.pointerId);
     let best = -1, bd = 0.06;
     this.pts.forEach((p, i) => { const d = Math.hypot(p[0] - x, p[1] - y); if (d < bd) { bd = d; best = i; } });
     if (best < 0) {
@@ -107,7 +133,19 @@ export class CurveEditor {
     this.draw();
   }
 
-  private up() { this.drag = -1; this.draw(); }
+  private up(e?: PointerEvent) {
+    const t = this.tap;
+    this.tap = undefined;
+    if (t && e && e.pointerId === t.id && Math.hypot(e.clientX - t.cx, e.clientY - t.cy) < 10) {
+      // A tap away from the curve adds a point there (as a click does).
+      const q: Pt = [Math.min(0.98, Math.max(0.02, t.x)), Math.min(1, Math.max(0, t.y))];
+      this.pts.push(q);
+      this.pts.sort((a, b) => a[0] - b[0]);
+      this.emit();
+    }
+    this.drag = -1;
+    this.draw();
+  }
 
   /** Shows how the pixels are spread over intensity (x) behind the curve; undefined hides it. */
   setHistogram(h?: ArrayLike<number>) {
