@@ -33,10 +33,10 @@ test("a photo that already renders well gets flat curves", () => {
   assert.equal(r.notes.length, 0);
 });
 
-test("a flat photo gets contrast around its own median", () => {
-  const r = autoCurves(base({ photo: { hist: hist(G, 0.6), area: 1 } }));
+test("a flat photo gets gentle contrast after its black point", () => {
+  const r = autoCurves(base({ photo: { hist: hist(G, 1.0), area: 1 } }));
   assert.ok(r.photo, "fires");
-  assert.ok(r.photo!.bands[1] < 0 && r.photo!.bands[3] > 0, `S: ${r.photo!.bands}`);
+  assert.ok(r.photo!.bands[3] > r.photo!.bands[2] || !!r.photo!.toe, `shaped: ${JSON.stringify(r.photo)}`);
 });
 
 test("a washed-out sky is deepened; a normal one is left alone", () => {
@@ -102,8 +102,7 @@ test("ground always gets a contrast curve around its own median", () => {
 
 test("real black that renders grey is deepened at the bottom only; haze is left alone", () => {
   const milky = autoCurves(base({ photo: { hist: hist(-2.5, 1.5), area: 1 } }));
-  assert.ok(milky.photo && milky.photo.bands[0] < -0.1, JSON.stringify(milky.photo));
-  assert.ok(Math.abs(milky.photo!.bands[1]) < 0.2, "darks barely move");
-  const haze = autoCurves(base({ photo: { hist: hist(-2.5, 0.9), area: 1 } }));
-  assert.ok(!haze.notes.some((n) => n.reason.includes("blacks")), "no real black (short range): not deepened");
+  assert.ok(milky.photo?.toe && milky.photo.toe[1] < milky.photo.toe[0] - 0.02, JSON.stringify(milky.photo));
+  const haze = autoCurves(base({ photo: { hist: hist(-2.5, 1.5), area: 1 }, haze: 0.6 }));
+  assert.ok(!haze.photo?.toe, "a hazy scene keeps soft blacks");
 });

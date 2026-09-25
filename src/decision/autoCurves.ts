@@ -2,16 +2,17 @@
  * Automatic curves — for the whole photo, for regions (sky, vegetation, water,
  * buildings), for skin and for distance (near / middle / far).
  *
- * Like the black-point check (blacks.ts), this looks at the *rendering*, not at
+ * Like the black point (blackPoint.ts), this looks at the *rendering*, not at
  * the input: every luminance histogram (32 bins of log2 scene luminance,
  * −14 … +4 EV) is pushed through what the renderer will do to it — exposure,
  * the local-tone pull toward the anchor with its shadow/highlight shaping, and
  * the display tone curve — and read as display-encoded values. Rules then
  * compare those against comfortable ranges:
  *
- *   photo       flat (narrow p5–p95) → gentle contrast around its own median;
- *               whites that never reach near-white (and nothing clipped) → opened;
- *               real black that renders grey → deepened at the bottom only (deep, not dark)
+ *   photo       black point and shadow depth (blackPoint.ts: black anchor, shadow
+ *               separation, then contrast only if still flat — scene-type aware,
+ *               with skin / people / foreground / distance protection);
+ *               whites that never reach near-white (and nothing clipped) → opened
  *   sky         washed out (median high) → lights/highlights down: a deeper sky
  *   skin        faces (people's upper tones) too dark → lifted; too bright → eased
  *   ground      always a contrast curve (house style, with its lower saturation)
@@ -25,13 +26,12 @@
  * ±0.35 (≈ ±0.04 of output level), and a rule fires only when its measurement
  * is outside its range — a photograph that already renders well gets flat curves.
  */
-import { BAND_RANGE, curveFromBands, toneCurve, type CurveBands, TONE_BANDS } from "../render/curves.ts";
+import { curveFromBands, toneCurve, type CurveBands, TONE_BANDS } from "../render/curves.ts";
+import { blackPoint } from "./blackPoint.ts";
 import type { CurvePoint, Curves, DepthBand, Params, Region } from "./params.ts";
 
 const HIST_MIN = -14, HIST_RANGE = 18;
 const CAP = 0.35;
-/** Where the darkest 1% of a photo with real black should render (display-encoded ≈ 17/255): deep, shadows still separated. */
-const BLACK_TARGET = 0.067;
 
 /** A quantile of a histogram as scene EV (bin interpolation). */
 function evQuantile(hist: number[], q: number): number {
@@ -51,6 +51,9 @@ export interface AutoCurvesInput {
   exposure: number;
   local: Params["local"];
   clipHi: number;
+  /** Mean displayed chroma of the photo, and the automatic dehaze strength (scene type for the black point). */
+  chroma?: number;
+  haze?: number;
   photo: HistStats;
   regions: Partial<Record<"sky" | "vegetation" | "water" | "building" | "person" | "ground", HistStats>>;
   bands?: Partial<Record<DepthBand, HistStats>>;
@@ -106,51 +109,47 @@ function contrastAround(m: number, s: number): CurveBands {
   b.bands = TONE_BANDS.map((x) => clamp(s * clamp((x - m) / 0.25, -1, 1) * (1 - 0.4 * Math.abs(x - 0.5) / 0.4), -CAP, CAP));
   return b;
 }
-const capped = (b: CurveBands): CurveBands => ({ black: clamp(b.black, 0, CAP), bands: b.bands.map((v) => clamp(v, -CAP, CAP)), white: clamp(b.white, -CAP, 0) });
-const isFlatBands = (b: CurveBands) => Math.abs(b.black) < 0.01 && Math.abs(b.white) < 0.01 && b.bands.every((v) => Math.abs(v) < 0.01);
+const capped = (b: CurveBands): CurveBands => ({ black: clamp(b.black, 0, CAP), bands: b.bands.map((v) => clamp(v, -CAP, CAP)), white: clamp(b.white, -CAP, 0), ...(b.toe ? { toe: b.toe } : {}) });
+const isFlatBands = (b: CurveBands) => Math.abs(b.black) < 0.01 && Math.abs(b.white) < 0.01 && b.bands.every((v) => Math.abs(v) < 0.01) && !(b.toe && b.toe[1] < b.toe[0] - 0.004);
 
 export function autoCurves(i: AutoCurvesInput): AutoCurvesResult {
   const out: AutoCurvesResult = { regions: {}, depth: {}, notes: [] };
   const q = (h: HistStats, qs: number[]) => displayQuantiles(h.hist, i, qs);
+  // Several rules may shape one target (skin: faces lifted and protected from the
+  // black toe): their offsets add up, then are capped once.
+  const acc = new Map<string, { b: CurveBands; reasons: string[]; inputs: Record<string, number>; set: (b: CurveBands) => void }>();
   const put = (b: CurveBands, set: (b: CurveBands) => void, id: string, reason: string, inputs: Record<string, number>) => {
-    const c = capped(b);
-    if (isFlatBands(c)) return;
-    set(c);
-    out.notes.push({ id, value: [r2(c.black), ...c.bands.map(r2), r2(c.white)], reason, inputs });
+    const e = acc.get(id);
+    if (e) {
+      e.b = { black: e.b.black + b.black, bands: e.b.bands.map((v, k) => v + b.bands[k]), white: e.b.white + b.white, ...((b.toe ?? e.b.toe) ? { toe: b.toe ?? e.b.toe } : {}) };
+      e.reasons.push(reason);
+      Object.assign(e.inputs, inputs);
+    } else acc.set(id, { b: structuredClone(b), reasons: [reason], inputs: { ...inputs }, set });
   };
 
-  // --- the photo --------------------------------------------------------------
+  // --- the photo: black point and shadow depth (blackPoint.ts), then the whites ------
+  const bp = blackPoint({
+    q: (qs) => q(i.photo, qs),
+    rangeEV: evQuantile(i.photo.hist, 0.999) - evQuantile(i.photo.hist, 0.001),
+    chroma: i.chroma ?? 0.04, clipHi: i.clipHi, haze: i.haze ?? 0,
+    people: (i.regions.person?.area ?? 0) >= 0.01,
+    near: (i.bands?.near?.area ?? 0) >= 0.1, far: (i.bands?.far?.area ?? 0) >= 0.1,
+  });
+  if (bp.reasons.length) put(bp.photo, (c) => (out.photo = c), "curves.photo", bp.reasons.join("; "), bp.metrics);
+  for (const [t, b] of Object.entries(bp.targets) as Array<[keyof typeof bp.targets, CurveBands]>) {
+    const why = t === "skin" ? "skin protected from the black toe" : t === "person" ? "people (dark clothing texture) protected from the black toe"
+      : t === "near" ? "foreground detail protected from the black toe" : b.bands[0] > 0 ? "hazy distance kept soft" : "clear distance a little deeper, for depth";
+    if (t === "skin" || t === "person") put(b, (c) => (out.regions[t] = c), `curves.${t}`, why, {});
+    else put(b, (c) => (out.depth[t] = c), `curves.${t}`, why, {});
+  }
   {
-    const [p05, p50, p95, p99] = q(i.photo, [0.05, 0.5, 0.95, 0.99]);
-    const b = flat();
-    const spread = p95 - p05;
-    const reasons: string[] = [];
-    if (spread < 0.55) {
-      const s = 0.3 * smooth(0.55, 0.3, spread);
-      const c = contrastAround(p50, s);
-      b.bands = c.bands;
-      reasons.push(`flat: p5–p95 renders at ${p05.toFixed(2)}–${p95.toFixed(2)} (spread ${spread.toFixed(2)} < 0.55) → contrast around its median ${p50.toFixed(2)}`);
-    }
+    const [p99] = q(i.photo, [0.99]);
     if (p99 < 0.88 && i.clipHi < 0.001) {
       const o = 0.35 * smooth(0.88, 0.7, p99);
-      b.bands[4] += o; b.bands[3] += o * 0.5;
-      reasons.push(`whites never reach white: p99 renders at ${p99.toFixed(2)} and nothing is clipped → highlights opened`);
+      const b = flat();
+      b.bands[4] = o; b.bands[3] = o * 0.5;
+      put(b, (c) => (out.photo = c), "curves.photo", `whites never reach white: p99 renders at ${p99.toFixed(2)} and nothing is clipped → highlights opened`, { p99: r2(p99) });
     }
-    // Deep blacks, not a dark photo: the darkest 1% toward ≈ 12/255 by lowering only
-    // the bottom of the curve (the shadows point); darks and mid-tones stay. Only
-    // where the scene has real black (≥ 8.5 EV below white — not haze, fog or
-    // overcast), less in dark photos, and never past near-black.
-    const [q001, q01] = q(i.photo, [0.001, 0.01]);
-    const rangeEV = evQuantile(i.photo.hist, 0.999) - evQuantile(i.photo.hist, 0.001);
-    if (rangeEV >= 8.5 && q01 > BLACK_TARGET + 0.02 && q001 > 0.012) {
-      const want = (BLACK_TARGET - q01) / BAND_RANGE;                        // band units at the shadows point
-      const deepen = Math.max(-CAP, want) * smooth(0.25, 0.42, p50) * smooth(0.012, 0.03, q001);
-      if (deepen < -0.02) {
-        b.bands[0] += deepen;
-        reasons.push(`blacks: darkest 1% renders at ${(q01 * 255).toFixed(0)}/255 → deepened toward ${(BLACK_TARGET * 255).toFixed(0)}/255 at the bottom of the curve only (scene range ${rangeEV.toFixed(1)} EV)`);
-      }
-    }
-    if (reasons.length) put(b, (c) => (out.photo = c), "curves.photo", reasons.join("; "), { p05: r2(p05), p50: r2(p50), p95: r2(p95), p99: r2(p99), p1: r2(q01) });
   }
 
   // --- sky ---------------------------------------------------------------------------
@@ -220,6 +219,12 @@ export function autoCurves(i: AutoCurvesInput): AutoCurvesResult {
       put(b, (c) => (out.depth.far = c), "curves.far", `a landscape's distance with deep shadows (p5 at ${p05.toFixed(2)}) → darks lifted a touch (aerial perspective)`, { p05: r2(p05), area: r2(far.area) });
     }
   }
+  for (const [id, e] of acc) {
+    const c = capped(e.b);
+    if (isFlatBands(c)) continue;
+    e.set(c);
+    out.notes.push({ id, value: [r2(c.black), ...c.bands.map(r2), r2(c.white)], reason: e.reasons.join("; "), inputs: e.inputs });
+  }
   return out;
 }
 
@@ -227,7 +232,9 @@ export function autoCurves(i: AutoCurvesInput): AutoCurvesResult {
 export type AutoCurveBands = Omit<AutoCurvesResult, "notes">;
 
 export function scaleBands(b: CurveBands, k: number): CurveBands {
-  return { black: clamp(b.black * k, 0, 1), bands: b.bands.map((v) => clamp(v * k, -1, 1)), white: clamp(b.white * k, -1, 0) };
+  // The toe scales toward "no toe" (y = x) like the bands scale toward 0.
+  const toe: [number, number] | undefined = b.toe ? [b.toe[0], Math.min(1, Math.max(0, b.toe[0] + (b.toe[1] - b.toe[0]) * k))] : undefined;
+  return { black: clamp(b.black * k, 0, 1), bands: b.bands.map((v) => clamp(v * k, -1, 1)), white: clamp(b.white * k, -1, 0), ...(toe ? { toe } : {}) };
 }
 const FLAT_PTS = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
 

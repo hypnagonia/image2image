@@ -42,8 +42,10 @@ export function toneCurve(tone: Params["tone"]) {
     const t = 0.0006;
     d = (d * d) / (d + t) * (1 + t);
     if (b < 0) {
-      const f = -b * 0.012;
-      d = Math.max(0, d - f) / (1 - f);
+      // Deeper blacks as a stronger toe, never a clip: dark levels are pushed
+      // toward black but stay distinct (and white stays white).
+      const f = -b * 0.03;
+      d = (d * d) / (d + f) * (1 + f);
     } else if (b > 0) {
       const f = b * 0.02;
       d = f + d * (1 - f);
@@ -161,7 +163,15 @@ export const BAND_RANGE = 0.12;
 /** Black lift / white drop at slider 1 / −1. */
 export const END_RANGE = 0.15;
 
-export interface CurveBands { black: number; bands: number[]; white: number }
+export interface CurveBands {
+  black: number; bands: number[]; white: number;
+  /**
+   * A toe anchored at the photo's own shadow floor: input level x renders at y
+   * (≤ x). Blended back into the curve by a second point at ≈ 2.2·x; band points
+   * below that are left out (the toe shapes that range).
+   */
+  toe?: [number, number];
+}
 
 const clampN = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 const round4 = (v: number) => Math.round(v * 10000) / 10000;
@@ -177,7 +187,14 @@ export function bandsFromCurve(points: CurvePoint[]): CurveBands {
 
 export function curveFromBands(b: CurveBands): CurvePoint[] {
   const pts: CurvePoint[] = [{ x: 0, y: clampN(b.black, 0, 1) * END_RANGE }];
-  TONE_BANDS.forEach((x, i) => pts.push({ x, y: clampN(x + clampN(b.bands[i] ?? 0, -1, 1) * BAND_RANGE, 0, 1) }));
+  let from = 0;
+  if (b.toe && b.toe[1] < b.toe[0] - 1e-4) {
+    const [x1, y1] = b.toe;
+    const x2 = Math.min(0.45, x1 * 2.2), y2 = x2 - (x1 - y1) * 0.3;
+    pts.push({ x: x1, y: y1 }, { x: x2, y: y2 });
+    from = x2 + 0.05;
+  }
+  TONE_BANDS.forEach((x, i) => { if (x > from) pts.push({ x, y: clampN(x + clampN(b.bands[i] ?? 0, -1, 1) * BAND_RANGE, 0, 1) }); });
   pts.push({ x: 1, y: 1 + clampN(b.white, -1, 0) * END_RANGE });
   // Never inverted: each point at or above the one before it.
   for (let i = 1; i < pts.length; i++) pts[i].y = Math.max(pts[i].y, pts[i - 1].y);

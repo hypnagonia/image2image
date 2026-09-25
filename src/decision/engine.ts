@@ -18,7 +18,6 @@ import { GROUPS, type Group } from "../neural/scene.ts";
 import { defaultParams, neutralSemantic, type Decision, type Params } from "./params.ts";
 import type { AnalysisReport, RegionStats } from "../analysis/types.ts";
 import { lchOf } from "../color/oklab.ts";
-import { checkBlacks } from "./blacks.ts";
 import { hdrKnee } from "../render/curves.ts";
 import type { CameraColor } from "../color/dng.ts";
 import { mulVec, inverse } from "../color/mat3.ts";
@@ -213,21 +212,11 @@ export function decide(ctx: EngineContext): DecisionResult {
   note("tone.shadows", p.tone.shadows, `p5 at ${loEV.toFixed(2)} EV after exposure; shadow noise σ ${(shNoise * 255).toFixed(2)}/255 caps the lift at ${(noiseCap * 100).toFixed(0)}%`,
     { p5EV: r2(loEV), shadowNoise255: r2(shNoise * 255), dim: r2(dim) });
 
-  // Blacks: measured on the rendering, not on the input histogram — what matters
-  // is whether the darkest tones come out black or milky grey. The local tone
-  // stage lifts deep shadows by ≈ 2 EV × tone.shadows, so that is included.
-  const liftEV = p.tone.shadows * 2;
-  const deepEV = Math.log2(R.lum.p001) + evAdj;
-  const lowEV2 = Math.log2(R.lum.p01) + evAdj;
-  const bk = checkBlacks(p.tone, deepEV, lowEV2, liftEV, R.global.clipLo);
-  p.tone.blacks = bk.blacks;
-  note("tone.blacks", p.tone.blacks,
-    !bk.hasTrueBlack
-      ? `nothing here is truly black: the darkest 0.1% is only ${(-deepEV).toFixed(1)} EV below white (dark material, open shade or haze); blacks left alone`
-      : bk.blacks === 0
-        ? `blacks are solid: darkest 0.1% renders at ${bk.deepBefore.toFixed(0)}/255`
-        : `darkest 0.1% rendered at ${bk.deepBefore.toFixed(0)}/255 (milky); black point deepened to reach ${bk.deepAfter.toFixed(0)}/255, darkest 1% kept at ${bk.lowAfter.toFixed(0)}/255`,
-    { deepEV: r2(deepEV), deep255: r2(bk.deepBefore), low255: r2(bk.lowBefore), after255: r2(bk.deepAfter), clipLo: r3(R.global.clipLo) });
+  // Black point and shadow depth are decided with the curves, on the rendered tones
+  // (blackPoint.ts via autoCurves): a smooth toe where a black anchor is missing,
+  // scene-type aware and protecting skin, clothing and foreground — not by
+  // clipping the tone curve.
+  p.tone.blacks = 0;
   p.tone.whites = 0;
   // Global contrast: flat scenes (low log-spread) get a little more, contrasty ones none.
   const spread = R.global.sdEV;
@@ -363,6 +352,16 @@ export function decide(ctx: EngineContext): DecisionResult {
         a.texture = r2(1 + 0.3 * (1 - smooth(0.004, 0.012, sMid)));
         a.clarity = 1.1; a.sharpen = 1.05; a.denoise = r2(0.6 + 0.4 * smooth(0.02, 0.06, 0.03 - s.texture));
         why.push(`chroma ${lch.C.toFixed(3)} → saturation ${a.saturation}; texture ×${a.texture}; denoise ×${a.denoise} (keeps leaf detail)`);
+        // Dull foliage gets a little colour (never neon: the saturation above is capped too).
+        if (lch.C < 0.035) { a.saturation = r2(a.saturation + 0.06); why.push(`dull foliage (chroma ${lch.C.toFixed(3)}) → +0.06`); }
+        // Foliage far brighter than the subject (sunlit, flat) competes with it: a
+        // little darker, sunlit highlights compressed.
+        const relF = s.meanEV - keyEV;
+        if (relF > 1.2) {
+          a.exposure = r2(-0.15 * smooth(1.2, 2.5, relF));
+          a.highlights = r2(Math.max(a.highlights, 0.25 * smooth(1.2, 2.5, relF)));
+          why.push(`foliage ${relF.toFixed(1)} EV above the subject → ${a.exposure} EV, highlights ${a.highlights}`);
+        }
         break;
       }
       case "building": {
@@ -375,7 +374,11 @@ export function decide(ctx: EngineContext): DecisionResult {
         a.highlights = r2(clamp(smooth(-0.5, 1.5, s.meanEV + evAdj) * 0.4 + s.clipHi, 0, 0.7));
         a.saturation = r2(clamp((0.07 - lch.C) * 1.2, -0.08, 0.08));
         a.clarity = 0.9; a.sharpen = 0.5; a.texture = 0.8;
-        why.push(`specular highlights ${a.highlights}; colour ${a.saturation}`);
+        // Water without colour separation: a little cyan-blue presence (only then).
+        if (lch.C < 0.03) { a.saturation = r2(a.saturation + 0.05); a.vibrance = 0.15; }
+        // Visible texture (ripples) benefits from a touch of clarity; flat water keeps it calm.
+        if (s.texture > 0.02) a.clarity = 1.05;
+        why.push(`specular highlights ${a.highlights}; colour ${a.saturation}${lch.C < 0.03 ? " (colourless water → a little presence)" : ""}; clarity ×${a.clarity}`);
         break;
       }
       case "person": {
@@ -395,6 +398,8 @@ export function decide(ctx: EngineContext): DecisionResult {
         // white, with more local contrast (a contrast curve comes from autoCurves).
         a.saturation = -0.3; a.clarity = 1.25; a.texture = 0.9; a.sharpen = 0.85;
         why.push(`ground: saturation ${a.saturation} (toward black and white), clarity ×${a.clarity}`);
+        // Background ground should not compete with the subject: a touch darker.
+        if (s.dist > 0.55) { a.exposure = -0.08; a.clarity = 1.1; why.push("background ground: −0.08 EV, less clarity"); }
         break;
       case "interior": a.clarity = 0.85; a.sharpen = 0.85; break;
       case "other": break;

@@ -362,6 +362,15 @@ export class Engine {
       for (const p of [decision.params, params]) p.depthBands = [b1, b2];
       decision.dofSuggestion.bands = z3.map((z) => ({ share: z.share, label: z.label, lo: z.lo, hi: z.hi }));
       decision.cellCoverage = cellCoverage(scene.seg, s.distCPU!, [b1, b2]);
+
+      // Atmospheric perspective, only in outdoor scenes with real depth and clear air
+      // (hazy scenes already have it): the distance a little quieter and cooler.
+      const nearShare = z3[0].share, farShare = z3[2].share;
+      // Outdoors only (visible sky): the far side of a room is not atmosphere.
+      if (nearShare >= 0.1 && farShare >= 0.2 && params.dehaze.strength < 0.15 && report.groups.sky.area >= 0.03) {
+        for (const p of [decision.params, params]) p.distance = { ...p.distance, far: { ...p.distance.far, saturation: -0.06, warmth: -0.04, clarity: 0.9, texture: 0.9 } };
+        decision.decisions.push({ id: "distance.far", value: "atmospheric perspective", reason: `depth: ${Math.round(nearShare * 100)}% near, ${Math.round(farShare * 100)}% far, clear air → the distance slightly less saturated, textured and cooler`, inputs: { near: nearShare, far: farShare } });
+      }
       this.log("distance bands for curves: " + z3.map((z, i) => `${["near", "middle", "far"][i]} ${z.lo.toFixed(2)}–${z.hi.toFixed(2)} ${Math.round(z.share * 100)}% ${z.label}`).join(" | "));
 
       // Natural skin: measured on the skin itself; pulled back only when overdriven.
@@ -384,6 +393,7 @@ export class Engine {
       const st = (g: Group) => ({ hist: report.groups[g].hist, area: report.groups[g].area, localContrast: report.groups[g].localContrast });
       const ac = autoCurves({
         tone: params.tone, exposure: params.exposure, local: params.local, clipHi: report.global.clipHi,
+        chroma: report.global.chroma, haze: params.dehaze.strength,
         photo: { hist: report.global.hist, area: 1 },
         regions: { sky: st("sky"), vegetation: st("vegetation"), water: st("water"), building: st("building"), person: st("person"), ground: st("ground") },
         bands: bandHist,
@@ -393,6 +403,23 @@ export class Engine {
       decision.decisions.push(...ac.notes);
       if (!ac.notes.length) decision.decisions.push({ id: "curves", value: "flat", reason: "every region, skin and distance already renders within its comfortable range — no automatic curves", inputs: {} });
       this.log(`automatic curves: ${ac.notes.map((n) => n.id).join(", ") || "none"}`);
+    }
+    // Subject priority: the main subject may get +0.1…+0.25 EV — only when it does
+    // not already stand out from its surroundings.
+    {
+      const g = af.kind === "person" || af.kind === "animal" || af.kind === "vehicle" || af.kind === "building" ? af.kind : undefined;
+      const st = g ? report.groups[g] : undefined;
+      if (g && st && st.area >= 0.01 && st.area <= 0.45) {
+        const sep = st.meanEV - report.global.meanEV;
+        if (sep < 0.3) {
+          const add = Math.round(Math.min(0.25, Math.max(0.1, 0.1 + (0.3 - sep) * 0.25)) * 100) / 100;
+          for (const p of [decision.params, params]) {
+            p.semantic[g] = { ...p.semantic[g], exposure: Math.round((p.semantic[g].exposure + add) * 100) / 100 };
+            if (g === "person") p.skin = { ...p.skin, exposure: Math.round((p.skin.exposure + add) * 100) / 100 };
+          }
+          decision.decisions.push({ id: "subject", value: add, reason: `main subject (${g}) only ${sep.toFixed(2)} EV above the scene → +${add} EV luminance priority`, inputs: { separationEV: Math.round(sep * 100) / 100, area: st.area } });
+        } else decision.decisions.push({ id: "subject", value: 0, reason: `main subject (${g}) already stands out (${sep.toFixed(2)} EV above the scene) — not brightened`, inputs: {} });
+      }
     }
     // Keep the decision trace consistent with what auto focus found.
     const dofNote = decision.decisions.find((d) => d.id === "dof");

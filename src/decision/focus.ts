@@ -37,6 +37,8 @@ export interface AutoFocus {
   /** Suggested blur strength when justified. */
   strength: number;
   reason: string;
+  /** What the subject is, when it was found as an object. */
+  kind?: "person" | "animal" | "vehicle" | "building" | "object";
 }
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
@@ -116,7 +118,7 @@ export function autoFocus(
       : behindFrac <= 0.3
         ? `only ${(behindFrac * 100).toFixed(0)}% of the frame lies clearly behind the subject — not enough depth separation`
         : `subject covers ${(subjectFrac * 100).toFixed(0)}% of the frame — not a separable subject`);
-  return { focus: Math.round(focus * 1000) / 1000, x: (bx + 0.5) / w, y: (by + 0.5) / h, justified, strength: Math.round(strength * 100) / 100, reason };
+  return { focus: Math.round(focus * 1000) / 1000, x: (bx + 0.5) / w, y: (by + 0.5) / h, justified, strength: Math.round(strength * 100) / 100, reason, kind: obj?.kind };
 }
 
 type SegAt = (x: number, y: number, off: number) => number;

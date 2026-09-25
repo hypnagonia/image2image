@@ -710,6 +710,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     lab2 = vec3<f32>(lab2.x, lab2.y + edge * 0.03 * sem.tint, lab2.z + edge * 0.035 * sem.warmth);
     lin = oklab_to_lin_srgb(lab2);
   }
+  // Clean whites: very bright, nearly neutral surfaces (white clothing, a wedding
+  // dress, paper, clouds) lose the colour casts reflected onto them by foliage, sky
+  // or nearby objects. Clearly coloured tones (skin, a pastel wall) are untouched.
+  {
+    var lw = lin_srgb_to_oklab(lin);
+    let kw = smoothstep(0.78, 0.92, lw.x) * (1.0 - smoothstep(0.03, 0.06, length(lw.yz))) * 0.5;
+    if (kw > 1e-3) { lw = vec3<f32>(lw.x, lw.yz * (1.0 - kw)); lin = oklab_to_lin_srgb(lw); }
+  }
   // Back to P3 (inverse of P3_TO_SRGB).
   let S2P = mat3x3<f32>(
     vec3<f32>(0.8224621, 0.0331942, 0.0170827),
