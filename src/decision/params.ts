@@ -16,6 +16,10 @@ export interface Curves { l: CurvePoint[]; r: CurvePoint[]; g: CurvePoint[]; b: 
 /** A region with its own adjustments: a semantic group, or skin (a layer across people). */
 export type Region = Group | "skin";
 
+/** Distance bands with their own curves: soft thirds of this photo's depth range. */
+export type DepthBand = "near" | "middle" | "far";
+export const DEPTH_BANDS: DepthBand[] = ["near", "middle", "far"];
+
 /** A user-chosen focus point: position in the image (0..1) and the refined distance there. */
 export interface FocusPoint {
   x: number; y: number; dist: number;
@@ -78,6 +82,12 @@ export interface Params {
   curves: Curves;
   /** Curves per region, blended by the soft masks (only regions that have them). */
   regionCurves: Partial<Record<Region, Curves>>;
+  /** Curves per distance band, blended by soft band weights (only bands that have them). */
+  depthCurves: Partial<Record<DepthBand, Curves>>;
+  /** Strength of the automatic curves (0 … 1.5; 1 = as measured, 0 = none). */
+  autoCurves: number;
+  /** Where near ends and far begins, in refined distance (0 near … 1 far): this photo's own depth layers. */
+  depthBands: [number, number];
   /** The creative layer: one look profile on top of the technical base. */
   profile: LookProfile;
   denoise: { luma: number; chroma: number; shadowBoost: number };
@@ -147,6 +157,9 @@ export function defaultParams(): Params {
     semantic: Object.fromEntries(GROUPS.map((g) => [g, neutralSemantic()])) as Record<Group, SemanticAdjust>,
     skin: neutralSemantic(),
     regionCurves: {},
+    depthCurves: {},
+    depthBands: [0.33, 0.66],
+    autoCurves: 1,
     depth: { near: 1, far: 1 },
     vignette: { amount: 0, midpoint: 0.5, feather: 0.6, roundness: 0.3, highlights: 0.5 },
     grain: { amount: 0, size: 0.35, roughness: 0.5, color: 0 },

@@ -20,7 +20,7 @@ import { CURVE_LUT_SIZE, TONE_LUT_SIZE, curveLUT, isFlat, toneCurveLUT } from ".
 import { buildLUT, LOOKS, type Look } from "./looks.ts";
 import { DEPTH_CURVE_SIZE, HUE_CURVE_SIZE, PROFILE_CURVE_SIZE, depthTable, hueCurveTable, profileCurveTable, profileUniforms, isNeutral } from "../looks/profile.ts";
 import { GROUPS } from "../neural/scene.ts";
-import { neutralSemantic, type Curves, type Params } from "../decision/params.ts";
+import { DEPTH_BANDS, neutralSemantic, type Curves, type DepthBand, type Params } from "../decision/params.ts";
 import type { RefinedMaps } from "../refine/refine.ts";
 
 export interface RenderSource {
@@ -49,22 +49,27 @@ export interface RenderOptions {
 
 const MIDDLE_GREY_EV = Math.log2(0.18);
 
-/** Rows of the curve table: the photo's curves, then each region's, then skin's. */
-const REGION_ROWS = ["photo", ...GROUPS, "skin"] as const;
+/** Rows of the curve table: the photo's curves, each region's, skin's, then each distance band's. */
+const REGION_ROWS = ["photo", ...GROUPS, "skin", ...DEPTH_BANDS] as const;
+const isBand = (r: string): r is DepthBand => (DEPTH_BANDS as string[]).includes(r);
 const CURVE_ROWS = REGION_ROWS.length;
 const FLAT_PTS = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
 const FLAT_CURVES: Curves = { l: FLAT_PTS, r: FLAT_PTS, g: FLAT_PTS, b: FLAT_PTS };
 const curvesFlat = (c: Partial<Curves> | undefined) => !c || (["l", "r", "g", "b"] as const).every((k) => !c[k] || isFlat(c[k]!));
 /** A region's curves, channel by channel (a missing channel is flat). */
 function regionCurvesOf(p: Params, r: Exclude<(typeof REGION_ROWS)[number], "photo">): Curves {
-  const c = p.regionCurves?.[r];
+  const c = isBand(r) ? p.depthCurves?.[r] : p.regionCurves?.[r];
   return { l: c?.l ?? FLAT_CURVES.l, r: c?.r ?? FLAT_CURVES.r, g: c?.g ?? FLAT_CURVES.g, b: c?.b ?? FLAT_CURVES.b };
 }
-/** Bit 0: the photo's curves; bit 1 + i: row 1 + i (regions, then skin) has a curve. Region curves need region processing on. */
+/** Bit 0: the photo's curves; bit i: row i (regions, skin, distance bands) has a curve. Region curves need region processing on. */
 function curveBits(p: Params): number {
   if (!p.enable.curves) return 0;
   let bits = curvesFlat(p.curves) ? 0 : 1;
-  if (p.enable.semantic) REGION_ROWS.forEach((r, i) => { if (r !== "photo" && !curvesFlat(p.regionCurves?.[r])) bits |= 1 << i; });
+  REGION_ROWS.forEach((r, i) => {
+    if (r === "photo") return;
+    // Region and skin curves are region processing; distance curves are not.
+    if (isBand(r) ? !curvesFlat(p.depthCurves?.[r]) : p.enable.semantic && !curvesFlat(p.regionCurves?.[r])) bits |= 1 << i;
+  });
   return bits;
 }
 
@@ -108,8 +113,8 @@ export class Renderer {
       if (!this.toneLut) this.toneLut = gpu.tex("toneLUT", TONE_LUT_SIZE, 1, "rgba16float", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
       gpu.device.queue.writeTexture({ texture: this.toneLut }, floatsToHalves(toneCurveLUT(p.tone)), { bytesPerRow: TONE_LUT_SIZE * 8 }, { width: TONE_LUT_SIZE, height: 1 });
     }
-    // Curve table: row 0 = the photo's curves, rows 1…11 = the regions', row 12 = skin.
-    const ck = JSON.stringify([p.curves, p.regionCurves]);
+    // Curve table: row 0 = the photo's curves, rows 1…11 = the regions', 12 = skin, 13…15 = near / middle / far.
+    const ck = JSON.stringify([p.curves, p.regionCurves, p.depthCurves]);
     if (ck !== this.curveKey) {
       this.curveKey = ck;
       if (!this.curveLut) this.curveLut = gpu.tex("curveLUT", CURVE_LUT_SIZE, CURVE_ROWS, "rgba16float", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
@@ -208,13 +213,14 @@ export class Renderer {
     const gpu = this.gpu;
     // Tone uniforms followed by the target rectangle (tgt: offset x/y, width, height).
     const base = this.toneUniforms(p, src, maps, o, lutSize, lutOn);
-    // Tone uniforms, then tgt, hl, vig (amount, midpoint, feather, roundness), vig2 (highlights, _, _, _).
+    // Tone uniforms, then tgt, hl, vig (amount, midpoint, feather, roundness), vig2 (vignette highlights, depth band edges near|middle, middle|far, band crossfade).
     const buf = new ArrayBuffer(base.byteLength + 64);
     new Uint8Array(buf).set(new Uint8Array(base));
     new Int32Array(buf, base.byteLength, 4).set([0, ty0, src.width, th]);
     new Float32Array(buf, base.byteLength + 16, 4).set([o.zoneRange?.[0] ?? 0, o.zoneRange?.[1] ?? 1, 0, 0]);
     const v = p.vignette ?? { amount: 0, midpoint: 0.5, feather: 0.6, roundness: 0.3, highlights: 0.5 };
-    new Float32Array(buf, base.byteLength + 32, 8).set([v.amount, v.midpoint, v.feather, v.roundness, v.highlights, 0, 0, 0]);
+    const db = p.depthBands ?? [0.33, 0.66];
+    new Float32Array(buf, base.byteLength + 32, 8).set([v.amount, v.midpoint, v.feather, v.roundness, v.highlights, db[0], db[1], 0.06]);
     const u = gpu.uniform(buf, "tone.u");
     const profU = gpu.uniform(profileUniforms(p.profile, profileOn, lutOn, lutSize), "profile.u");
     temp.push(u, profU);

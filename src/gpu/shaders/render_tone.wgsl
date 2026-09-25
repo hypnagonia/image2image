@@ -37,12 +37,12 @@ struct U {
   local: vec4<f32>,         // compression, clarity, texture, anchor EV
   tone: vec4<f32>,          // shadows, highlights, depth near mult, depth far mult
   color: vec4<f32>,         // saturation, vibrance, look strength, look size
-  flags: vec4<u32>,         // x: enable bits, y: curve rows on (bit 0 photo, bit 1+i region i, bit 12 skin), z: lut on, w: debug view
+  flags: vec4<u32>,         // x: enable bits, y: curve rows on (bit 0 photo, 1+i region i, 12 skin, 13…15 near/middle/far), z: lut on, w: debug view
   sem: array<vec4<f32>, 36>,// per group, then skin (index 11): [exp, hl, sat, vib] [hue rad, clarity, texture, sharpen] [denoise, dehaze, warmth, tint]
   tgt: vec4<i32>,           // render target: offset x, y in the full image, target width, height (strip rendering)
   hl: vec4<f32>,            // view 5: highlighted depth range (lo, hi)
   vig: vec4<f32>,           // vignette: amount, midpoint, feather, roundness
-  vig2: vec4<f32>,          // vignette: highlight protection, _, _, _
+  vig2: vec4<f32>,          // vignette highlight protection; distance band edges (near|middle, middle|far) and crossfade
 }
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -409,8 +409,8 @@ fn skin_colour(p3: vec3<f32>) -> f32 {
   return exp(-pow(angdiff(atan2(lab.z, lab.y), 0.9) / 0.45, 2.0)) * smoothstep(0.012, 0.03, C) * (1.0 - smoothstep(0.17, 0.24, C))
     * smoothstep(0.12, 0.28, lab.x) * (1.0 - smoothstep(0.93, 0.99, lab.x));
 }
-/** User curves, row r of the curve table (0 = the photo's, 1…11 regions, 12 skin): L, then R/G/B. */
-const CURVE_ROWS = 13.0;
+/** User curves, row r of the curve table (0 = the photo's, 1…11 regions, 12 skin, 13…15 near/middle/far): L, then R/G/B. */
+const CURVE_ROWS = 16.0;
 fn curve_row(e: vec3<f32>, r: u32) -> vec3<f32> {
   let v = (f32(r) + 0.5) / CURVE_ROWS;
   let l = vec3<f32>(textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.r, v), 0.0).r, textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.g, v), 0.0).r, textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.b, v), 0.0).r);
@@ -581,6 +581,22 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (wsum > 1.0) { acc /= wsum; wsum = 1.0; }
     e = acc + (1.0 - wsum) * e;
   }
+  // Distance bands: soft thirds of this photo's own depth layers (weights sum to 1).
+  if ((cb & (7u << 13u)) != 0u) {
+    let f = u.vig2.w;
+    let wn = 1.0 - smoothstep(u.vig2.y - f, u.vig2.y + f, dist);
+    let wf = smoothstep(u.vig2.z - f, u.vig2.z + f, dist);
+    let wb = array<f32, 3>(wn, max(0.0, 1.0 - wn - wf), wf);
+    var acc = vec3<f32>(0.0);
+    for (var b = 0u; b < 3u; b++) {
+      let row = 13u + b;
+      var ob = e;
+      if ((cb & (1u << row)) != 0u && wb[b] > 1e-3) { ob = curve_row(e, row); }
+      acc += wb[b] * ob;
+    }
+    e = acc;
+  }
+  // Skin last: faces are never re-shaped by distance.
   if ((cb & (1u << 12u)) != 0u && skin_w > 1e-3) { e = mix(e, curve_row(e, 12u), skin_w); }
 
   // --- colour: saturation / vibrance / per-region hue & saturation (OkLab) ----------------

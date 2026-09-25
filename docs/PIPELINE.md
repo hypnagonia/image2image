@@ -357,8 +357,22 @@ ProRAW, else the person mask × a skin-colour likelihood of the
 white-balanced source: faces and hands, not clothes) — has the full set of
 technical settings and its own tone-range curves (L, R, G, B). Region curves
 run after the photo's curves, each weighted by its soft mask; skin's settings
-and curves replace the region's by the skin weight. All curves share one
-13-row table (photo, 11 regions, skin) in a single render pass.
+and curves replace the region's by the skin weight. Distance has its own curves too (near / middle / far: soft thirds
+of the photo's own depth layers from natural breaks of the refined depth),
+applied after the region curves and never on skin. All curves share one
+16-row table (photo, 11 regions, skin, 3 distance bands) in a single pass.
+
+**Automatic curves** (`src/decision/autoCurves.ts`): every luminance histogram
+(the photo, each region, people as a stand-in for faces, and each distance
+band — measured on the refined image) is pushed through exposure, the
+local-tone pull and the tone curve, and read as display levels. Small capped
+changes fire only outside comfortable ranges: a flat photo gets contrast around
+its own median and closed-in whites are opened; a washed-out sky is deepened;
+dark faces are lifted (skin curve only); flat vegetation / water / buildings
+get a little contrast; a flat foreground gets a little contrast; a landscape's
+deep far shadows are lifted a touch. Each fires with a note in the Auto tab.
+"Auto curves" in Adjust rescales them (0–150%) without touching curves the
+user edited.
 
 The Regions tab exposes the technical per-region parameters the decision
 engine sets (exposure, highlights, warmth, tint, saturation, vibrance, hue,

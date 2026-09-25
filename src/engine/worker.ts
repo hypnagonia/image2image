@@ -11,7 +11,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
   const m = ev.data;
   // Cheap, idempotent messages are handled immediately; heavy ones are serialised.
   if (m.type === "params") { engine.setParams(m.params, m.draft); return; }
-  if (m.type === "view") { engine.setView(m.view, m.before, m.region); return; }
+  if (m.type === "view") { engine.setView(m.view, m.before, m.region, m.range); return; }
   if (m.type === "preview-size") { engine.setPreviewSize(m.long); return; }
   // Heavy work shares the engine's serial GPU queue with preview renders.
   engine.exclusive(() => handle(m)).catch((e: unknown) => {

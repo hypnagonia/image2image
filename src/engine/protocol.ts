@@ -1,3 +1,4 @@
+import type { AutoCurveBands } from "../decision/autoCurves.ts";
 import type { Decision, Params } from "../decision/params.ts";
 import type { LookProfile } from "../looks/profile.ts";
 import type { ColorStats } from "../looks/palette.ts";
@@ -56,7 +57,7 @@ export type ToWorker =
   | { type: "open"; file: File; resolution: "auto" | "full" | "half"; autoExposure: boolean; autoDof: boolean; upscale: UpscaleMode }
   | { type: "upscale-now" }
   | { type: "params"; params: Params; draft?: boolean }
-  | { type: "view"; view: 0 | 1 | 2 | 4 | 5; before?: boolean; region?: number }
+  | { type: "view"; view: 0 | 1 | 2 | 4 | 5; before?: boolean; region?: number; range?: [number, number] }
   | { type: "focus"; action: "toggle"; x: number; y: number }
   | { type: "focus"; action: "move"; index: number; x: number; y: number }
   | { type: "focus"; action: "clear" }
@@ -73,7 +74,7 @@ export type FromWorker =
   | { type: "ready"; caps: Capabilities; looks: Array<{ id: string; name: string; description: string }> }
   | { type: "progress"; stage: string; detail?: string; frac?: number }
   | { type: "preview"; width: number; height: number; data: ArrayBuffer; space: "p3" | "srgb"; final: boolean; ms: number }
-  | { type: "analysis"; summary: Summary; decisions: Decision[]; auto: Params; params: Params; dof: { justified: boolean; focus: number; strength: number; reason: string; x?: number; y?: number; zoneEdges?: number[]; zones?: Array<{ share: number; label: string; lo: number; hi: number }> }; exposureSuggestion: number }
+  | { type: "analysis"; summary: Summary; decisions: Decision[]; auto: Params; params: Params; dof: { justified: boolean; focus: number; strength: number; reason: string; x?: number; y?: number; zoneEdges?: number[]; zones?: Array<{ share: number; label: string; lo: number; hi: number }>; bands?: Array<{ share: number; label: string; lo: number; hi: number }> }; exposureSuggestion: number; autoCurves?: AutoCurveBands }
   | { type: "params"; params: Params }
   | { type: "log"; text: string }
   | { type: "profile"; stages: StageProfile[] }

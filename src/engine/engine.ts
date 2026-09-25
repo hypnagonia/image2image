@@ -33,6 +33,7 @@ import type { AnalysisReport } from "../analysis/types.ts";
 import { decide, type DecisionResult } from "../decision/engine.ts";
 import { autoFocus } from "../decision/focus.ts";
 import { depthZones } from "../decision/zones.ts";
+import { applyAutoCurves, autoCurves } from "../decision/autoCurves.ts";
 import type { Params } from "../decision/params.ts";
 import { Renderer, type RenderSource } from "../render/renderer.ts";
 import { wbMatrix, neutralToTempTint } from "../color/wb.ts";
@@ -90,6 +91,8 @@ export class Engine {
   private renderer!: Renderer;
   private post: Post;
   private s?: Session;
+  /** An explicit depth range to highlight in view 5 (a distance band). */
+  private viewRange?: [number, number];
   private previewLong = isMobile() ? 1600 : 2048;
   private view: 0 | 1 | 2 | 4 | 5 = 0;
   private region = 0;
@@ -126,8 +129,9 @@ export class Engine {
     }).catch((e) => this.post({ type: "error", message: e instanceof Error ? e.message : String(e) }));
   }
 
-  /** Depth range of the highlighted zone (view 5; `region` holds the zone index). */
+  /** Depth range of the highlighted zone (view 5; `region` holds the zone index, or `viewRange` an explicit range). */
   private zoneRange(): [number, number] | undefined {
+    if (this.view === 5 && this.viewRange) return this.viewRange;
     const e = this.s?.decision.dofSuggestion.zoneEdges;
     if (this.view !== 5 || !e) return undefined;
     const i = Math.min(4, Math.max(0, this.region));
@@ -338,6 +342,27 @@ export class Engine {
         p.dof.mode = "focus";
       }
       this.log("depth zones (natural breaks): " + zones.map((z, i) => `${i + 1}: ${z.lo.toFixed(2)}–${z.hi.toFixed(2)} ${Math.round(z.share * 100)}% ${z.label}`).join(" | "));
+      // Distance bands for curves (near / middle / far): the same natural breaks, in three.
+      const z3 = depthZones(s.distCPU!, scene.seg, 3);
+      const b1 = z3[1].lo, b2 = Math.max(z3[2].lo, b1 + 0.02);
+      for (const p of [decision.params, params]) p.depthBands = [b1, b2];
+      decision.dofSuggestion.bands = z3.map((z) => ({ share: z.share, label: z.label, lo: z.lo, hi: z.hi }));
+      this.log("distance bands for curves: " + z3.map((z, i) => `${["near", "middle", "far"][i]} ${z.lo.toFixed(2)}–${z.hi.toFixed(2)} ${Math.round(z.share * 100)}% ${z.label}`).join(" | "));
+
+      // Automatic curves: the photo, regions, skin and distance, measured through the rendering.
+      const bandHist = await this.depthBandHistograms(s, b1, b2);
+      const st = (g: Group) => ({ hist: report.groups[g].hist, area: report.groups[g].area, localContrast: report.groups[g].localContrast });
+      const ac = autoCurves({
+        tone: params.tone, exposure: params.exposure, local: params.local, clipHi: report.global.clipHi,
+        photo: { hist: report.global.hist, area: 1 },
+        regions: { sky: st("sky"), vegetation: st("vegetation"), water: st("water"), building: st("building"), person: st("person") },
+        bands: bandHist,
+      });
+      decision.autoCurves = { photo: ac.photo, regions: ac.regions, depth: ac.depth };
+      for (const p of [decision.params, params]) applyAutoCurves(p, decision.autoCurves, p.autoCurves ?? 1);
+      decision.decisions.push(...ac.notes);
+      if (!ac.notes.length) decision.decisions.push({ id: "curves", value: "flat", reason: "every region, skin and distance already renders within its comfortable range — no automatic curves", inputs: {} });
+      this.log(`automatic curves: ${ac.notes.map((n) => n.id).join(", ") || "none"}`);
     }
     // Keep the decision trace consistent with what auto focus found.
     const dofNote = decision.decisions.find((d) => d.id === "dof");
@@ -347,7 +372,7 @@ export class Engine {
       if (autoDof && af.justified) p.enable = { ...p.enable, dof: true };
     }
     this.log(`auto focus: distance ${af.focus.toFixed(2)} at (${af.x.toFixed(2)}, ${af.y.toFixed(2)}) — ${af.justified ? "blur justified" : "no blur"}: ${af.reason}${autoDof && af.justified ? " — applied (Auto depth of field)" : ""}`);
-    this.post({ type: "analysis", summary: this.summary(file.name), decisions: decision.decisions, auto: decision.params, params, dof: decision.dofSuggestion, exposureSuggestion: decision.exposureSuggestion });
+    this.post({ type: "analysis", summary: this.summary(file.name), decisions: decision.decisions, auto: decision.params, params, dof: decision.dofSuggestion, exposureSuggestion: decision.exposureSuggestion, autoCurves: decision.autoCurves });
     this.post({ type: "profile", stages: P.stages });
 
     // --- first preview (before neural restoration) --------------------------------------
@@ -655,9 +680,10 @@ export class Engine {
     this.requestRender(!draft, draft);
   }
 
-  setView(view: 0 | 1 | 2 | 4 | 5, before = false, region = 0) {
+  setView(view: 0 | 1 | 2 | 4 | 5, before = false, region = 0, range?: [number, number]) {
     this.view = view;
     this.region = region;
+    this.viewRange = range;
     this.before = before;
     this.requestRender(true);
   }
@@ -675,6 +701,32 @@ export class Engine {
     this.renderer.releaseTargets();
     await this.makeProxy();
     await this.renderNow(true);
+  }
+
+  /**
+   * Luminance histograms (32 bins of log2 scene luminance, −14 … +4 EV, the same
+   * binning as the region statistics) for the near / middle / far bands, soft-
+   * weighted as the renderer blends them. From the guide-resolution image the
+   * refinement keeps, so it costs one small readback.
+   */
+  private async depthBandHistograms(s: Session, b1: number, b2: number) {
+    const m = s.maps, d = s.distCPU!;
+    const lin = new Float32Array(m.w * m.h * 4);
+    halvesToFloats(new Uint16Array(await this.gpu.readTexture(m.lin, 0, 0, m.w, m.h, 8)), lin);
+    const smooth = (a: number, b: number, x: number) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+    const f = 0.06;
+    const H = [new Array(32).fill(0), new Array(32).fill(0), new Array(32).fill(0)];
+    const W = [0, 0, 0];
+    for (let i = 0; i < m.w * m.h; i++) {
+      const Y = 0.2627 * lin[i * 4] + 0.678 * lin[i * 4 + 1] + 0.0593 * lin[i * 4 + 2];
+      const bin = Math.min(31, Math.max(0, Math.floor(((Math.log2(Math.max(Y, 1e-7)) + 14) / 18) * 32)));
+      const dd = d.data[i];
+      const wn = 1 - smooth(b1 - f, b1 + f, dd), wf = smooth(b2 - f, b2 + f, dd), wm = Math.max(0, 1 - wn - wf);
+      [wn, wm, wf].forEach((w, k) => { H[k][bin] += w; W[k] += w; });
+    }
+    const n = m.w * m.h;
+    const band = (k: number) => ({ hist: H[k].map((v: number) => v / (W[k] || 1)), area: W[k] / n });
+    return { near: band(0), middle: band(1), far: band(2) };
   }
 
   /** Keeps a CPU copy of the refined distance map for tap-to-focus. */

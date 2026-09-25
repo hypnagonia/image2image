@@ -7,7 +7,7 @@
  * every key is checked against the table below and clamped to its range, and
  * anything unknown is reported and ignored. One step of undo is kept.
  */
-import type { CurvePoint, Decision, Params, Region, SemanticAdjust } from "../decision/params.ts";
+import { DEPTH_BANDS, type CurvePoint, type Decision, type DepthBand, type Params, type Region, type SemanticAdjust } from "../decision/params.ts";
 import { isFlat } from "../render/curves.ts";
 import { flatCurves } from "./toneCurves.ts";
 import type { Summary } from "../engine/protocol.ts";
@@ -150,6 +150,8 @@ export function buildPrompt(p: Params, auto: Params | undefined, s: Summary | un
     "Paths: curves.l (luminance), curves.r, curves.g, curves.b. Value: list of [x, y] points in display-encoded 0…1 (x = input, y = output), sorted by x, including [0, y0] and [1, y1], at most 8 points. The app shows each curve as tone-range sliders at x = 0, 0.1, 0.3, 0.5, 0.7, 0.9, 1 (black level, shadows, darks, midtones, lights, highlights, white level), so put your points at exactly those x values. [[0,0],[1,1]] = unchanged. Examples: gentle S-curve [[0,0],[0.25,0.22],[0.75,0.79],[1,1]]; matte blacks [[0,0.04],[0.2,0.2],[1,1]]; cooler shadows via curves.b [[0,0.03],[0.3,0.31],[1,1]].",
     "Current: " + CURVES.map((c) => `${c} ${curveText(p.curves[c])}`).join(" · "),
     "Every region, and skin, also has its own curves, blended through its mask: regionCurves.<region>.l / .r / .g / .b (same format), applied after the photo's curves. E.g. regionCurves.sky.l to deepen only the sky, regionCurves.skin.r to warm only the skin's mid-tones, regionCurves.vegetation.g for greener foliage.",
+    "Distance has its own curves too: depthCurves.near / .middle / .far . l / r / g / b — soft thirds of this photo's depth layers (sky is far), applied after the region curves and never on skin. E.g. depthCurves.far.l lifting darks slightly for aerial perspective, depthCurves.near.l a gentle S for a punchier foreground.",
+    "Current distance curves: " + (Object.entries(p.depthCurves ?? {}).flatMap(([r, c]) => CURVES.filter((k) => c?.[k] && !isFlat(c[k])).map((k) => `${r}.${k} ${curveText(c![k])}`)).join(" · ") || "(none)"),
     "Current region curves: " + (Object.entries(p.regionCurves ?? {}).flatMap(([r, c]) => CURVES.filter((k) => c?.[k] && !isFlat(c[k])).map((k) => `${r}.${k} ${curveText(c![k])}`)).join(" · ") || "(none)"));
   L.push("", "### Look (creative grade, applied after the technical rendering)",
     `Active: ${p.profile.id} (intensity ${r3(p.profile.intensity)}). Choose one with "look": "<id>" — available:`);
@@ -292,6 +294,18 @@ export function applyAnswer(p: Params, answer: unknown, selectLook: (id: string)
       p.regionCurves ??= {};
       remember(`regionCurves.${r}`);
       p.regionCurves[r] = { ...(p.regionCurves[r] ?? flatCurves()), [rc[2]]: ok };
+      applied.push(`${path} = ${curveText(ok)}`);
+      continue;
+    }
+    const dc = /^depthCurves\.(\w+)\.([lrgb])$/.exec(path);
+    if (dc) {
+      const b = dc[1] as DepthBand;
+      if (!DEPTH_BANDS.includes(b)) { ignored.push(`${path}: use near, middle or far`); continue; }
+      const ok = parseCurve(raw);
+      if (!ok) { ignored.push(`${path}: needs 1…16 points`); continue; }
+      p.depthCurves ??= {};
+      remember(`depthCurves.${b}`);
+      p.depthCurves[b] = { ...(p.depthCurves[b] ?? flatCurves()), [dc[2]]: ok };
       applied.push(`${path} = ${curveText(ok)}`);
       continue;
     }

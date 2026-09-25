@@ -4,12 +4,14 @@
  */
 import "./styles.css";
 import type { Capabilities, ExportFormat, FromWorker, StageProfile, Summary, ToWorker, UpscaleInfo, UpscaleMode } from "./engine/protocol.ts";
-import type { Decision, Params } from "./decision/params.ts";
+import { DEPTH_BANDS, type Decision, type DepthBand, type Params } from "./decision/params.ts";
 import { createLookPanel } from "./ui/lookPanel.ts";
 import { createRegionsPanel } from "./ui/regionsPanel.ts";
 import { createLlmPanel } from "./ui/llmPanel.ts";
 import { normalizeProfile } from "./looks/profile.ts";
 import { createToneCurves } from "./ui/toneCurves.ts";
+import { applyAutoCurves, type AutoCurveBands } from "./decision/autoCurves.ts";
+import { isFlat } from "./render/curves.ts";
 import { crashedWhileProcessing, lastStage, markCompleted, markInflight, noteStage, rememberParams, rememberPhoto, restorablePhoto } from "./ui/session.ts";
 import { LANGS, LANG_NAMES, lang, setLang, storedLang, t, tOr, type Lang } from "./ui/i18n.ts";
 
@@ -78,6 +80,7 @@ function showPane(id: string) {
   setTimeout(() => {
     regionsPanel.setVisible(id === "regions");
     if (id !== "depth" && zoneHighlight !== undefined) setZoneHighlight(undefined);
+    if (id !== "depth" && bandShown) setBandShown(false);
   }, 0);
   for (const [k, p] of Object.entries(panes)) p.hidden = k !== id;
   for (const b of tabs.querySelectorAll("button")) b.classList.toggle("on", (b as HTMLElement).dataset.id === id);
@@ -105,7 +108,7 @@ let upscale: UpscaleInfo | undefined;
 let profile: StageProfile[] = [];
 const logLines: string[] = [];
 let looks: Array<{ id: string; name: string; description: string }> = [];
-let dofInfo: { justified: boolean; focus: number; strength: number; reason: string; x?: number; y?: number; zones?: Array<{ share: number; label: string; lo: number; hi: number }> } | undefined;
+let dofInfo: { justified: boolean; focus: number; strength: number; reason: string; x?: number; y?: number; zones?: Array<{ share: number; label: string; lo: number; hi: number }>; bands?: Array<{ share: number; label: string; lo: number; hi: number }> } | undefined;
 let focusMode = false;
 /** A ring being dragged: which one, where it started, where it is now. */
 let drag: { index: number; x0: number; y0: number; x: number; y: number; moved: boolean; ox: number; oy: number } | undefined;
@@ -576,8 +579,32 @@ const photoCurves = createToneCurves({
   changed: () => { lookPanel.invalidate(); pushParams(); },
   enabled: () => !!params,
 });
+// Strength of the automatic curves (photo, regions, skin, distance): rescales
+// every curve that is still the automatic one; curves edited by hand are kept.
+let autoCurveBands: AutoCurveBands | undefined;
+const acInput = el("input", { type: "range", min: "0", max: "1.5", step: "0.05" });
+const acOut = el("output");
+const acRow = el("div", { class: "row" }, el("label", { text: t("adj.autoCurves") }), acInput, acOut);
+function renderAutoCurves() {
+  const k = params?.autoCurves ?? 1;
+  acInput.value = String(k);
+  acOut.textContent = `${Math.round(k * 100)}%`;
+  acOut.classList.toggle("auto", Math.abs(k - 1) < 1e-6);
+  acRow.hidden = !autoCurveBands || (!autoCurveBands.photo && !Object.keys(autoCurveBands.regions).length && !Object.keys(autoCurveBands.depth).length);
+}
+function setAutoCurves(k: number) {
+  if (!params || !autoCurveBands) return;
+  applyAutoCurves(params, autoCurveBands, k, params.autoCurves ?? 1);
+  lookPanel.invalidate();
+  syncControls();
+  regionsPanel.render();
+  pushParams();
+}
+acInput.oninput = () => setAutoCurves(parseFloat(acInput.value));
+acRow.querySelector("label")!.addEventListener("dblclick", () => setAutoCurves(1));
 adjustPane.append(
   el("div", { class: "group-title", text: t("adj.curves") }),
+  acRow,
   photoCurves.el,
   el("p", { class: "muted", text: t("adj.curvesHint") }),
 );
@@ -677,6 +704,7 @@ const zoneRows = el("div");
 let zoneHighlight: number | undefined;
 function setZoneHighlight(i: number | undefined) {
   zoneHighlight = i;
+  if (i !== undefined && bandShown) { bandShown = false; renderBands(); }
   send(i === undefined ? { type: "view", view: currentView } : { type: "view", view: 5, region: i });
   renderZones();
 }
@@ -726,6 +754,49 @@ depthPane.append(
   el("p", { class: "muted", text: t("dof.zonesHint") }),
   zoneRows,
 );
+
+// ---- Curves by distance: near / middle / far, soft thirds of this photo's depth layers
+let curveBand: DepthBand = "near";
+let bandShown = false;
+const bandChips = el("div", { class: "chips" });
+/** Depth range of a band for the highlight view (open-ended at the ends). */
+function bandRange(b: DepthBand): [number, number] {
+  const [b1, b2] = params?.depthBands ?? [0.33, 0.66];
+  return b === "near" ? [-1, b1] : b === "middle" ? [b1, b2] : [b2, 2];
+}
+function setBandShown(on: boolean) {
+  bandShown = on;
+  if (on && zoneHighlight !== undefined) { zoneHighlight = undefined; renderZones(); }
+  send(on ? { type: "view", view: 5, range: bandRange(curveBand) } : { type: "view", view: currentView });
+  renderBands();
+}
+const depthCurves = createToneCurves({
+  get: () => params?.depthCurves[curveBand],
+  set: (c) => { if (params) params.depthCurves[curveBand] = c; },
+  key: () => curveBand,
+  changed: () => { lookPanel.invalidate(); pushParams(); },
+  enabled: () => !!params,
+});
+function renderBands() {
+  const eye = el("button", { class: "chip eye" + (bandShown ? " on" : ""), text: "◉", title: t("dof.showBand"), "aria-label": t("dof.showBand") });
+  eye.onclick = () => setBandShown(!bandShown);
+  bandChips.replaceChildren(eye, ...DEPTH_BANDS.map((b, i) => {
+    const z = dofInfo?.bands?.[i];
+    const edited = params?.depthCurves[b] && !(["l", "r", "g", "b"] as const).every((k) => isFlat(params!.depthCurves[b]![k] ?? [{ x: 0, y: 0 }, { x: 1, y: 1 }]));
+    const info = z ? ` ${Math.round(z.share * 100)}%${z.label ? " · " + tOr(`group.${z.label}`, z.label).toLowerCase() : ""}` : "";
+    const c = el("button", { class: "chip" + (b === curveBand ? " on" : ""), text: t(`band.${b}`) + info + (edited ? " •" : "") });
+    c.onclick = () => { curveBand = b; depthCurves.render(); if (bandShown) setBandShown(true); else renderBands(); };
+    return c;
+  }));
+  depthCurves.render();
+}
+depthPane.append(
+  el("div", { class: "group-title", text: t("dof.curves") }),
+  el("p", { class: "muted", text: t("dof.curvesHint") }),
+  bandChips,
+  depthCurves.el,
+);
+renderBands();
 
 // Export
 const fmtSel = el("select", {}, el("option", { value: "jpeg", text: "JPEG" }), el("option", { value: "heic", text: "HEIC" }), el("option", { value: "tiff16", text: t("exp.tiff") }), el("option", { value: "dng", text: t("exp.dng") }));
@@ -889,6 +960,8 @@ function syncControls() {
   if (params) { dofToggle.checked = params.enable.dof; }
   renderRings();
   renderZones();
+  renderBands();
+  renderAutoCurves();
 }
 
 function download(blob: Blob, name: string) {
@@ -976,6 +1049,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case "analysis":
       summary = m.summary; decisions = m.decisions; autoParams = m.auto; params = m.params; dofInfo = m.dof;
+      autoCurveBands = m.autoCurves;
       exposureSuggestion = m.exposureSuggestion;
       aeNote.textContent = exposureSuggestion ? t("adj.suggests", { ev: `${exposureSuggestion > 0 ? "+" : ""}${exposureSuggestion.toFixed(2)}` }) : t("adj.noCorrection");
       // The reason itself comes from the decision engine and stays in English.

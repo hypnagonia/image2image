@@ -48,3 +48,11 @@ test("skin settings and region curves", () => {
   assert.equal(r.previous.find(([k]) => k === "regionCurves.sky")?.[1], undefined);
   assert.equal(r.previous.find(([k]) => k === "skin.warmth")?.[1], 0);
 });
+
+test("distance curves", () => {
+  const p = defaultParams();
+  const r = applyAnswer(p, { set: { "depthCurves.far.l": [[0.1, 0.13]], "depthCurves.behind.l": [[0.5, 0.5]] } }, () => true);
+  assert.deepEqual(p.depthCurves.far?.l, [{ x: 0, y: 0 }, { x: 0.1, y: 0.13 }, { x: 1, y: 1 }]);
+  assert.equal(r.ignored.length, 1);
+  assert.equal(r.previous.find(([k]) => k === "depthCurves.far")?.[1], undefined);
+});

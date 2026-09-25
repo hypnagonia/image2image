@@ -13,6 +13,7 @@
  * All rules are deterministic and small; the constants are named, and each
  * decision records the inputs it used (see the Debug panel in the app).
  */
+import type { AutoCurveBands } from "./autoCurves.ts";
 import { GROUPS, type Group } from "../neural/scene.ts";
 import { defaultParams, neutralSemantic, type Decision, type Params } from "./params.ts";
 import type { AnalysisReport, RegionStats } from "../analysis/types.ts";
@@ -69,7 +70,9 @@ export interface DecisionResult {
   /** Conservative exposure correction the engine would apply with Auto exposure on (EV). */
   exposureSuggestion: number;
   /** Automatic depth-of-field justification (not applied unless enabled). */
-  dofSuggestion: { justified: boolean; focus: number; strength: number; reason: string; x?: number; y?: number; zoneEdges?: number[]; zones?: Array<{ share: number; label: string; lo: number; hi: number }> };
+  /** Automatic curve settings (unscaled), set by the engine once depth is known (autoCurves.ts). */
+  autoCurves?: AutoCurveBands;
+  dofSuggestion: { justified: boolean; focus: number; strength: number; reason: string; x?: number; y?: number; zoneEdges?: number[]; zones?: Array<{ share: number; label: string; lo: number; hi: number }>; bands?: Array<{ share: number; label: string; lo: number; hi: number }> };
 }
 
 export function decide(ctx: EngineContext): DecisionResult {
