@@ -82,6 +82,9 @@ function showPane(id: string) {
     regionsPanel.setVisible(id === "regions");
     if (id !== "depth" && zoneHighlight !== undefined) setZoneHighlight(undefined);
     if (id !== "depth" && bandShown) setBandShown(false);
+    // Picking focus points belongs to the Depth tab: leaving it ends the mode
+    // (taps on the photo go back to hold-to-compare and double-tap zoom).
+    if (id !== "depth" && focusMode) setFocusMode(false);
   }, 0);
   for (const [k, p] of Object.entries(panes)) p.hidden = k !== id;
   for (const b of tabs.querySelectorAll("button")) b.classList.toggle("on", (b as HTMLElement).dataset.id === id);
@@ -679,7 +682,14 @@ autoDofToggle.onchange = () => {
   }
 };
 const focusBtn = el("button", { class: "btn small", text: t("dof.pick") });
-focusBtn.onclick = () => { focusMode = !focusMode; focusBtn.classList.toggle("primary", focusMode); badge.textContent = focusMode ? t("dof.pickBadge") : ""; badge.classList.toggle("on", focusMode); renderRings(); };
+function setFocusMode(on: boolean) {
+  focusMode = on;
+  focusBtn.classList.toggle("primary", on);
+  badge.textContent = on ? t("dof.pickBadge") : "";
+  badge.classList.toggle("on", on);
+  renderRings();
+}
+focusBtn.onclick = () => setFocusMode(!focusMode);
 const autoFocusBtn = el("button", { class: "btn small", text: t("dof.automatic") });
 autoFocusBtn.onclick = () => {
   if (!params) return;
