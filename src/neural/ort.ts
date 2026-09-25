@@ -53,7 +53,9 @@ export class Neural {
     ort.env.logLevel = "error";
     const iso = (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === true;
     const cores = (globalThis.navigator?.hardwareConcurrency ?? 2) | 0;
-    ort.env.wasm.numThreads = iso ? Math.max(1, Math.min(4, cores - 1)) : 1;
+    // iOS WebKit: threaded wasm memory never shrinks and has been unstable; 2 threads at most.
+    const ios = /iPhone|iPad|iPod/i.test(globalThis.navigator?.userAgent ?? "") || (/Macintosh/.test(globalThis.navigator?.userAgent ?? "") && (globalThis.navigator?.maxTouchPoints ?? 0) > 1);
+    ort.env.wasm.numThreads = iso ? Math.max(1, Math.min(ios ? 2 : 4, cores - 1)) : 1;
     ort.env.wasm.simd = true;
     // Production loads ORT's runtime from /ort (see scripts/copy-ort.mjs); dev uses the package directly.
     if (__ORT_EXTERNAL__) ort.env.wasm.wasmPaths = base + "ort/";

@@ -269,7 +269,7 @@ export class Engine {
     this.log(`analysis image ${gw}×${gh}; normalisation gain ${gain.toFixed(3)} (${Math.log2(gain).toFixed(2)} EV)`);
 
     // --- semantic segmentation + depth (reduced image only) ------------------------
-    const scene = await P.time("segmentation + depth", () => analyseScene(this.neural, { rgba: analysisRgba, width: gw, height: gh }, (s) => this.progress(s), true, !isMobile() /* detail tiles: 4 more depth passes, too heavy for phones */, safeAnalysis ? "wasm" : this.neural.backend), (s) => Object.entries(s.timings).map(([k, v]) => `${k} ${v.toFixed(0)}ms`).join(", "));
+    const scene = await P.time("segmentation + depth", () => analyseScene(this.neural, { rgba: analysisRgba, width: gw, height: gh }, (s) => this.progress(s), true, !isMobile() /* detail tiles: 4 more depth passes, too heavy for phones */, safeAnalysis || isMobile() ? "wasm" : this.neural.backend /* phones: ORT keeps its GPU buffers for the tab's life on our device */), (s) => Object.entries(s.timings).map(([k, v]) => `${k} ${v.toFixed(0)}ms`).join(", "));
     if (import.meta.env.DEV) {
       // Dev only: dump the analysis image and distance map (PGM) for offline inspection.
       const pgm = (w: number, h: number, v: (i: number) => number) => {
