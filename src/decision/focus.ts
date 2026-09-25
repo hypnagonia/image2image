@@ -2,28 +2,29 @@
  * Automatic focus and depth-of-field justification.
  *
  * Inputs are the refined distance map (guide resolution, 0 = near … 1 = far)
- * and the semantic probabilities. The subject is where nearness, composition
- * and subject-like classes agree:
+ * and the semantic probabilities. The subject is chosen as a whole *object*,
+ * the way a photographer reads a frame, not as the best-scoring pixel:
  *
- *   score = separation × (0.3 + nearness) × composition(x, y) × semantic(x, y)
+ *   1. candidates   connected regions of people, animals, vehicles and
+ *                   buildings (segmentation), plus anything else that clearly
+ *                   stands in front of its surroundings (depth: nearer than
+ *                   the local background by a margin, not sky)
+ *   2. score        class (person > animal ≫ vehicle > building > other object)
+ *                   × size (a subject is neither a speck nor the whole frame)
+ *                   × composition of its centre (frame centre, rule-of-thirds
+ *                   points) × framing (cut by the frame edges = background or
+ *                   foreground clutter; people may be cut at the bottom)
+ *                   × separation from what is behind it × a little nearness
+ *   3. focus point  a person or animal: the top of the region (head / face);
+ *                   anything else: its own pixel nearest its centre. Focus
+ *                   distance: the median of the upper half of a person (faces
+ *                   sharp), the 30th percentile of an object's distances (its
+ *                   near surface, not background seen through gaps)
  *
- *   separation   how much farther the surroundings are than this pixel (local
- *                maximum distance within ~8% of the frame minus own distance):
- *                a subject stands in front of its background; mere nearness
- *                would pick grass at the bottom edge
- *
- *   composition  a wide bell on the frame centre plus tighter bells on the four
- *                rule-of-thirds points, with a small floor everywhere else —
- *                without it the nearest thing (a railing, grass at the bottom
- *                edge) would always win
- *   semantic     people/animals ≫ vehicles > other objects; sky never. When a
- *                person or animal covers > 1.5% of the frame, only they compete
- *
- * The score map is box-smoothed so a single noisy pixel cannot win, the focus
- * distance is the 30th percentile of distance around the best location (the
- * subject's near surface, not background seen through gaps) — for a person, the
- * median of the upper half of their own pixels (faces sharp) — and blur is
- * justified only when enough of the frame lies clearly behind that distance.
+ * If there is no candidate at all, the per-pixel score of earlier versions is
+ * used (separation × nearness × composition × semantic), box-smoothed.
+ * Blur is justified only when enough of the frame lies clearly behind the
+ * focus distance.
  */
 import { GROUPS } from "../neural/scene.ts";
 
@@ -47,7 +48,7 @@ export function autoFocus(
   const { w, h, data } = dist;
   const plane = seg.width * seg.height;
   const gi = (name: (typeof GROUPS)[number]) => GROUPS.indexOf(name) * plane;
-  const P = { person: gi("person"), animal: gi("animal"), vehicle: gi("vehicle"), sky: gi("sky"), other: gi("other"), interior: gi("interior") };
+  const P = { person: gi("person"), animal: gi("animal"), vehicle: gi("vehicle"), sky: gi("sky"), other: gi("other"), interior: gi("interior"), building: gi("building") };
   const segAt = (x: number, y: number, off: number) => {
     const sx = Math.min(seg.width - 1, Math.floor((x / w) * seg.width));
     const sy = Math.min(seg.height - 1, Math.floor((y / h) * seg.height));
@@ -72,14 +73,184 @@ export function autoFocus(
     for (let k = Math.max(0, y - R); k <= Math.min(h - 1, y + R); k += 2) m = Math.max(m, mx1[k * w + x]);
     localMax[y * w + x] = m;
   }
-  const score = new Float32Array(w * h);
   const skyMask = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (segAt(x, y, P.sky) > 0.5) skyMask[y * w + x] = 1;
+
+  const obj = findSubject(w, h, data, localMax, skyMask, segAt, P, thirds);
+  let bx: number, by: number, focus: number;
+  let living: boolean;
+  let what: string;
+  if (obj) {
+    ({ x: bx, y: by, focus } = obj);
+    living = obj.kind === "person" || obj.kind === "animal";
+    what = `${obj.kind} (${(obj.area * 100).toFixed(1)}% of the frame)`;
+  } else {
+    ({ bx, by, focus } = pixelSubject(w, h, data, localMax, segAt, P, thirds, peopleFirst));
+    living = peopleFirst;
+    what = "strongest depth/composition point";
+  }
+
+  // Justification: how much of the (non-sky) frame is clearly behind the subject,
+  // and whether the subject itself is a sensible size.
+  // Distance is linear in disparity, so a very near object squeezes a person and
+  // the room behind them close to 1; with a person as subject, "clearly behind"
+  // is judged against the depth range left behind them.
+  const margin = living ? Math.max(0.05, 0.25 * (1 - focus)) : 0.25;
+  const farLimit = living ? 0.92 : 0.6;
+  let behind = 0, subject = 0, counted = 0, farSum = 0;
+  for (let i = 0; i < w * h; i++) {
+    if (skyMask[i]) { behind++; farSum += 1; counted++; continue; }
+    counted++;
+    const d = data[i];
+    if (d > focus + margin) { behind++; farSum += d; }
+    if (Math.abs(d - focus) < Math.min(0.08, margin * 0.6)) subject++;
+  }
+  const behindFrac = behind / counted, subjectFrac = subject / counted;
+  const bgDist = behind ? farSum / behind : focus;
+  const justified = behindFrac > 0.3 && subjectFrac > 0.03 && subjectFrac < 0.6 && focus < farLimit;
+  const strength = clamp(((bgDist - focus) / Math.max(margin * 4, 0.2)) * 1.1, 0.25, 0.65);
+  const reason = `subject: ${what} at (${((bx + 0.5) / w).toFixed(2)}, ${((by + 0.5) / h).toFixed(2)}) — ` + (justified
+    ? `subject at distance ${focus.toFixed(2)} (${(subjectFrac * 100).toFixed(0)}% of the frame) with ${(behindFrac * 100).toFixed(0)}% of the frame clearly behind it`
+    : focus >= farLimit
+      ? `the likely subject is itself far away (${focus.toFixed(2)}) — nothing to separate`
+      : behindFrac <= 0.3
+        ? `only ${(behindFrac * 100).toFixed(0)}% of the frame lies clearly behind the subject — not enough depth separation`
+        : `subject covers ${(subjectFrac * 100).toFixed(0)}% of the frame — not a separable subject`);
+  return { focus: Math.round(focus * 1000) / 1000, x: (bx + 0.5) / w, y: (by + 0.5) / h, justified, strength: Math.round(strength * 100) / 100, reason };
+}
+
+type SegAt = (x: number, y: number, off: number) => number;
+type Planes = { person: number; animal: number; vehicle: number; sky: number; other: number; interior: number; building: number };
+type Kind = "person" | "animal" | "vehicle" | "building" | "object";
+
+/** How likely each kind of region is to be what the photograph is about. */
+const PRIOR: Record<Kind, number> = { person: 1, animal: 0.9, vehicle: 0.5, building: 0.4, object: 0.35 };
+const KINDS: Kind[] = ["person", "animal", "vehicle", "building", "object"];
+
+/** Centre and rule-of-thirds attraction of a point (0.25 … ~1.1). */
+function composition(u: number, v: number, thirds: number[][]): number {
+  const centre = Math.exp(-((u - 0.5) ** 2 + (v - 0.5) ** 2) / (2 * 0.2 * 0.2));
+  let third = 0;
+  for (const [tx, ty] of thirds) third = Math.max(third, Math.exp(-((u - tx) ** 2 + (v - ty) ** 2) / (2 * 0.1 * 0.1)));
+  return 0.25 + Math.max(centre, 0.85 * third);
+}
+
+export interface Subject { kind: Kind; x: number; y: number; focus: number; area: number; score: number }
+
+/**
+ * Candidate objects → the one the photograph is about (see the header).
+ * Exported for tests.
+ */
+export function findSubject(
+  w: number, h: number, data: Float32Array, localMax: Float32Array, skyMask: Uint8Array,
+  segAt: SegAt, P: Planes, thirds: number[][],
+): Subject | undefined {
+  const n = w * h;
+  // 1. label every pixel with the kind of candidate it belongs to (0 = none)
+  const kind = new Uint8Array(n);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    if (skyMask[i]) continue;
+    const pe = segAt(x, y, P.person), an = segAt(x, y, P.animal);
+    if (pe + an > 0.5) { kind[i] = pe >= an ? 1 : 2; continue; }
+    if (segAt(x, y, P.vehicle) > 0.5) { kind[i] = 3; continue; }
+    if (segAt(x, y, P.building) > 0.5) { kind[i] = 4; continue; }
+    // Anything else counts when it clearly stands in front of its surroundings.
+    if (localMax[i] - data[i] > 0.12 && data[i] < 0.75) kind[i] = 5;
+  }
+  // 2. connected regions (4-neighbour) of one kind, scored as a whole
+  const comp = new Int32Array(n).fill(-1);
+  const stack = new Int32Array(n);
+  let best: Subject | undefined;
+  let bestPix: number[] = [];
+  const minArea = Math.max(4, Math.round(n * 0.002));
+  for (let s0 = 0; s0 < n; s0++) {
+    if (!kind[s0] || comp[s0] >= 0) continue;
+    const k = kind[s0];
+    let sp = 0;
+    stack[sp++] = s0;
+    comp[s0] = s0;
+    const pix: number[] = [];
+    let sx = 0, sy = 0, sd = 0, ssep = 0, left = false, right = false, top = false, bottom = false;
+    while (sp) {
+      const i = stack[--sp];
+      pix.push(i);
+      const x = i % w, y = (i - x) / w;
+      sx += x; sy += y; sd += data[i]; ssep += Math.max(0, localMax[i] - data[i]);
+      if (x === 0) left = true;
+      if (x === w - 1) right = true;
+      if (y === 0) top = true;
+      if (y === h - 1) bottom = true;
+      const nb = [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1];
+      for (const j of nb) if (j >= 0 && comp[j] < 0 && kind[j] === k) { comp[j] = s0; stack[sp++] = j; }
+    }
+    if (pix.length < minArea) continue;
+    const kd = KINDS[k - 1];
+    const livingK = kd === "person" || kd === "animal";
+    const area = pix.length / n;
+    const u = (sx / pix.length + 0.5) / w, v = (sy / pix.length + 0.5) / h;
+    // A subject is neither a speck nor the whole frame; buildings may be large.
+    const size = clamp((area - 0.002) / 0.013, 0, 1) * (1 - (kd === "building" ? 0.5 : 0.7) * clamp((area - 0.4) / 0.45, 0, 1));
+    // Regions cut by the frame are background or foreground clutter. People are
+    // routinely cut at the bottom (half-length portraits), so that side is free.
+    const cuts = (left ? 1 : 0) + (right ? 1 : 0) + (top ? 1 : 0) + (bottom && !livingK ? 1 : 0);
+    let framing = [1, 0.8, 0.45, 0.25, 0.15][cuts];
+    // Something small that sits on the bottom edge is foreground (grass, a railing).
+    if (bottom && !livingK && area < 0.15) framing *= 0.5;
+    const sepF = 0.6 + 0.8 * Math.min(1, (ssep / pix.length) * 4);
+    const nearF = 0.75 + 0.25 * (1 - sd / pix.length);
+    const score = PRIOR[kd] * size * composition(u, v, thirds) * framing * sepF * nearF;
+    if (!best || score > best.score) {
+      best = { kind: kd, x: 0, y: 0, focus: 0, area, score };
+      bestPix = pix;
+    }
+  }
+  if (!best || best.score <= 0) return undefined;
+  // 3. focus point and distance
+  const pix = bestPix;
+  if (best.kind === "person" || best.kind === "animal") {
+    // The head: the top 30% of the region's rows; focus on the upper half's median distance.
+    let y0 = h, y1 = 0;
+    for (const i of pix) { const y = Math.floor(i / w); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+    const lim = y0 + Math.max(1, Math.round((y1 - y0) * 0.3));
+    let hx = 0, hy = 0, hn = 0;
+    const upper: number[] = [];
+    const mid = (y0 + y1) / 2;
+    for (const i of pix) {
+      const x = i % w, y = (i - x) / w;
+      if (y <= lim) { hx += x; hy += y; hn++; }
+      if (y <= mid) upper.push(data[i]);
+    }
+    upper.sort((a, b) => a - b);
+    best.x = Math.round(hx / hn);
+    best.y = Math.round(hy / hn);
+    best.focus = upper[Math.floor(upper.length / 2)];
+  } else {
+    let cx = 0, cy = 0;
+    for (const i of pix) { cx += i % w; cy += Math.floor(i / w); }
+    cx /= pix.length; cy /= pix.length;
+    // The region's own pixel nearest its centre (the centre of an L or a ring is outside it).
+    let bi = pix[0], bd = Infinity;
+    for (const i of pix) { const d = (i % w - cx) ** 2 + (Math.floor(i / w) - cy) ** 2; if (d < bd) { bd = d; bi = i; } }
+    best.x = bi % w;
+    best.y = Math.floor(bi / w);
+    const ds = pix.map((i) => data[i]).sort((a, b) => a - b);
+    best.focus = ds[Math.floor(ds.length * 0.3)];
+  }
+  return best;
+}
+
+/** The earlier per-pixel subject score, for frames without any candidate object. */
+function pixelSubject(
+  w: number, h: number, data: Float32Array, localMax: Float32Array,
+  segAt: SegAt, P: Planes, thirds: number[][], peopleFirst: boolean,
+): { bx: number; by: number; focus: number } {
+  const score = new Float32Array(w * h);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const u = (x + 0.5) / w, v = (y + 0.5) / h;
       const i = y * w + x;
       const sky = segAt(x, y, P.sky);
-      if (sky > 0.5) skyMask[i] = 1;
       const dc = (u - 0.5) ** 2 + (v - 0.5) ** 2;
       let comp = 0.04 + Math.exp(-dc / (2 * 0.3 * 0.3));
       for (const [tx, ty] of thirds) comp += 0.6 * Math.exp(-((u - tx) ** 2 + (v - ty) ** 2) / (2 * 0.16 * 0.16));
@@ -120,47 +291,5 @@ export function autoFocus(
     for (let x = Math.max(0, bx - rr); x <= Math.min(w - 1, bx + rr); x++) vals.push(data[y * w + x]);
   vals.sort((a, b) => a - b);
   // The near part of the neighbourhood: the subject's surface, not the gaps behind it.
-  let focus = vals[Math.floor(vals.length * 0.3)] ?? 0.3;
-  if (peopleFirst) {
-    // A person: their own pixels only (not the armrest in front of them), and the
-    // upper half of them near the subject point — faces are what must be sharp.
-    const R2 = Math.round(Math.max(w, h) * 0.15);
-    const pix: Array<[number, number]> = [];
-    for (let y = Math.max(0, by - R2); y <= Math.min(h - 1, by + R2); y++)
-      for (let x = Math.max(0, bx - R2); x <= Math.min(w - 1, bx + R2); x++)
-        if (segAt(x, y, P.person) + segAt(x, y, P.animal) > 0.6) pix.push([y, data[y * w + x]]);
-    if (pix.length > 20) {
-      pix.sort((a, b) => a[0] - b[0]);
-      const upper = pix.slice(0, Math.ceil(pix.length / 2)).map((p) => p[1]).sort((a, b) => a - b);
-      focus = upper[Math.floor(upper.length / 2)];
-    }
-  }
-
-  // Justification: how much of the (non-sky) frame is clearly behind the subject,
-  // and whether the subject itself is a sensible size.
-  // Distance is linear in disparity, so a very near object squeezes a person and
-  // the room behind them close to 1; with a person as subject, "clearly behind"
-  // is judged against the depth range left behind them.
-  const margin = peopleFirst ? Math.max(0.05, 0.25 * (1 - focus)) : 0.25;
-  const farLimit = peopleFirst ? 0.92 : 0.6;
-  let behind = 0, subject = 0, counted = 0, farSum = 0;
-  for (let i = 0; i < w * h; i++) {
-    if (skyMask[i]) { behind++; farSum += 1; counted++; continue; }
-    counted++;
-    const d = data[i];
-    if (d > focus + margin) { behind++; farSum += d; }
-    if (Math.abs(d - focus) < Math.min(0.08, margin * 0.6)) subject++;
-  }
-  const behindFrac = behind / counted, subjectFrac = subject / counted;
-  const bgDist = behind ? farSum / behind : focus;
-  const justified = behindFrac > 0.3 && subjectFrac > 0.03 && subjectFrac < 0.6 && focus < farLimit;
-  const strength = clamp(((bgDist - focus) / Math.max(margin * 4, 0.2)) * 1.1, 0.25, 0.65);
-  const reason = justified
-    ? `subject at distance ${focus.toFixed(2)} (${(subjectFrac * 100).toFixed(0)}% of the frame) with ${(behindFrac * 100).toFixed(0)}% of the frame clearly behind it`
-    : focus >= farLimit
-      ? `the likely subject is itself far away (${focus.toFixed(2)}) — nothing to separate`
-      : behindFrac <= 0.3
-        ? `only ${(behindFrac * 100).toFixed(0)}% of the frame lies clearly behind the subject — not enough depth separation`
-        : `subject covers ${(subjectFrac * 100).toFixed(0)}% of the frame — not a separable subject`;
-  return { focus: Math.round(focus * 1000) / 1000, x: (bx + 0.5) / w, y: (by + 0.5) / h, justified, strength: Math.round(strength * 100) / 100, reason };
+  return { bx, by, focus: vals[Math.floor(vals.length * 0.3)] ?? 0.3 };
 }
