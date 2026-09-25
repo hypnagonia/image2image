@@ -30,6 +30,8 @@ import { blurReport, lumPercentiles, measureBlocks, measureRegions, noiseProfile
 import type { AnalysisReport } from "../analysis/types.ts";
 import { decide, type DecisionResult } from "../decision/engine.ts";
 import { autoFocus, objectDepthRange } from "../decision/focus.ts";
+import { buildAutoLayers } from "../layers/auto.ts";
+import { allMask, makeLayer } from "../layers/model.ts";
 import { depthZones } from "../decision/zones.ts";
 import { cellCoverage, previewHistograms } from "../analysis/previewHist.ts";
 import { applyAutoCurves, autoCurves } from "../decision/autoCurves.ts";
@@ -94,7 +96,7 @@ export class Engine {
   /** An explicit depth range to highlight in view 5 (a distance band). */
   private viewRange?: [number, number];
   private previewLong = isMobile() ? 1600 : 2048;
-  private view: 0 | 1 | 2 | 4 | 5 = 0;
+  private view: 0 | 1 | 2 | 4 | 5 | 6 = 0;
   private region = 0;
   private before = false;
   private generation = 0;
@@ -413,9 +415,9 @@ export class Engine {
         const sep = st.meanEV - report.global.meanEV;
         if (sep < 0.3) {
           const add = Math.round(Math.min(0.25, Math.max(0.1, 0.1 + (0.3 - sep) * 0.25)) * 100) / 100;
+          // A visible, editable layer: "Subject priority" (Exposure on the subject's region).
           for (const p of [decision.params, params]) {
-            p.semantic[g] = { ...p.semantic[g], exposure: Math.round((p.semantic[g].exposure + add) * 100) / 100 };
-            if (g === "person") p.skin = { ...p.skin, exposure: Math.round((p.skin.exposure + add) * 100) / 100 };
+            p.layers = [...(p.layers ?? []), makeLayer("exposure", "Subject priority", { auto: "subject", mask: { ...allMask(), kind: "region", region: g }, params: { exposure: add, offset: 0, gamma: 1 } })];
           }
           decision.decisions.push({ id: "subject", value: add, reason: `main subject (${g}) only ${sep.toFixed(2)} EV above the scene → +${add} EV luminance priority`, inputs: { separationEV: Math.round(sep * 100) / 100, area: st.area } });
         } else decision.decisions.push({ id: "subject", value: 0, reason: `main subject (${g}) already stands out (${sep.toFixed(2)} EV above the scene) — not brightened`, inputs: {} });
@@ -431,6 +433,9 @@ export class Engine {
       if (autoDof && af.justified) p.enable = { ...p.enable, dof: true };
     }
     this.log(`auto focus: distance ${af.focus.toFixed(2)} at (${af.x.toFixed(2)}, ${af.y.toFixed(2)}) — ${af.justified ? "blur justified" : "no blur"}: ${af.reason}${autoDof && af.justified ? " — applied (Auto depth of field)" : ""}`);
+    // The automatic grade becomes layers (src/layers/auto.ts): visible, editable, removable.
+    Object.assign(decision.params, buildAutoLayers(decision.params));
+    Object.assign(params, buildAutoLayers(params));
     this.post({ type: "analysis", summary: this.summary(file.name), decisions: decision.decisions, auto: decision.params, params, dof: decision.dofSuggestion, exposureSuggestion: decision.exposureSuggestion, autoCurves: decision.autoCurves, cellCoverage: decision.cellCoverage });
     this.post({ type: "profile", stages: P.stages });
 
@@ -685,7 +690,7 @@ export class Engine {
     this.requestRender(!draft, draft);
   }
 
-  setView(view: 0 | 1 | 2 | 4 | 5, before = false, region = 0, range?: [number, number]) {
+  setView(view: 0 | 1 | 2 | 4 | 5 | 6, before = false, region = 0, range?: [number, number]) {
     this.view = view;
     this.region = region;
     this.viewRange = range;

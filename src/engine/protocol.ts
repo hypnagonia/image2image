@@ -57,7 +57,7 @@ export type ToWorker =
   | { type: "open"; file: File; resolution: "auto" | "full" | "half"; autoExposure: boolean; autoDof: boolean; upscale: UpscaleMode }
   | { type: "upscale-now" }
   | { type: "params"; params: Params; draft?: boolean }
-  | { type: "view"; view: 0 | 1 | 2 | 4 | 5; before?: boolean; region?: number; range?: [number, number] }
+  | { type: "view"; view: 0 | 1 | 2 | 4 | 5 | 6; before?: boolean; region?: number; range?: [number, number] }
   | { type: "focus"; action: "toggle"; x: number; y: number }
   | { type: "focus"; action: "move"; index: number; x: number; y: number }
   | { type: "focus"; action: "clear" }

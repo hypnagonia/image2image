@@ -10,6 +10,10 @@ import { createRegionsPanel } from "./ui/regionsPanel.ts";
 import { createLlmPanel } from "./ui/llmPanel.ts";
 import { normalizeProfile } from "./looks/profile.ts";
 import { createToneCurves } from "./ui/toneCurves.ts";
+import { History as EditHistory } from "./layers/history.ts";
+import { createLayersPanel } from "./ui/editor/layersPanel.ts";
+import { icon, type IconName } from "./ui/editor/icons.ts";
+import { AUTO_LAYERS_VERSION } from "./layers/auto.ts";
 import { histogramOf } from "./analysis/previewHist.ts";
 import { applyAutoCurves, type AutoCurveBands } from "./decision/autoCurves.ts";
 import { isFlat } from "./render/curves.ts";
@@ -41,7 +45,7 @@ const langSel = el("select", { "aria-label": t("app.language") },
   el("option", { value: "", text: t("lang.auto") }), ...LANGS.map((l) => el("option", { value: l, text: LANG_NAMES[l] })));
 langSel.value = storedLang() ?? "";
 langSel.onchange = () => setLang((langSel.value || undefined) as Lang | undefined);
-header.append(el("label", { class: "btn small lang", title: t("app.language") }, lang.toUpperCase(), langSel));
+const langPill = el("label", { class: "btn small lang", title: t("app.language") }, lang.toUpperCase(), langSel);
 const stage = el("div", { class: "stage" });
 const canvas = el("canvas");
 const badge = el("div", { class: "badge" });
@@ -57,50 +61,62 @@ const empty = el("div", { class: "empty" },
 stage.append(empty, canvas, rings, badge, progress, fileInput);
 canvas.style.display = "none";
 
+// The editor (src/ui/editor/layersPanel.ts): a dock with the layer stack (top first,
+// Develop last) and the properties of the selected layer. On phones a bottom sheet
+// whose grip toggles between compact and tall; on desktops the right-hand panel.
 const sheet = el("div", { class: "sheet" });
-const tabs = el("div", { class: "tabs" });
-sheet.append(tabs);
+const grip = el("button", { class: "grip", "aria-label": t("ui.more") });
+const dockEl = el("div", { class: "dock" });
+const propsEl = el("div", { class: "pane props" });
+sheet.append(grip, dockEl, propsEl);
+grip.onclick = () => sheet.classList.toggle("tall");
 app.append(header, stage, sheet);
 
 const panes: Record<string, HTMLElement> = {};
-function addPane(id: string, label: string) {
-  const b = el("button", { text: label });
-  b.onclick = () => showPane(id);
-  b.dataset.id = id;
-  tabs.append(b);
-  const p = el("div", { class: "pane" });
-  p.hidden = true;
-  sheet.append(p);
+function addPane(id: string, _label?: string) {
+  const p = el("div", { class: "pane-content" });
   panes[id] = p;
   return p;
 }
+// "More": information, export settings, upscaling, history and debugging, in one overlay.
+const MORE = ["auto", "history", "export", "upscale", "debug"] as const;
+const moreEl = el("div", { class: "more", hidden: "" });
+const moreTabs = el("div", { class: "seg" });
+const moreBody = el("div", { class: "pane" });
+const moreClose = el("button", { class: "btn small icon ghost", title: t("ui.close"), "aria-label": t("ui.close") });
+moreClose.append(icon("close"));
+moreClose.onclick = () => (moreEl.hidden = true);
+moreEl.onclick = (e) => { if (e.target === moreEl) moreEl.hidden = true; }; // tap outside closes
+moreEl.append(el("div", { class: "more-head" }, moreTabs, langPill, moreClose), moreBody);
+app.append(moreEl);
+let moreId: (typeof MORE)[number] = "auto";
 function showPane(id: string) {
-  if (id === "look") setTimeout(() => lookPanel.requestThumbs(), 0);
-  if (id === "llm") setTimeout(() => llmPanel.refresh(), 0);
-  // Deferred: the first call happens while the page is still being built.
-  setTimeout(() => {
-    regionsPanel.setVisible(id === "regions");
-    if (id !== "depth" && zoneHighlight !== undefined) setZoneHighlight(undefined);
-    if (id !== "depth" && bandShown) setBandShown(false);
-    // Picking focus points belongs to the Depth tab: leaving it ends the mode
-    // (taps on the photo go back to hold-to-compare and double-tap zoom).
-    if (id !== "depth" && focusMode) setFocusMode(false);
-  }, 0);
-  for (const [k, p] of Object.entries(panes)) p.hidden = k !== id;
-  for (const b of tabs.querySelectorAll("button")) b.classList.toggle("on", (b as HTMLElement).dataset.id === id);
+  if ((MORE as readonly string[]).includes(id)) {
+    moreId = id as (typeof MORE)[number];
+    moreEl.hidden = false;
+    moreTabs.replaceChildren(...MORE.map((k) => {
+      const b = el("button", { class: k === moreId ? "on" : "", text: k === "history" ? t("ui.history") : t(`tab.${k}`) });
+      b.onclick = () => showPane(k);
+      return b;
+    }));
+    if (moreId === "history") renderHistory();
+    moreBody.replaceChildren(panes[moreId]);
+  }
 }
-const adjustPane = addPane("adjust", t("tab.adjust"));
-// Hidden for now (not in the tab bar): the Look and Ask AI panels still exist, off-screen.
+const adjustPane = addPane("adjust");
+// Hidden for now: the Look and Ask AI panels still exist, off-screen.
 const lookPane = el("div");
-const regionsPane = addPane("regions", t("tab.regions"));
-const depthPane = addPane("depth", t("tab.depth"));
-const upscalePane = addPane("upscale", t("tab.upscale"));
+// Regions are now layer masks; the old panel stays off-screen.
+const regionsPane = el("div");
+const depthPane = addPane("depth");
+const upscalePane = addPane("upscale");
 const llmPane = el("div");
-const exportPane = addPane("export", t("tab.export"));
-const debugPane = addPane("debug", t("tab.debug"));
-// Info (what was measured and decided) comes last; editing starts in Adjust.
-const autoPane = addPane("auto", t("tab.auto"));
-showPane("adjust");
+const exportPane = addPane("export");
+const debugPane = addPane("debug");
+const autoPane = addPane("auto");
+const historyPane = addPane("history");
+/** Develop: the RAW development (today's Adjust controls) and depth of field. */
+const developEl = el("div", { class: "develop" }, adjustPane, el("div", { class: "group-title", text: t("tab.depth") }), depthPane);
 autoPane.append(el("p", { class: "muted", text: t("auto.hint") }));
 
 // --------------------------------------------------------------------------- state
@@ -124,12 +140,13 @@ let busy = false;
 
 (document.getElementById("open-btn") as HTMLButtonElement).onclick = () => fileInput.click();
 fileInput.onchange = () => { const f = fileInput.files?.[0]; if (f) openFile(f); fileInput.value = ""; };
-const openBtn = el("button", { class: "btn small", text: t("app.open") });
+const openBtn = el("button", { class: "btn small ghost", text: t("app.open") });
 openBtn.onclick = () => fileInput.click();
 header.insertBefore(openBtn, capsEl);
 
 // Fullscreen preview: only the photo (hold still compares with the camera rendering).
-const fsBtn = el("button", { class: "btn small fs-btn", text: "⤢", title: t("app.fullscreen"), "aria-label": t("app.fullscreen") });
+const fsBtn = el("button", { class: "btn small icon ghost fs-btn", title: t("app.fullscreen"), "aria-label": t("app.fullscreen") });
+fsBtn.append(icon("full"));
 const fsExit = el("button", { class: "fs-exit", text: "✕", "aria-label": t("app.exitFullscreen") });
 function setFullscreen(on: boolean) {
   document.body.classList.toggle("fs", on);
@@ -146,10 +163,22 @@ fsExit.onclick = (e) => { e.stopPropagation(); setFullscreen(false); };
 document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement) document.body.classList.remove("fs"); });
 header.insertBefore(fsBtn, capsEl);
 // Export in one tap, with the Export tab's current settings (format, colour, quality).
-const exportTop = el("button", { class: "btn small primary", text: t("app.export") });
+const exportTop = el("button", { class: "btn small primary push", text: t("app.export") });
 exportTop.onclick = () => exportBtn.click();
 exportTop.disabled = true; // until a photo is open
 header.insertBefore(exportTop, fsBtn);
+/** A small inline icon (stroke = current text colour). */
+const iconBtn = (name: IconName, label: string) => { const b = el("button", { class: "btn small icon ghost", title: label, "aria-label": label }); b.append(icon(name)); return b; };
+const undoBtn = iconBtn("undo", t("ui.undo"));
+const redoBtn = iconBtn("redo", t("ui.redo"));
+const moreBtn = iconBtn("more", t("ui.more"));
+undoBtn.onclick = () => { flushCommit(); stepHistory(history.undo()); };
+redoBtn.onclick = () => { flushCommit(); stepHistory(history.redo()); };
+moreBtn.onclick = () => (moreEl.hidden ? showPane(moreId) : (moreEl.hidden = true));
+header.insertBefore(undoBtn, exportTop);
+header.insertBefore(redoBtn, exportTop);
+header.append(moreBtn);
+undoBtn.disabled = redoBtn.disabled = true;
 stage.append(fsExit);
 
 let resolution: "auto" | "full" | "half" = "auto";
@@ -179,7 +208,15 @@ function offerSafeReopen(file: File, saved?: Params) {
 /** Parameters to re-apply once a restored photo has been analysed. */
 let pendingRestore: Params | undefined;
 
+/** The selected layer's mask shown on the photo (its index among the live layers), if any. */
+let maskIndex: number | undefined;
+/** What the photo shows when nothing temporary is on: the mask view, or the chosen view. */
+function baseView(): { type: "view"; view: 0 | 1 | 2 | 6; region?: number } {
+  return maskIndex !== undefined ? { type: "view", view: 6, region: maskIndex } : { type: "view", view: currentView };
+}
 function openFile(f: File, restore?: Params, upscaleOverride?: UpscaleMode) {
+  // A mask shown for the previous photo's layer must not colour the new one's first previews.
+  if (maskIndex !== undefined) { maskIndex = undefined; send(baseView()); }
   pendingRestore = restore;
   upscale = undefined;
   currentFile = f;
@@ -372,7 +409,7 @@ stage.addEventListener("pointerdown", (e) => {
     press.tap = { x, y };
     return;
   }
-  holdTimer = window.setTimeout(() => { holding = true; badge.textContent = t("view.before"); badge.classList.add("on"); send({ type: "view", view: currentView, before: true }); }, 180);
+  holdTimer = window.setTimeout(() => { holding = true; badge.textContent = t("view.before"); badge.classList.add("on"); send({ ...baseView(), before: true }); }, 180);
 });
 stage.addEventListener("pointermove", (e) => {
   if (!pointers.has(e.pointerId)) return;
@@ -431,7 +468,7 @@ function endDragRing(cancelled = false) {
 function clamp01(v: number) { return Math.min(1, Math.max(0, v)); }
 const endHold = () => {
   clearTimeout(holdTimer);
-  if (holding) { holding = false; badge.classList.remove("on"); send({ type: "view", view: currentView, before: false }); }
+  if (holding) { holding = false; badge.classList.remove("on"); send({ ...baseView(), before: false }); }
 };
 function pointerEnd(e: PointerEvent) {
   if (!pointers.delete(e.pointerId)) return;
@@ -479,14 +516,62 @@ let pushTimer = 0;
 let dragging = false;
 /** Something was changed during this drag (a draft went out): the release renders the final preview. */
 let draftSent = false;
-document.addEventListener("pointerdown", (e) => { if ((e.target as HTMLElement).matches?.('input[type="range"], .curve-editor')) { dragging = true; draftSent = false; } }, true);
+document.addEventListener("pointerdown", (e) => { if ((e.target as HTMLElement).matches?.('input[type="range"], .curve-editor, .hs-range')) { dragging = true; draftSent = false; } }, true);
 // A touch on a curve box that turned into a page scroll changed nothing: no render.
 const endDrag = () => { if (!dragging) return; dragging = false; if (draftSent) pushParams(); };
 document.addEventListener("pointerup", endDrag, true);
 document.addEventListener("pointercancel", endDrag, true);
 
+// History: one step per finished gesture (drafts while a control is held do not count).
+const history = new EditHistory();
+let nextLabel = "";
+let histTimer = 0;
+/** The label of the step waiting to be committed ("" = none): a drag's release keeps it. */
+let pendingLabel = "";
+function scheduleCommit(label: string) {
+  clearTimeout(histTimer);
+  pendingLabel = label;
+  histTimer = window.setTimeout(() => {
+    if (!params) return;
+    if (dragging) { scheduleCommit(label); return; }
+    pendingLabel = "";
+    history.commit(params, label);
+    updateUndo();
+  }, 450);
+}
+/** Commits a waiting step now (before undo / redo, so a quick edit is not lost). */
+function flushCommit() {
+  if (!pendingLabel || !params) return;
+  clearTimeout(histTimer);
+  history.commit(params, pendingLabel);
+  pendingLabel = "";
+}
+function updateUndo() {
+  undoBtn.disabled = !history.canUndo;
+  redoBtn.disabled = !history.canRedo;
+  if (!moreEl.hidden && moreId === "history") renderHistory();
+}
+function stepHistory(p: Params | undefined) {
+  if (!p) return;
+  clearTimeout(histTimer);
+  pendingLabel = "";
+  params = p;
+  syncControls();
+  send({ type: "params", params: structuredClone(params), draft: false });
+  rememberParams(params);
+  updateUndo();
+}
+function renderHistory() {
+  historyPane.replaceChildren(el("div", { class: "hist" }, ...history.list().map((h, i) => {
+    const b = el("button", { class: "hist-row" + (h.current ? " on" : ""), text: h.label });
+    b.onclick = () => { flushCommit(); stepHistory(history.go(i)); };
+    return b;
+  })));
+}
 function pushParams() {
   if (!params) return;
+  scheduleCommit(nextLabel || pendingLabel || t("hist.develop"));
+  nextLabel = "";
   clearTimeout(pushTimer);
   const draft = dragging;
   if (draft) draftSent = true;
@@ -605,32 +690,27 @@ const photoCurves = createToneCurves({
 // Strength of the automatic curves (photo, regions, skin, distance): rescales
 // every curve that is still the automatic one; curves edited by hand are kept.
 let autoCurveBands: AutoCurveBands | undefined;
-const acInput = el("input", { type: "range", min: "0", max: "1.5", step: "0.05" });
+const acInput = el("input", { type: "range", min: "0", max: "1", step: "0.01" });
 const acOut = el("output");
-const acRow = el("div", { class: "row" }, el("label", { text: t("adj.autoCurves") }), acInput, acOut);
+const acRow = el("div", { class: "row" }, el("label", { text: t("adj.autoStrength") }), acInput, acOut);
 function renderAutoCurves() {
   const k = params?.autoCurves ?? 1;
   acInput.value = String(k);
   acOut.textContent = `${Math.round(k * 100)}%`;
   acOut.classList.toggle("auto", Math.abs(k - 1) < 1e-6);
-  acRow.hidden = !autoCurveBands || (!autoCurveBands.photo && !Object.keys(autoCurveBands.regions).length && !Object.keys(autoCurveBands.depth).length);
+  acRow.hidden = !params?.layers.some((l) => l.auto);
 }
+// Auto strength: scales the opacity of every automatic layer (0…100 %).
 function setAutoCurves(k: number) {
-  if (!params || !autoCurveBands) return;
-  applyAutoCurves(params, autoCurveBands, k, params.autoCurves ?? 1);
-  lookPanel.invalidate();
-  syncControls();
-  regionsPanel.render();
+  if (!params) return;
+  params.autoCurves = k;
+  renderAutoCurves();
+  nextLabel = t("hist.autoStrength");
   pushParams();
 }
 acInput.oninput = () => setAutoCurves(parseFloat(acInput.value));
 acRow.querySelector("label")!.addEventListener("dblclick", () => setAutoCurves(1));
-adjustPane.append(
-  el("div", { class: "group-title", text: t("adj.curves") }),
-  acRow,
-  photoCurves.el,
-  el("p", { class: "muted", text: t("adj.curvesHint") }),
-);
+adjustPane.prepend(acRow);
 
 const resetBtn = el("button", { class: "btn small", text: t("adj.reset") });
 resetBtn.onclick = () => { if (autoParams) { params = structuredClone(autoParams); syncControls(); pushParams(); } };
@@ -660,6 +740,23 @@ const llmPanel = createLlmPanel(llmPane, {
 });
 
 // Regions: per-segment controls (src/ui/regionsPanel.ts)
+const layersPanel = createLayersPanel(dockEl, propsEl, {
+  params: () => params,
+  auto: () => autoParams,
+  coverage: () => summary?.coverage,
+  cellCoverage: () => cellCov,
+  histogram: (target, c) => histogramOf(histograms, target, c),
+  changed: (label) => { nextLabel = label; lookPanel.invalidate(); pushParams(); renderAutoCurves(); },
+  // View 6: the layer's mask on the photo (what it does not reach, tinted red).
+  showMask: (i) => { maskIndex = i; send(baseView()); },
+  develop: developEl,
+  leftDevelop: () => {
+    if (focusMode) setFocusMode(false);
+    if (zoneHighlight !== undefined) setZoneHighlight(undefined);
+    if (bandShown) setBandShown(false);
+  },
+});
+setTimeout(() => layersPanel.render(), 0); // after the whole page is built
 const regionsPanel = createRegionsPanel(regionsPane, {
   params: () => params,
   auto: () => autoParams,
@@ -820,12 +917,8 @@ function renderBands() {
   }));
   depthCurves.render();
 }
-depthPane.append(
-  el("div", { class: "group-title", text: t("dof.curves") }),
-  el("p", { class: "muted", text: t("dof.curvesHint") }),
-  bandChips,
-  depthCurves.el,
-);
+// Curves by distance are layers now (a Curves layer with a distance mask).
+void bandChips;
 renderBands();
 
 // Export
@@ -990,7 +1083,7 @@ function renderAuto() {
 
 function syncControls() {
   sliders.forEach(refreshSlider);
-  photoCurves.render();
+  layersPanel.render();
   renderLooks();
   renderStageToggles();
   if (params) { dofToggle.checked = params.enable.dof; }
@@ -1084,7 +1177,8 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       drawPreview(m);
       if (m.final && !holding) setProgress(undefined);
       if (m.final) markCompleted();
-      if (m.final && !panes.look.hidden) lookPanel.requestThumbs();
+      if (m.final) exportTop.disabled = exportBtn.disabled || !params;
+      void 0; // look thumbnails: the Look panel is hidden for now
       busy = false;
       break;
     case "analysis":
@@ -1103,6 +1197,18 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       lookPanel.invalidate();
       regionsPanel.render();
       if (pendingRestore) {
+        // Edits saved before layers existed: their curves and region colour would now be
+        // ignored; the automatic layers of today stand in for them.
+        if (!pendingRestore.layers) {
+          for (const k of ["curves", "regionCurves", "depthCurves", "cellCurves", "cells", "semantic", "skin", "distance"] as const) delete (pendingRestore as Partial<Params>)[k];
+        }
+        // Automatic layers saved by an older conversion: today's stand in for them (user layers stay).
+        else if ((pendingRestore.autoLayersVersion ?? 1) < AUTO_LAYERS_VERSION) {
+          // Today's automatic layers in today's order (ones the user deleted stay deleted), the user's own above.
+          const kept = new Set(pendingRestore.layers.filter((l) => l.auto).map((l) => l.auto));
+          pendingRestore.layers = [...params!.layers.filter((f) => f.auto && kept.has(f.auto)), ...pendingRestore.layers.filter((l) => !l.auto)];
+          pendingRestore.autoLayersVersion = AUTO_LAYERS_VERSION;
+        }
         // Same photo, same analysis: bring back the edits made before the reload.
         params = { ...params!, ...pendingRestore, enable: { ...params!.enable, ...pendingRestore.enable } };
         params.profile = normalizeProfile(params.profile);
@@ -1115,17 +1221,18 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
         syncControls();
         pushParams();
       }
+      history.reset(params!, t("hist.open"));
+      updateUndo();
       break;
     case "histograms":
       histograms = m.data;
-      photoCurves.refreshHistogram();
-      regionsPanel.refreshCurves();
-      depthCurves.refreshHistogram();
+      layersPanel.refreshHistogram();
       break;
     case "params":
       params = m.params;
       pendingAuto = undefined;
       syncControls();
+      scheduleCommit(t("hist.develop")); // focus points placed on the photo are a step too
       break;
     case "log":
       logLines.push(m.text);

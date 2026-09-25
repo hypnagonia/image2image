@@ -45,8 +45,7 @@ struct U {
   vig2: vec4<f32>,          // vignette highlight protection; distance band edges (near|middle, middle|far) and crossfade
   hdr: vec4<f32>,           // x: write the HDR gain (1) or not (0)
   dsem: array<vec4<f32>, 9>,  // by distance (near, middle, far), relative to the region: 3 vec4 each, laid out like sem
-  csem: array<vec4<f32>, 99>, // by region at a distance (cell = group·3 + band), relative, same layout
-  cm: vec4<u32>,            // x: cells 0–31 with settings; y: bit 0 cell 32, bits 1–3 distance bands with settings; z: cells 0–31 with curves; w: bit 0 cell 32 with curves
+  lay: vec4<u32>,           // adjustment layers (layers.wgsl): count, atlas rows; z: distance bands with detail settings (bits 0–2)
 }
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -59,7 +58,7 @@ struct U {
 @group(0) @binding(7) var tc: texture_2d<f32>;
 @group(0) @binding(8) var tm: texture_2d<f32>;
 @group(0) @binding(9) var tone_lut: texture_2d<f32>;   // 1-row LUTs: 2D textures sample the same and are universally supported
-@group(0) @binding(10) var curve_lut: texture_2d<f32>;
+@group(0) @binding(10) var atlas: texture_2d<f32>;   // adjustment layers' tables (curves, hue ranges), one row each
 @group(0) @binding(11) var look: texture_3d<f32>;
 @group(0) @binding(12) var lsamp: sampler;
 @group(0) @binding(13) var dst: texture_storage_2d<rgba16float, write>;
@@ -334,7 +333,7 @@ fn apply_profile(e_tech: vec3<f32>, g: array<f32, 12>, dist: f32, apple_skin: f3
 }
 
 const EN_DENOISE = 1u; const EN_WB = 2u; const EN_EXPOSURE = 4u; const EN_LOCAL = 8u;
-const EN_SEMANTIC = 16u; const EN_DEHAZE = 32u; const EN_SHARPEN = 64u;
+const EN_SEMANTIC = 16u; const EN_DEHAZE = 32u; const EN_SHARPEN = 64u; const EN_CURVES = 128u; // adjustment layers
 
 struct Maps { g: array<f32, 12>, dist: f32 }
 
@@ -424,7 +423,6 @@ fn sem_from(a0: vec4<f32>, a1: vec4<f32>, a2: vec4<f32>) -> Sem {
   return s;
 }
 fn dsem_at(b: u32) -> Sem { return sem_from(u.dsem[b * 3u], u.dsem[b * 3u + 1u], u.dsem[b * 3u + 2u]); }
-fn csem_at(c: u32) -> Sem { return sem_from(u.csem[c * 3u], u.csem[c * 3u + 1u], u.csem[c * 3u + 2u]); }
 /** A relative layer (distance or cell) at weight w: offsets add, multipliers multiply. */
 fn add_rel(s: Sem, r: Sem, w: f32) -> Sem {
   var o = s;
@@ -434,8 +432,6 @@ fn add_rel(s: Sem, r: Sem, w: f32) -> Sem {
   o.denoise *= 1.0 + w * (r.denoise - 1.0); o.dehaze *= 1.0 + w * (r.dehaze - 1.0);
   return o;
 }
-fn cell_on(c: u32) -> bool { return select((u.cm.y & 1u) != 0u, ((u.cm.x >> c) & 1u) != 0u, c < 32u); }
-fn cell_curve_on(c: u32) -> bool { return select((u.cm.w & 1u) != 0u, ((u.cm.z >> c) & 1u) != 0u, c < 32u); }
 
 /** Skin-colour likelihood of a linear P3 colour: OkLab hue ≈ 25…80°, moderate chroma, not black or white. */
 fn skin_colour(p3: vec3<f32>) -> f32 {
@@ -443,13 +439,6 @@ fn skin_colour(p3: vec3<f32>) -> f32 {
   let C = length(lab.yz);
   return exp(-pow(angdiff(atan2(lab.z, lab.y), 0.9) / 0.45, 2.0)) * smoothstep(0.012, 0.03, C) * (1.0 - smoothstep(0.17, 0.24, C))
     * smoothstep(0.12, 0.28, lab.x) * (1.0 - smoothstep(0.93, 0.99, lab.x));
-}
-/** User curves, row r of the curve table (0 = the photo's, 1…11 regions, 12 skin, 13…15 near/middle/far, 16 + cell): L, then R/G/B. */
-const CURVE_ROWS = 49.0; // + 33 cell rows from 16
-fn curve_row(e: vec3<f32>, r: u32) -> vec3<f32> {
-  let v = (f32(r) + 0.5) / CURVE_ROWS;
-  let l = vec3<f32>(textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.r, v), 0.0).r, textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.g, v), 0.0).r, textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.b, v), 0.0).r);
-  return vec3<f32>(textureSampleLevel(curve_lut, lsamp, vec2<f32>(l.r, v), 0.0).g, textureSampleLevel(curve_lut, lsamp, vec2<f32>(l.g, v), 0.0).b, textureSampleLevel(curve_lut, lsamp, vec2<f32>(l.b, v), 0.0).a);
 }
 
 fn tone_curve(ev: f32) -> f32 {
@@ -488,23 +477,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let uv = (vec2<f32>(px) + 0.5) / vec2<f32>(f32(W), f32(H));
   let apple_skin = textureSampleLevel(skin_tex, lsamp, uv, 0.0).r;
   let skin_w = clamp(max(apple_skin, clamp(maps.g[6], 0.0, 1.0) * skin_colour(REC2020_TO_P3 * (u.wb * c0) * k)), 0.0, 1.0);
-  // Layers on the regions' own settings: by distance, then by region at a distance
-  // (so "the far buildings" can differ from "the near buildings"), then skin.
+  // Detail by distance (relative, on the regions' own settings), then skin's.
   let bw0 = band_w(clamp(maps.dist, 0.0, 1.0));
-  if (((u.cm.y >> 1u) & 7u) != 0u) {
-    for (var b = 0u; b < 3u; b++) { if (((u.cm.y >> (1u + b)) & 1u) != 0u) { sem = add_rel(sem, dsem_at(b), bw0[b]); } }
-  }
-  if (u.cm.x != 0u || (u.cm.y & 1u) != 0u) {
-    var gc = maps.g;
-    for (var g = 0u; g < 11u; g++) {
-      let pg = clamp(gc[g], 0.0, 1.0);
-      if (pg < 1e-3) { continue; }
-      for (var b = 0u; b < 3u; b++) {
-        let c = g * 3u + b;
-        let w = pg * bw0[b];
-        if (w > 1e-3 && cell_on(c)) { sem = add_rel(sem, csem_at(c), w); }
-      }
-    }
+  if ((u.lay.z & 7u) != 0u) {
+    for (var b = 0u; b < 3u; b++) { if (((u.lay.z >> b) & 1u) != 0u) { sem = add_rel(sem, dsem_at(b), bw0[b]); } }
   }
   sem = mix_sem(sem, skin_sem(), skin_w);
   let flags = u.flags.x;
@@ -634,57 +610,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (mx > 1.0) { p3 = mix(p3, vec3<f32>(min(Yp, 1.0)), clamp((mx - 1.0) / max(mx - Yp, 1e-6), 0.0, 1.0)); }
   var e = srgb_oetf(clamp(p3, vec3<f32>(0.0), vec3<f32>(1.0)));
 
-  // --- curves ------------------------------------------------------------------------
-  // The photo's curves, then each region's blended by its soft mask (a pixel that
-  // is 70% sky gets 70% of the sky curve), then skin's by the skin weight.
-  let cb = u.flags.y;
-  if ((cb & 1u) != 0u) { e = curve_row(e, 0u); }
-  if ((cb & 0xFFEu) != 0u) {
-    var acc = vec3<f32>(0.0); var wsum = 0.0;
-    var gw = maps.g;
-    for (var g = 0u; g < 11u; g++) {
-      if ((cb & (2u << g)) == 0u) { continue; }
-      let w = clamp(gw[g], 0.0, 1.0);
-      if (w < 1e-3) { continue; }
-      acc += w * curve_row(e, g + 1u); wsum += w;
-    }
-    if (wsum > 1.0) { acc /= wsum; wsum = 1.0; }
-    e = acc + (1.0 - wsum) * e;
-  }
-  // Distance bands: soft thirds of this photo's own depth layers (weights sum to 1).
-  if ((cb & (7u << 13u)) != 0u) {
-    let f = u.vig2.w;
-    let wn = 1.0 - smoothstep(u.vig2.y - f, u.vig2.y + f, dist);
-    let wf = smoothstep(u.vig2.z - f, u.vig2.z + f, dist);
-    let wb = array<f32, 3>(wn, max(0.0, 1.0 - wn - wf), wf);
-    var acc = vec3<f32>(0.0);
-    for (var b = 0u; b < 3u; b++) {
-      let row = 13u + b;
-      var ob = e;
-      if ((cb & (1u << row)) != 0u && wb[b] > 1e-3) { ob = curve_row(e, row); }
-      acc += wb[b] * ob;
-    }
-    e = acc;
-  }
-  // Region at a distance ("the far buildings"): each cell's curve by mask × band weight.
-  if (u.cm.z != 0u || (u.cm.w & 1u) != 0u) {
-    let bw2 = band_w(dist);
-    var gk = maps.g;
-    var acc = vec3<f32>(0.0); var wsum = 0.0;
-    for (var g = 0u; g < 11u; g++) {
-      let pg = clamp(gk[g], 0.0, 1.0);
-      if (pg < 1e-3) { continue; }
-      for (var b = 0u; b < 3u; b++) {
-        let c = g * 3u + b;
-        let w = pg * bw2[b];
-        if (w > 1e-3 && cell_curve_on(c)) { acc += w * curve_row(e, 16u + c); wsum += w; }
-      }
-    }
-    if (wsum > 1.0) { acc /= wsum; wsum = 1.0; }
-    e = acc + (1.0 - wsum) * e;
-  }
-  // Skin last: faces are never re-shaped by distance.
-  if ((cb & (1u << 12u)) != 0u && skin_w > 1e-3) { e = mix(e, curve_row(e, 12u), skin_w); }
+  // --- adjustment layers (layers.wgsl): the automatic grade and the user's own ---------------
+  // Where the tone curves always ran: before the global colour stage and clean whites.
+  // Which layers are live (module switches, auto strength) is decided when packing (src/layers/gpu.ts).
+  if (u.lay.x > 0u) { e = apply_layers(e, maps.g, dist, skin_w); }
 
   // --- colour: saturation / vibrance / per-region hue & saturation (OkLab) ----------------
   var lin = P3_TO_SRGB * srgb_eotf(e);
@@ -728,6 +657,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let mno = min(outp.r, min(outp.g, outp.b));
   if (mno < 0.0) { outp = mix(outp, vec3<f32>(Yo), clamp(-mno / max(Yo - mno, 1e-6), 0.0, 1.0)); }
   e = srgb_oetf(clamp(outp, vec3<f32>(0.0), vec3<f32>(1.0)));
+
+  // View 6: a layer's mask (u.color.z = its index among the live layers): what the
+  // layer does not reach is tinted red, as in Photoshop's quick-mask overlay.
+  if (u.flags.w == 6u && u.lay.x > 0u) {
+    let Lm = layers[min(u32(u.color.z), u.lay.x - 1u)];
+    let mw = layer_mask(Lm, maps.g, dist, skin_w, e);
+    e = mix(mix(e, vec3<f32>(1.0, 0.12, 0.12), 0.55), e, mw);
+  }
 
   // --- creative layer --------------------------------------------------------------------
   if (prof.f.x > 0.5) {

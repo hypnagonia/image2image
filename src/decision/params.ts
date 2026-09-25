@@ -6,6 +6,7 @@
  */
 import { GROUPS, type Group } from "../neural/scene.ts";
 import type { LookProfile } from "../looks/profile.ts";
+import type { Layer } from "../layers/model.ts";
 import { BUILTIN_PROFILES, DEFAULT_PROFILE_ID } from "../looks/builtin.ts";
 
 export interface CurvePoint { x: number; y: number }
@@ -103,6 +104,13 @@ export interface Params {
    * 0 … 3; 0 = SDR only). The SDR rendering does not depend on it.
    */
   hdr: { headroom: number };
+  /**
+   * Adjustment layers over the developed image (src/layers), bottom first: the
+   * automatic grade (generated from the decisions, `auto` set) and the user's own.
+   */
+  layers: Layer[];
+  /** Version of the automatic layers (raised when their conversion changes; older saved ones are replaced). */
+  autoLayersVersion?: number;
   /** Strength of the automatic curves (0 … 1.5; 1 = as measured, 0 = none). */
   autoCurves: number;
   /** Where near ends and far begins, in refined distance (0 near … 1 far): this photo's own depth layers. */
@@ -193,6 +201,7 @@ export function defaultParams(): Params {
     depthCurves: {},
     depthBands: [0.33, 0.66],
     autoCurves: 1,
+    layers: [],
     hdr: { headroom: 0 },
     depth: { near: 1, far: 1 },
     vignette: { amount: 0, midpoint: 0.5, feather: 0.6, roundness: 0.3, highlights: 0.5 },
