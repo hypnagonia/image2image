@@ -29,7 +29,7 @@ import { downsample, guideSize, refine, releaseRefined, type RefinedMaps } from 
 import { blurReport, lumPercentiles, measureBlocks, measureRegions, noiseProfile } from "../analysis/analysis.ts";
 import type { AnalysisReport } from "../analysis/types.ts";
 import { decide, type DecisionResult } from "../decision/engine.ts";
-import { autoFocus } from "../decision/focus.ts";
+import { autoFocus, objectDepthRange } from "../decision/focus.ts";
 import { depthZones } from "../decision/zones.ts";
 import { cellCoverage, previewHistograms } from "../analysis/previewHist.ts";
 import { applyAutoCurves, autoCurves } from "../decision/autoCurves.ts";
@@ -425,7 +425,7 @@ export class Engine {
     const dofNote = decision.decisions.find((d) => d.id === "dof");
     if (dofNote) { dofNote.value = af.justified ? "justified" : "not justified"; dofNote.reason = `auto focus at distance ${af.focus.toFixed(2)}: ${af.reason}`; }
     for (const p of [decision.params, params]) {
-      p.dof = { ...p.dof, focus: af.focus, strength: DEFAULT_DOF_STRENGTH, points: [] };
+      p.dof = { ...p.dof, focus: af.focus, focusSpan: af.span, strength: DEFAULT_DOF_STRENGTH, points: [] };
       if (autoDof && af.justified) p.enable = { ...p.enable, dof: true };
     }
     this.log(`auto focus: distance ${af.focus.toFixed(2)} at (${af.x.toFixed(2)}, ${af.y.toFixed(2)}) — ${af.justified ? "blur justified" : "no blur"}: ${af.reason}${autoDof && af.justified ? " — applied (Auto depth of field)" : ""}`);
@@ -754,6 +754,21 @@ export class Engine {
     }
     v.sort((a, b) => a - b);
     return v[v.length >> 1];
+  }
+
+  /**
+   * The depth range of the object under a tap: grown from the tap across the
+   * refined depth map through smooth depth changes (≤ 0.02 between neighbours)
+   * within the same semantic region, so the whole object — not just the tapped
+   * spot — stays sharp. Continuous surfaces (ground, floor, sky, terrain, or
+   * anything over ≈ 35 % of the frame) keep a thin slice: they run from near to
+   * far, and "the object" would switch the blur off.
+   */
+  focusRangeAt(x: number, y: number): { dist: number; range: [number, number] } | undefined {
+    const s = this.s, d = s?.distCPU;
+    const d0 = this.focusAt(x, y);
+    if (!s || !d || d0 === undefined) return undefined;
+    return { dist: d0, range: objectDepthRange(d, s.scene.seg, x, y, d0) };
   }
 
   importLook(name: string, text: string) {

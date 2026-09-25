@@ -51,9 +51,9 @@ async function handle(m: ToWorker) {
       } else if (m.action === "move") {
         // Dragging a ring: the point takes the distance at its new place. With no
         // points yet, the ring dragged is the automatic one, which becomes a point.
-        const d = engine.focusAt(m.x, m.y);
-        if (d === undefined) break;
-        const moved = { x: m.x, y: m.y, dist: d };
+        const f = engine.focusRangeAt(m.x, m.y);
+        if (!f) break;
+        const moved = { x: m.x, y: m.y, dist: f.dist, range: f.range };
         if (m.index >= 0 && m.index < points.length) points[m.index] = moved;
         else if (!points.length) points.push(moved);
         else break;
@@ -62,17 +62,18 @@ async function handle(m: ToWorker) {
         const hit = points.findIndex((p) => Math.hypot(p.x - m.x, p.y - m.y) < 0.045);
         if (hit >= 0) points.splice(hit, 1);
         else {
-          const d = engine.focusAt(m.x, m.y);
-          if (d === undefined) break;
+          const f = engine.focusRangeAt(m.x, m.y);
+          if (!f) break;
           // The automatic subject stays: the first manual point is added to it
           // instead of replacing it (and it can be moved or removed like any other).
           // Only when depth of field is already on: otherwise the automatic ring was
           // never shown, and a tap should make just that one point sharp. Its
           // distance is the current focus (the user may have moved the slider).
           if (!points.length && s.params.enable.dof && a.x !== undefined && a.y !== undefined && Math.hypot(a.x - m.x, a.y - m.y) >= 0.045) {
-            points.push({ x: a.x, y: a.y, dist: s.params.dof.focus, auto: true });
+            const fz = s.params.dof.focus, sp = s.params.dof.focusSpan ?? [0, 0];
+            points.push({ x: a.x, y: a.y, dist: fz, auto: true, range: [Math.max(0, fz - sp[0]), Math.min(1, fz + sp[1])] });
           }
-          points.push({ x: m.x, y: m.y, dist: d });
+          points.push({ x: m.x, y: m.y, dist: f.dist, range: f.range });
           if (points.length > MAX_FOCUS_POINTS) points.shift();
         }
       }

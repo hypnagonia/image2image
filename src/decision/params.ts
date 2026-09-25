@@ -34,6 +34,11 @@ export interface FocusPoint {
   x: number; y: number; dist: number;
   /** The automatic subject, kept as a point once manual points are added (until it is moved). */
   auto?: boolean;
+  /**
+   * The depth range of the object under the point (refined distance, lo…hi): all of
+   * it stays sharp — a person turned three-quarters, a long table, a car at an angle.
+   */
+  range?: [number, number];
 }
 
 export const MAX_FOCUS_POINTS = 8;
@@ -150,6 +155,8 @@ export interface Params {
    */
   dof: {
     focus: number; strength: number; points: FocusPoint[]; auto: boolean;
+    /** Depth extent of the automatic subject around `focus` (below, above): all of it stays sharp. */
+    focusSpan?: [number, number];
     /** "focus": blur from the focus distance / points. "zones": blur set per depth zone by hand. */
     mode?: "focus" | "zones";
     /** Blur 0..1 for each depth zone (near → far). */

@@ -399,11 +399,14 @@ export class Renderer {
         w = nw; h = nh;
       }
       const pts = p.dof.points.slice(0, 8);
-      const foci = Array.from({ length: 8 }, (_, i) => pts[i]?.dist ?? 0);
+      // Each point keeps its object's whole depth range sharp (a flat spot: just its distance).
+      const foci = Array.from({ length: 8 }, (_, i) => pts[i]?.range?.[0] ?? pts[i]?.dist ?? 0);
+      const fociHi = Array.from({ length: 8 }, (_, i) => pts[i]?.range?.[1] ?? pts[i]?.dist ?? 0);
+      const span = p.dof.focusSpan ?? [0, 0];
       const zonesOn = p.dof.mode === "zones" && p.dof.zones?.length === 5 && p.dof.zoneBounds?.length === 4;
       const zc = zonesOn ? [...p.dof.zoneBounds!, 0, 0, 0, 0] : new Array(8).fill(0);
       const zv = zonesOn ? [...p.dof.zones!, 0, 0, 0] : new Array(8).fill(0);
-      const u = gpu.uniform(new Uniforms(36).u32(W, H, 0, 0).f32(p.dof.focus, maxRadius, 0.6, 0).f32(pts.length, zonesOn ? 1 : 0, levels, 0).f32(...foci).f32(...zc).f32(...zv).bytes());
+      const u = gpu.uniform(new Uniforms(44).u32(W, H, 0, 0).f32(p.dof.focus, maxRadius, 0.6, span[0]).f32(pts.length, zonesOn ? 1 : 0, levels, span[1]).f32(...foci).f32(...zc).f32(...zv).f32(...fociHi).bytes());
       temp.push(u);
       gpu.dispatch(enc, gpu.pipeline("render.dof", dofWgsl), [u, mipTex.createView(), distT.createView(), undefined, this.sampler, out.createView()], Math.ceil(W / 8), Math.ceil(H / 8));
     });

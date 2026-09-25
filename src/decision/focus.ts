@@ -39,6 +39,8 @@ export interface AutoFocus {
   reason: string;
   /** What the subject is, when it was found as an object. */
   kind?: "person" | "animal" | "vehicle" | "building" | "object";
+  /** Depth extent of the subject around `focus` (below, above): all of it stays sharp. */
+  span?: [number, number];
 }
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
@@ -118,7 +120,7 @@ export function autoFocus(
       : behindFrac <= 0.3
         ? `only ${(behindFrac * 100).toFixed(0)}% of the frame lies clearly behind the subject — not enough depth separation`
         : `subject covers ${(subjectFrac * 100).toFixed(0)}% of the frame — not a separable subject`);
-  return { focus: Math.round(focus * 1000) / 1000, x: (bx + 0.5) / w, y: (by + 0.5) / h, justified, strength: Math.round(strength * 100) / 100, reason, kind: obj?.kind };
+  return { focus: Math.round(focus * 1000) / 1000, x: (bx + 0.5) / w, y: (by + 0.5) / h, justified, strength: Math.round(strength * 100) / 100, reason, kind: obj?.kind, span: obj?.lo !== undefined && obj.hi !== undefined ? [Math.max(0, Math.round((focus - obj.lo) * 1000) / 1000), Math.max(0, Math.round((obj.hi - focus) * 1000) / 1000)] : undefined };
 }
 
 type SegAt = (x: number, y: number, off: number) => number;
@@ -137,7 +139,7 @@ function composition(u: number, v: number, thirds: number[][]): number {
   return 0.25 + Math.max(centre, 0.85 * third);
 }
 
-export interface Subject { kind: Kind; x: number; y: number; focus: number; area: number; score: number }
+export interface Subject { kind: Kind; x: number; y: number; focus: number; area: number; score: number; lo?: number; hi?: number }
 
 /**
  * Candidate objects → the one the photograph is about (see the header).
@@ -210,6 +212,12 @@ export function findSubject(
   if (!best || best.score <= 0) return undefined;
   // 3. focus point and distance
   const pix = bestPix;
+  // The subject's own depth extent (3rd…97th percentile): all of it stays sharp.
+  {
+    const ds = pix.map((i) => data[i]).sort((a, b) => a - b);
+    best.lo = ds[Math.floor(ds.length * 0.03)];
+    best.hi = ds[Math.floor(ds.length * 0.97)];
+  }
   if (best.kind === "person" || best.kind === "animal") {
     // The head: the top 30% of the region's rows; focus on the upper half's median distance.
     let y0 = h, y1 = 0;
@@ -294,4 +302,51 @@ function pixelSubject(
   vals.sort((a, b) => a - b);
   // The near part of the neighbourhood: the subject's surface, not the gaps behind it.
   return { bx, by, focus: vals[Math.floor(vals.length * 0.3)] ?? 0.3 };
+}
+
+/**
+ * The depth range of the object under a tap at (x, y) (0…1): grown from the tap
+ * across the refined depth map through smooth depth changes (≤ 0.02 between
+ * neighbours) within the same semantic region, so the whole object — not just
+ * the tapped spot — stays sharp. Continuous surfaces (ground, floor, sky,
+ * terrain, or anything over ≈ 35 % of the frame) keep a thin slice around d0:
+ * they run from near to far, and "the object" would switch the blur off.
+ */
+export function objectDepthRange(
+  dist: { w: number; h: number; data: Float32Array },
+  seg: { width: number; height: number; probs: Float32Array },
+  x: number, y: number, d0: number,
+): [number, number] {
+  const { w, h, data } = dist;
+  const plane = seg.width * seg.height;
+  const cls = (i: number) => {
+    const px = i % w, py = (i - px) / w;
+    const k = Math.min(seg.height - 1, Math.floor((py / h) * seg.height)) * seg.width + Math.min(seg.width - 1, Math.floor((px / w) * seg.width));
+    let best = 0, bv = -1;
+    for (let g = 0; g < GROUPS.length; g++) { const v = seg.probs[g * plane + k]; if (v > bv) { bv = v; best = g; } }
+    return best;
+  };
+  const thin: [number, number] = [Math.max(0, d0 - 0.02), Math.min(1, d0 + 0.02)];
+  const start = Math.round(y * (h - 1)) * w + Math.round(x * (w - 1));
+  const c0 = cls(start);
+  if (["sky", "ground", "terrain"].includes(GROUPS[c0])) return thin;
+  const limit = w * h * 0.35;
+  const seen = new Uint8Array(w * h);
+  const stack = [start];
+  seen[start] = 1;
+  const vals: number[] = [];
+  while (stack.length && vals.length < limit) {
+    const i = stack.pop()!;
+    vals.push(data[i]);
+    const px = i % w, py = (i - px) / w;
+    for (const j of [px > 0 ? i - 1 : -1, px < w - 1 ? i + 1 : -1, py > 0 ? i - w : -1, py < h - 1 ? i + w : -1]) {
+      if (j < 0 || seen[j]) continue;
+      seen[j] = 1;
+      if (Math.abs(data[j] - data[i]) < 0.02 && Math.abs(data[j] - d0) < 0.35 && cls(j) === c0) stack.push(j);
+    }
+  }
+  if (vals.length >= limit || vals.length < 20) return thin;
+  vals.sort((a, b) => a - b);
+  const lo = Math.min(d0, vals[Math.floor(vals.length * 0.03)]), hi = Math.max(d0, vals[Math.floor(vals.length * 0.97)]);
+  return [Math.round(lo * 1000) / 1000, Math.round(hi * 1000) / 1000];
 }

@@ -8,11 +8,12 @@
 
 struct U {
   size: vec4<u32>,     // W, H, guide w, guide h
-  d: vec4<f32>,        // focus distance, max radius px, near scale, gain k
-  f: vec4<f32>,        // focus count, _, mip count, _
-  foci: array<vec4<f32>, 2>, // up to 8 focal distances (x,y,z,w of each)
+  d: vec4<f32>,        // focus distance, max radius px, near scale, automatic subject's depth extent below the focus
+  f: vec4<f32>,        // focus count, zone mode, mip count, automatic subject's depth extent above the focus
+  foci: array<vec4<f32>, 2>, // up to 8 focus points: near end of each object's depth range
   zc: array<vec4<f32>, 2>,   // 4 inner depth-zone boundaries (zc[0]) — zone mode when f.y = 1
   zv: array<vec4<f32>, 2>,   // blur 0..1 per zone
+  fociHi: array<vec4<f32>, 2>, // … and the far end (a point on a flat spot: both the same)
 }
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var src: texture_2d<f32>;       // mip chain of the sharpened image (linear P3)
@@ -25,11 +26,13 @@ fn dist_at(px: vec2<f32>) -> f32 {
   return textureLoad(distt, clamp(vec2<i32>(px), vec2<i32>(0), m), 0).r;
 }
 
-fn coc1(d: f32, f: f32) -> f32 {
-  // The ramp spans the depth range left behind the focus (distance is linear in
-  // disparity, so a near foreground squeezes a subject and its room toward 1).
-  let behind = smoothstep(0.0, clamp((1.0 - f) * 0.9, 0.12, 0.55), d - f);
-  let front = u.d.z * smoothstep(0.0, 0.4, f - d);
+fn coc1(d: f32, lo: f32, hi: f32) -> f32 {
+  // Everything within the object's own depth range [lo, hi] is sharp; blur grows
+  // behind its far end and in front of its near end. The ramp spans the depth
+  // range left behind (distance is linear in disparity, so a near foreground
+  // squeezes a subject and its room toward 1).
+  let behind = smoothstep(0.0, clamp((1.0 - hi) * 0.9, 0.12, 0.55), d - hi);
+  let front = u.d.z * smoothstep(0.0, 0.4, lo - d);
   return max(behind, front);
 }
 
@@ -49,10 +52,10 @@ fn zone_blur(d: f32) -> f32 {
 fn coc(d: f32) -> f32 {
   if (u.f.y > 0.5) { return u.d.y * zone_blur(d); }
   let n = u32(u.f.x);
-  if (n == 0u) { return u.d.y * coc1(d, u.d.x); }
+  if (n == 0u) { return u.d.y * coc1(d, u.d.x - u.d.w, u.d.x + u.f.w); }
   var c = 1.0;
   for (var i = 0u; i < n; i++) {
-    c = min(c, coc1(d, u.foci[i / 4u][i % 4u]));
+    c = min(c, coc1(d, u.foci[i / 4u][i % 4u], u.fociHi[i / 4u][i % 4u]));
   }
   return u.d.y * c;
 }

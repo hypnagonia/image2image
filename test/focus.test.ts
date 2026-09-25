@@ -59,3 +59,18 @@ test("an unlabelled object standing in front of its background is found by depth
   assert.ok(f.x > 0.4 && f.x < 0.6 && f.y > 0.35 && f.y < 0.65, `(${f.x}, ${f.y})`);
   assert.match(f.reason, /object/);
 });
+
+import { objectDepthRange } from "../src/decision/focus.ts";
+test("a tap covers the whole depth range of the object, not just the tapped spot", () => {
+  // A car at an angle: its distance runs 0.30 → 0.50 across it; ground behind at 0.9.
+  const probs = new Float32Array(NG * W * H), data = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, inCar = x >= 20 && x < 70 && y >= 30 && y < 55;
+    probs[GROUPS.indexOf(inCar ? "vehicle" : "ground") * W * H + i] = 1;
+    data[i] = inCar ? 0.3 + 0.2 * ((x - 20) / 50) : 0.9;
+  }
+  const [lo, hi] = objectDepthRange({ w: W, h: H, data }, { width: W, height: H, probs }, 25 / W, 40 / H, 0.31);
+  assert.ok(lo <= 0.31 && hi >= 0.48, `range ${lo}–${hi}`);
+  const g = objectDepthRange({ w: W, h: H, data }, { width: W, height: H, probs }, 5 / W, 5 / H, 0.9);
+  assert.ok(g[1] - g[0] <= 0.041, "ground: a thin slice");
+});
