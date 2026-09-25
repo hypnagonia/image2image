@@ -184,10 +184,13 @@ export class Renderer {
     const gpu = this.gpu;
     // Tone uniforms followed by the target rectangle (tgt: offset x/y, width, height).
     const base = this.toneUniforms(p, src, maps, o, lutSize, lutOn);
-    const buf = new ArrayBuffer(base.byteLength + 32);
+    // Tone uniforms, then tgt, hl, vig (amount, midpoint, feather, roundness), vig2 (highlights, _, _, _).
+    const buf = new ArrayBuffer(base.byteLength + 64);
     new Uint8Array(buf).set(new Uint8Array(base));
     new Int32Array(buf, base.byteLength, 4).set([0, ty0, src.width, th]);
     new Float32Array(buf, base.byteLength + 16, 4).set([o.zoneRange?.[0] ?? 0, o.zoneRange?.[1] ?? 1, 0, 0]);
+    const v = p.vignette ?? { amount: 0, midpoint: 0.5, feather: 0.6, roundness: 0.3, highlights: 0.5 };
+    new Float32Array(buf, base.byteLength + 32, 8).set([v.amount, v.midpoint, v.feather, v.roundness, v.highlights, 0, 0, 0]);
     const u = gpu.uniform(buf, "tone.u");
     const profU = gpu.uniform(profileUniforms(p.profile, profileOn, lutOn, lutSize), "profile.u");
     temp.push(u, profU);

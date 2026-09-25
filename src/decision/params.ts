@@ -79,6 +79,15 @@ export interface Params {
   semantic: Record<Group, SemanticAdjust>;
   depth: { near: number; far: number };
   /**
+   * Vignette, applied in linear light as an exposure falloff (like a lens):
+   * amount −1 … 1 (negative darkens the edges, ≈ −2 EV in the corners at −1;
+   * positive lightens, up to +1 EV), midpoint 0 … 1 (where the falloff starts),
+   * feather 0 … 1 (how gradual), roundness 0 … 1 (0 follows the frame's
+   * aspect, 1 is a circle), highlights 0 … 1 (bright light sources keep their
+   * brightness when darkening).
+   */
+  vignette: { amount: number; midpoint: number; feather: number; roundness: number; highlights: number };
+  /**
    * Depth of field. With no `points`, `focus` (automatic) is the single focal
    * distance. With points, a pixel stays sharp if it is near the distance of
    * *any* point — several subjects at different distances can all be sharp,
@@ -116,6 +125,7 @@ export function defaultParams(): Params {
     dehaze: { strength: 0, light: [1, 1, 1], beta: 1, minT: 0.45 },
     semantic: Object.fromEntries(GROUPS.map((g) => [g, neutralSemantic()])) as Record<Group, SemanticAdjust>,
     depth: { near: 1, far: 1 },
+    vignette: { amount: 0, midpoint: 0.5, feather: 0.6, roundness: 0.3, highlights: 0.5 },
     dof: { focus: 0.3, strength: 0, points: [], auto: false },
   };
 }

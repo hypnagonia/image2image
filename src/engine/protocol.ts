@@ -60,6 +60,7 @@ export type ToWorker =
   | { type: "focus"; action: "toggle"; x: number; y: number }
   | { type: "focus"; action: "move"; index: number; x: number; y: number }
   | { type: "focus"; action: "clear" }
+  | { type: "preview-zoom"; long: number }
   | { type: "export"; format: ExportFormat; quality: number; space: "srgb" | "p3"; stripRows?: number }
   | { type: "importLook"; name: string; text: string }
   | { type: "restore"; scunet: boolean; nafnet: boolean }

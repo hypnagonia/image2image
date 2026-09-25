@@ -43,7 +43,8 @@ DNG/ProRAW/HEIC → decode (LibRaw / native / libheif)
 → SCUNet (tiles with measured visible noise) → NAFNet (tiles measured as blurred)
 → image quality analysis → optional 2× upscale (Swin2SR; the new working image)
 → render: denoise blend → white balance → depth-aware dehaze → exposure
-  → local tone mapping → tone curve (display rendering) → user curves
+  → local tone mapping → vignette (linear-light exposure falloff)
+  → tone curve (display rendering) → user curves
   → technical colour (vibrance/saturation, semantic hue fixes)
   → look profile (tone curve → RGB curves → HSL → saturation response
     → colour balance → 3D LUT → semantic rules → depth curves → intensity blend)
@@ -70,7 +71,7 @@ DNG/ProRAW/HEIC → decode (LibRaw / native / libheif)
    `I = J·t + A·(1−t)` holds for scene-linear radiance only.
 5. **3D LUT inside the look profile** (creative layer), never as part of the
    technical rendering.
-6. **No crop, grain, halation, bloom or vignette stages exist** — the upscale
+6. **No crop, grain, halation or bloom stages exist** — the upscale
    stage sits where it would in a film pipeline: after denoise/restoration and
    before everything creative. Because every render stage (tone, look,
    semantic, dehaze, sharpening, depth of field, export) runs per pixel on the
@@ -303,8 +304,8 @@ Priority: **skin → semantic objects → global palette → depth.**
 * Measured on the maple landscape with "Teal & Warm": mean change 2/255, max
   13/255 against the same look without refinement, concentrated in the
   background; the difference map has no mask edges except the real horizon.
-* Not applicable here: the app has no halation, bloom, grain or vignette
-  stages, so no optical effect is depth-modulated.
+* Not applicable here: the app has no halation, bloom or grain stages, and
+  the vignette is purely radial, so no optical effect is depth-modulated.
 
 * **Creative colour order.** The 3D LUT is the *base look*: it runs right after
   the profile's tone and RGB curves, and everything after it shapes that

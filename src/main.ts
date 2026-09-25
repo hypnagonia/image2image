@@ -109,7 +109,9 @@ let looks: Array<{ id: string; name: string; description: string }> = [];
 let dofInfo: { justified: boolean; focus: number; strength: number; reason: string; x?: number; y?: number; zones?: Array<{ share: number; label: string; lo: number; hi: number }> } | undefined;
 let focusMode = false;
 /** A ring being dragged: which one, where it started, where it is now. */
-let drag: { index: number; x0: number; y0: number; x: number; y: number; moved: boolean } | undefined;
+let drag: { index: number; x0: number; y0: number; x: number; y: number; moved: boolean; ox: number; oy: number } | undefined;
+/** Where the lone automatic ring was dropped, until the engine's reply makes it a point. */
+let pendingAuto: { x: number; y: number } | undefined;
 let busy = false;
 
 (document.getElementById("open-btn") as HTMLButtonElement).onclick = () => fileInput.click();
@@ -167,6 +169,14 @@ function openFile(f: File, restore?: Params, upscaleOverride?: UpscaleMode) {
   pendingRestore = restore;
   upscale = undefined;
   currentFile = f;
+  // A new photo starts unzoomed, with the normal preview resolution.
+  zoom = 1; panX = 0; panY = 0;
+  canvas.style.transform = "";
+  clearTimeout(zoomTimer);
+  pendingAuto = undefined;
+  // Through the engine's queue, ahead of the open: a zoom resize still queued
+  // there must not leave the new photo at the zoomed size.
+  if (sentPreviewLong) { sentPreviewLong = 0; send({ type: "preview-zoom", long: basePreviewLong() }); }
   renderUpscale();
   if (!restore) void rememberPhoto(f);
   markInflight();
@@ -233,8 +243,14 @@ function imageRect() {
  */
 function shownFocusPoints(): Array<{ x: number; y: number; auto?: boolean }> {
   if (!focusMode || !params?.enable.dof) return [];
-  if (params.dof.points.length) return params.dof.points;
-  if (drag?.moved) return [{ x: drag.x, y: drag.y, auto: true }];
+  // The ring being dragged is drawn where the finger is; params stay untouched
+  // until the engine has measured the new place (a reply may arrive mid-drag).
+  const d = drag?.moved ? drag : undefined;
+  if (params.dof.points.length) {
+    return params.dof.points.map((q, i) => (d && i === d.index ? { x: d.x, y: d.y } : q));
+  }
+  if (d) return [{ x: d.x, y: d.y, auto: true }];
+  if (pendingAuto) return [{ ...pendingAuto, auto: true }];
   return dofInfo?.x !== undefined && dofInfo.y !== undefined ? [{ x: dofInfo.x, y: dofInfo.y, auto: true }] : [];
 }
 
@@ -250,49 +266,152 @@ function renderRings() {
     return d;
   }));
 }
-window.addEventListener("resize", renderRings);
+window.addEventListener("resize", () => applyZoom());
+
+// Zoom and pan: pinch (or wheel / trackpad) zooms around the fingers, one finger
+// pans a zoomed photo, double-tap zooms in and back out. The canvas is only
+// transformed with CSS; once the gesture settles the preview is re-rendered at
+// a higher resolution so the zoomed view is real detail, not enlarged pixels.
+let zoom = 1, panX = 0, panY = 0;
+const MAX_ZOOM = 8;
+const pointers = new Map<number, { x: number; y: number }>();
+let pinch: { d0: number; z0: number; cx0: number; cy0: number; px0: number; py0: number } | undefined;
+/** The current one-finger gesture: where it started, whether it became a pan. */
+let press: { x0: number; y0: number; px0: number; py0: number; moved: boolean; tap?: { x: number; y: number } } | undefined;
+let lastTap = { t: 0, x: 0, y: 0 };
+let zoomTimer = 0;
+let sentPreviewLong = 0;
+const basePreviewLong = () => Math.max(window.innerWidth, window.innerHeight) * Math.min(2, window.devicePixelRatio || 1);
+
+function applyZoom() {
+  const st = stage.getBoundingClientRect();
+  // Photo size on screen at zoom 1 (object-fit: contain).
+  const k = Math.min(st.width / (canvas.width || 1), st.height / (canvas.height || 1));
+  const maxX = Math.max(0, (canvas.width * k * zoom - st.width) / 2), maxY = Math.max(0, (canvas.height * k * zoom - st.height) / 2);
+  panX = Math.min(maxX, Math.max(-maxX, panX));
+  panY = Math.min(maxY, Math.max(-maxY, panY));
+  canvas.style.transform = zoom === 1 ? "" : `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  renderRings();
+  clearTimeout(zoomTimer);
+  zoomTimer = window.setTimeout(() => {
+    const cap = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || navigator.maxTouchPoints > 1 ? 2560 : 4096;
+    // Two steps only (not one size per zoom level): every size is a new proxy and render targets.
+    const want = Math.round(zoom > 2.2 ? cap : zoom > 1.2 ? Math.min(cap, basePreviewLong() * 1.8) : basePreviewLong());
+    if (params && Math.abs(want - sentPreviewLong) > 64) { sentPreviewLong = want; send({ type: "preview-zoom", long: want }); }
+  }, 300);
+}
+/** Zooms to `z` keeping the stage point (clientX, clientY) where it is. */
+function zoomAt(z: number, clientX: number, clientY: number) {
+  const st = stage.getBoundingClientRect();
+  const fx = clientX - (st.left + st.width / 2), fy = clientY - (st.top + st.height / 2);
+  const z1 = Math.min(MAX_ZOOM, Math.max(1, z));
+  panX = fx - (fx - panX) * (z1 / zoom);
+  panY = fy - (fy - panY) * (z1 / zoom);
+  zoom = z1;
+  if (zoom === 1) { panX = 0; panY = 0; }
+  applyZoom();
+}
+function resetZoom() { zoom = 1; panX = 0; panY = 0; applyZoom(); }
+stage.addEventListener("wheel", (e) => {
+  if (!params) return;
+  e.preventDefault();
+  // Trackpad pinch arrives as ctrl+wheel; a mouse wheel moves in coarse steps (or by lines);
+  // anything else is a two-finger trackpad scroll, which pans a zoomed photo.
+  const mouseWheel = e.deltaMode !== 0 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50 && Number.isInteger(e.deltaY));
+  if (e.ctrlKey || mouseWheel) zoomAt(zoom * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.002)), e.clientX, e.clientY);
+  else { panX -= e.deltaX; panY -= e.deltaY; applyZoom(); }
+}, { passive: false });
 
 // Press and hold: before (camera rendering). Tap in focus mode: add/remove a focus point.
 let holdTimer = 0;
 let holding = false;
 stage.addEventListener("pointerdown", (e) => {
-  if (!params || e.target !== canvas) return;
+  if (!params || (e.target !== canvas && !pointers.size) || (e.pointerType === "mouse" && e.button !== 0)) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  stage.setPointerCapture(e.pointerId);
+  if (pointers.size === 2) {
+    // Second finger: a pinch. Whatever the first finger started is abandoned.
+    clearTimeout(holdTimer);
+    endHold();
+    if (drag?.moved) endDragRing(); else drag = undefined;
+    press = undefined;
+    const [p1, p2] = [...pointers.values()];
+    pinch = { d0: Math.hypot(p1.x - p2.x, p1.y - p2.y) || 1, z0: zoom, cx0: (p1.x + p2.x) / 2, cy0: (p1.y + p2.y) / 2, px0: panX, py0: panY };
+    renderRings();
+    return;
+  }
+  if (pointers.size > 2) return;
+  press = { x0: e.clientX, y0: e.clientY, px0: panX, py0: panY, moved: false };
   if (focusMode) {
     const r = imageRect();
     const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
     if (x < 0 || y < 0 || x > 1 || y > 1) return;
-    // On a ring: drag moves it, a tap removes it. Elsewhere: a new point.
+    // On a ring: drag moves it, a tap removes it. Elsewhere: a new point, on release
+    // (so a pan or a pinch does not add one).
     const hit = shownFocusPoints().findIndex((q) => Math.hypot(q.x - x, q.y - y) < 0.045);
     if (hit >= 0) {
-      drag = { index: hit, x0: x, y0: y, x, y, moved: false };
-      stage.setPointerCapture(e.pointerId);
+      const q = shownFocusPoints()[hit];
+      drag = { index: hit, x0: x, y0: y, x, y, moved: false, ox: q.x, oy: q.y };
       renderRings();
       return;
     }
-    send({ type: "focus", action: "toggle", x, y });
+    press.tap = { x, y };
     return;
   }
   holdTimer = window.setTimeout(() => { holding = true; badge.textContent = t("view.before"); badge.classList.add("on"); send({ type: "view", view: currentView, before: true }); }, 180);
 });
 stage.addEventListener("pointermove", (e) => {
-  if (!drag || !params) return;
-  const r = imageRect();
-  drag.x = clamp01((e.clientX - r.left) / r.width);
-  drag.y = clamp01((e.clientY - r.top) / r.height);
-  if (Math.hypot(drag.x - drag.x0, drag.y - drag.y0) > 0.01) drag.moved = true;
-  if (!drag.moved) return;
-  // Follow the finger locally; the engine measures the distance on release.
-  const pts = params.dof.points;
-  if (pts.length) pts[drag.index] = { ...pts[drag.index], x: drag.x, y: drag.y, auto: false };
-  renderRings();
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && pointers.size >= 2) {
+    const [p1, p2] = [...pointers.values()];
+    const d = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    const st = stage.getBoundingClientRect();
+    const scx = st.left + st.width / 2, scy = st.top + st.height / 2;
+    const z1 = Math.min(MAX_ZOOM, Math.max(1, pinch.z0 * d / pinch.d0));
+    // The photo point under the fingers' first midpoint follows their current midpoint.
+    const c0x = pinch.cx0 - scx, c0y = pinch.cy0 - scy;
+    panX = ((p1.x + p2.x) / 2 - scx) - (c0x - pinch.px0) * (z1 / pinch.z0);
+    panY = ((p1.y + p2.y) / 2 - scy) - (c0y - pinch.py0) * (z1 / pinch.z0);
+    zoom = z1;
+    if (zoom === 1) { panX = 0; panY = 0; }
+    applyZoom();
+    return;
+  }
+  if (drag && params) {
+    const r = imageRect();
+    drag.x = clamp01((e.clientX - r.left) / r.width);
+    drag.y = clamp01((e.clientY - r.top) / r.height);
+    if (Math.hypot(drag.x - drag.x0, drag.y - drag.y0) > 0.01) drag.moved = true;
+    if (drag.moved) renderRings();
+    return;
+  }
+  if (!press) return;
+  const dx = e.clientX - press.x0, dy = e.clientY - press.y0;
+  if (!press.moved && Math.hypot(dx, dy) > 8) {
+    press.moved = true;
+    press.tap = undefined;
+    if (!holding) clearTimeout(holdTimer);
+  }
+  if (press.moved && zoom > 1) { panX = press.px0 + dx; panY = press.py0 + dy; applyZoom(); }
 });
-function endDragRing() {
+function endDragRing(cancelled = false) {
   if (!drag) return;
   const d = drag;
   drag = undefined;
-  if (d.moved) send({ type: "focus", action: "move", index: params?.dof.points.length ? d.index : -1, x: d.x, y: d.y });
-  // A tap on a point removes it; a tap on the lone automatic ring changes nothing.
-  else if (params?.dof.points.length) send({ type: "focus", action: "toggle", x: d.x0, y: d.y0 });
+  const pts = params?.dof.points ?? [];
+  if (d.moved) {
+    // The point is found again by where it was (the list may have changed meanwhile).
+    let index = -1;
+    if (pts.length) {
+      index = pts.findIndex((q) => Math.hypot(q.x - d.ox, q.y - d.oy) < 1e-3);
+      if (index < 0) { renderRings(); return; } // it is gone: nothing to move
+    } else pendingAuto = { x: d.x, y: d.y };
+    send({ type: "focus", action: "move", index, x: d.x, y: d.y });
+  }
+  // A tap on a point removes it; a tap on the lone automatic ring changes nothing;
+  // a touch the system cancelled changes nothing either.
+  else if (!cancelled && pts.length) send({ type: "focus", action: "toggle", x: d.x0, y: d.y0 });
   renderRings();
 }
 function clamp01(v: number) { return Math.min(1, Math.max(0, v)); }
@@ -300,9 +419,43 @@ const endHold = () => {
   clearTimeout(holdTimer);
   if (holding) { holding = false; badge.classList.remove("on"); send({ type: "view", view: currentView, before: false }); }
 };
-stage.addEventListener("pointerup", () => { endDragRing(); endHold(); });
-stage.addEventListener("pointercancel", () => { endDragRing(); endHold(); });
-stage.addEventListener("pointerleave", endHold);
+function pointerEnd(e: PointerEvent) {
+  if (!pointers.delete(e.pointerId)) return;
+  if (pinch) {
+    // The pinch ends with its first lifted finger; the other one may keep panning.
+    if (pointers.size < 2) pinch = undefined;
+    const rest = [...pointers.values()][0];
+    press = rest ? { x0: rest.x, y0: rest.y, px0: panX, py0: panY, moved: true } : undefined;
+    return;
+  }
+  endDragRing(e.type !== "pointerup");
+  endHold();
+  const p = press;
+  press = undefined;
+  if (!p || p.moved || e.type === "pointercancel") return;
+  if (p.tap) { send({ type: "focus", action: "toggle", x: p.tap.x, y: p.tap.y }); return; }
+  if (focusMode) return;
+  // Double-tap: zoom in to 2.5× there, or back out.
+  const now = performance.now();
+  if (now - lastTap.t < 320 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 30) {
+    lastTap.t = 0;
+    if (zoom > 1) resetZoom(); else zoomAt(2.5, e.clientX, e.clientY);
+  } else lastTap = { t: now, x: e.clientX, y: e.clientY };
+}
+stage.addEventListener("pointerup", pointerEnd);
+stage.addEventListener("pointercancel", pointerEnd);
+// Capture lost without an up/cancel (e.g. a context menu): treat it as a cancel.
+stage.addEventListener("lostpointercapture", (e) => { if (pointers.has(e.pointerId)) pointerEnd(new PointerEvent("pointercancel", { pointerId: e.pointerId })); });
+// Leaving the page mid-gesture: forget every finger, so the next touch starts clean.
+function resetGestures() {
+  pointers.clear();
+  pinch = undefined;
+  press = undefined;
+  if (drag) endDragRing(true);
+  endHold();
+}
+window.addEventListener("blur", resetGestures);
+document.addEventListener("visibilitychange", () => { if (document.hidden) resetGestures(); });
 let currentView: 0 | 1 | 2 = 0;
 
 // --------------------------------------------------------------------------- params plumbing
@@ -404,6 +557,12 @@ adjustPane.append(
   el("div", { class: "group-title", text: t("adj.depth") }),
   slider({ path: "depth.near", label: t("adj.nearDetail"), min: 0.5, max: 1.5, step: 0.01 }),
   slider({ path: "depth.far", label: t("adj.farDetail"), min: 0.2, max: 1.5, step: 0.01 }),
+  el("div", { class: "group-title", text: t("adj.vignette") }),
+  slider({ path: "vignette.amount", label: t("adj.vigAmount"), min: -1, max: 1, step: 0.01, fmt: pct }),
+  slider({ path: "vignette.midpoint", label: t("adj.vigMidpoint"), min: 0, max: 1, step: 0.01, fmt: pct }),
+  slider({ path: "vignette.feather", label: t("adj.vigFeather"), min: 0, max: 1, step: 0.01, fmt: pct }),
+  slider({ path: "vignette.roundness", label: t("adj.vigRoundness"), min: 0, max: 1, step: 0.01, fmt: pct }),
+  slider({ path: "vignette.highlights", label: t("adj.vigHighlights"), min: 0, max: 1, step: 0.01, fmt: pct }),
 );
 // Curves for this photo (L, R, G, B), independent of the look's own curves: one
 // slider per tone range instead of dragging points (curves.ts: a view of the
@@ -413,6 +572,20 @@ photoCurve.el.style.pointerEvents = "none";
 let photoChan: "l" | "r" | "g" | "b" = "l";
 const photoChips = el("div", { class: "chips" });
 const CURVE_COLOURS = { l: "#ece9e3", r: "#ff6b6b", g: "#6bdc7a", b: "#6b9bff" } as const;
+// The slider values last set, per channel, while the curve is still the one they
+// made: a curve cannot hold contradictory settings (it is never inverted), and
+// reading them back from it would make one slider move another.
+const bandMemo = new Map<string, { key: string; bands: CurveBands }>();
+function bandsOf(c: "l" | "r" | "g" | "b"): CurveBands {
+  const pts = params!.curves[c];
+  const m = bandMemo.get(c);
+  return m && m.key === JSON.stringify(pts) ? structuredClone(m.bands) : bandsFromCurve(pts);
+}
+function setBands(c: "l" | "r" | "g" | "b", b: CurveBands) {
+  const pts = curveFromBands(b);
+  params!.curves[c] = pts;
+  bandMemo.set(c, { key: JSON.stringify(pts), bands: structuredClone(b) });
+}
 const bandRows: Array<{ input: HTMLInputElement; out: HTMLOutputElement; get: (b: CurveBands) => number; set: (b: CurveBands, v: number) => void }> = [];
 function bandRow(label: string, min: number, get: (b: CurveBands) => number, set: (b: CurveBands, v: number) => void, max = 1): HTMLElement {
   const input = el("input", { type: "range", min: String(min), max: String(max), step: "0.01" });
@@ -420,9 +593,9 @@ function bandRow(label: string, min: number, get: (b: CurveBands) => number, set
   const row = el("div", { class: "row" }, el("label", { text: label }), input, out);
   input.oninput = () => {
     if (!params) return;
-    const b = bandsFromCurve(params.curves[photoChan]);
+    const b = bandsOf(photoChan);
     set(b, parseFloat(input.value));
-    params.curves[photoChan] = curveFromBands(b);
+    setBands(photoChan, b);
     lookPanel.invalidate();
     renderPhotoCurve();
     pushParams();
@@ -430,9 +603,10 @@ function bandRow(label: string, min: number, get: (b: CurveBands) => number, set
   // Double-tap the label: this range back to unchanged.
   row.querySelector("label")!.addEventListener("dblclick", () => {
     if (!params) return;
-    const b = bandsFromCurve(params.curves[photoChan]);
+    const b = bandsOf(photoChan);
     set(b, 0);
-    params.curves[photoChan] = curveFromBands(b);
+    setBands(photoChan, b);
+    lookPanel.invalidate();
     renderPhotoCurve();
     pushParams();
   });
@@ -461,7 +635,7 @@ function renderPhotoCurve() {
   }));
   const pts = params?.curves[photoChan] ?? FLAT_CURVE;
   photoCurve.set(pts.map((q) => [q.x, q.y] as [number, number]), CURVE_COLOURS[photoChan]);
-  const b = bandsFromCurve(pts);
+  const b = params ? bandsOf(photoChan) : bandsFromCurve(pts);
   for (const r of bandRows) {
     const v = r.get(b);
     r.input.value = String(v);
@@ -898,6 +1072,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case "params":
       params = m.params;
+      pendingAuto = undefined;
       syncControls();
       break;
     case "log":

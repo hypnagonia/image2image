@@ -33,6 +33,9 @@ async function handle(m: ToWorker) {
     case "upscale-now":
       engine.forceUpscale();
       break;
+    case "preview-zoom":
+      await engine.resizePreview(m.long);
+      break;
     case "focus": {
       const s = engine.session;
       if (!s) break;
@@ -58,8 +61,11 @@ async function handle(m: ToWorker) {
           if (d === undefined) break;
           // The automatic subject stays: the first manual point is added to it
           // instead of replacing it (and it can be moved or removed like any other).
-          if (!points.length && a.x !== undefined && a.y !== undefined && Math.hypot(a.x - m.x, a.y - m.y) >= 0.045) {
-            points.push({ x: a.x, y: a.y, dist: a.focus, auto: true });
+          // Only when depth of field is already on: otherwise the automatic ring was
+          // never shown, and a tap should make just that one point sharp. Its
+          // distance is the current focus (the user may have moved the slider).
+          if (!points.length && s.params.enable.dof && a.x !== undefined && a.y !== undefined && Math.hypot(a.x - m.x, a.y - m.y) >= 0.045) {
+            points.push({ x: a.x, y: a.y, dist: s.params.dof.focus, auto: true });
           }
           points.push({ x: m.x, y: m.y, dist: d });
           if (points.length > MAX_FOCUS_POINTS) points.shift();

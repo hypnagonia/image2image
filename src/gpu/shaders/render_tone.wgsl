@@ -41,6 +41,8 @@ struct U {
   sem: array<vec4<f32>, 33>,// per group: [exp, hl, sat, vib] [hue rad, clarity, texture, sharpen] [denoise, dehaze, warmth, tint]
   tgt: vec4<i32>,           // render target: offset x, y in the full image, target width, height (strip rendering)
   hl: vec4<f32>,            // view 5: highlighted depth range (lo, hi)
+  vig: vec4<f32>,           // vignette: amount, midpoint, feather, roundness
+  vig2: vec4<f32>,          // vignette: highlight protection, _, _, _
 }
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -481,6 +483,32 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     Lp = b2 + soft_detail(dMed, gm, 0.8) + soft_detail(dFine, gf, 1.5);
   }
   c = c * exp2(Lp - L);
+
+  // --- vignette (linear light: an exposure falloff, like a lens) --------------------
+  // Multiplying scene-linear RGB keeps hue and saturation, and the tone curve that
+  // follows rolls the darkened edges off the way it does any darker exposure — no
+  // grey veil. Elliptical distance follows the frame (roundness 0) or is a true
+  // circle (1); the falloff is a quintic smootherstep (continuous in slope and
+  // curvature: no visible ring); the output dither removes banding.
+  if (abs(u.vig.x) > 1e-4) {
+    let q = ((vec2<f32>(px) + 0.5) / vec2<f32>(f32(W), f32(H)) - 0.5) * 2.0;
+    let asp = f32(W) / f32(H);
+    let r = clamp(u.vig.w, 0.0, 1.0);
+    let pq = vec2<f32>(q.x * pow(asp, 0.5 * r), q.y * pow(asp, -0.5 * r));
+    let rho = length(pq) * 0.70710678; // frame corner ≈ 1 when following the frame
+    let mid = mix(0.3, 1.0, clamp(u.vig.y, 0.0, 1.0));
+    let fw = mix(0.1, 1.0, clamp(u.vig.z, 0.0, 1.0));
+    let t = clamp((rho - mid + 0.5 * fw) / fw, 0.0, 1.0);
+    let w = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+    var vev = w * select(u.vig.x * 2.0, u.vig.x, u.vig.x > 0.0); // −2 EV … +1 EV at the corners
+    if (vev < 0.0) {
+      // Light sources keep their brightness: protection grows from ≈ 1.5 EV above
+      // the subject's display level to 3.5 EV above it.
+      let rel = log2(max(luma2020(c), 1e-7)) - (u.local.w + ev);
+      vev *= 1.0 - clamp(u.vig2.x, 0.0, 1.0) * smoothstep(1.5, 3.5, rel);
+    }
+    c = c * exp2(vev);
+  }
   Y = max(luma2020(c), 1e-7);
 
   // --- tone curve (display rendering), luminance ratio -----------------------------

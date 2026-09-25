@@ -274,7 +274,7 @@ export class Engine {
       this.log(`Apple skin matte ${skinMatte.width}×${skinMatte.height} drives the look's skin protection`);
     }
     scene.log.forEach((l) => this.log(l));
-    if (gen !== this.generation) return;
+    if (gen !== this.generation) { gpu.release(skinTex); return; }
 
     // --- refinement ---------------------------------------------------------------
     this.progress("refine masks");
@@ -623,6 +623,7 @@ export class Engine {
     p.wb = { temp: s.work.camera?.temp ?? 6504, tint: s.work.camera?.tint ?? 0 };
     p.tone = { highlights: 0, shadows: 0, whites: 0, blacks: 0, contrast: 0, rolloff: 0.5 };
     p.color = { saturation: 0, vibrance: 0 };
+    if (p.vignette) p.vignette = { ...p.vignette, amount: 0 };
     p.profile = neutralProfile();
     return p;
   }
@@ -662,6 +663,17 @@ export class Engine {
 
   setPreviewSize(long: number) {
     this.previewLong = Math.max(512, Math.min(4096, Math.round(long)));
+  }
+
+  /** Zooming into the preview: rebuild it at a higher resolution (or back down). Call inside `exclusive`. */
+  async resizePreview(long: number) {
+    const prev = this.previewLong;
+    this.setPreviewSize(long);
+    if (!this.s || this.previewLong === prev) return;
+    // Render targets are cached per size: the old size's would otherwise stay allocated.
+    this.renderer.releaseTargets();
+    await this.makeProxy();
+    await this.renderNow(true);
   }
 
   /** Keeps a CPU copy of the refined distance map for tap-to-focus. */

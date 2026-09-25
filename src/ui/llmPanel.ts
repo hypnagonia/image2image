@@ -50,6 +50,11 @@ const NUMS: Num[] = [
   { path: "sharpen.radius", min: 0.5, max: 2.5, what: "sharpening radius, px" },
   { path: "depth.near", min: 0.5, max: 1.5, what: "detail multiplier for near objects" },
   { path: "depth.far", min: 0.2, max: 1.5, what: "detail multiplier for far objects" },
+  { path: "vignette.amount", min: -1, max: 1, what: "vignette in linear light: negative darkens the edges (≈ −2 EV in the corners at −1), positive lightens; 0 = none; −0.2…−0.4 is a natural lens-like vignette" },
+  { path: "vignette.midpoint", min: 0, max: 1, what: "where the vignette falloff starts (higher = only the corners)" },
+  { path: "vignette.feather", min: 0, max: 1, what: "how gradual the vignette falloff is" },
+  { path: "vignette.roundness", min: 0, max: 1, what: "vignette shape: 0 follows the frame's aspect, 1 is a circle" },
+  { path: "vignette.highlights", min: 0, max: 1, what: "how much bright light sources are spared by a darkening vignette" },
   { path: "profile.intensity", min: 0, max: 1, what: "strength of the active look (0 = technical rendering only)" },
 ];
 
@@ -165,31 +170,78 @@ export function extractJson(text: string): unknown {
   let src = blocks.length ? blocks[blocks.length - 1] : text;
   const a = src.indexOf("{"), b = src.lastIndexOf("}");
   if (a < 0 || b <= a) throw new Error("no JSON object found");
-  src = src.slice(a, b + 1)
-    .replace(/[“”]/g, '"')
-    .replace(/\/\/[^\n"]*$/gm, "") // stray line comments
-    .replace(/,\s*([}\]])/g, "$1"); // trailing commas
-  return JSON.parse(src);
+  src = src.slice(a, b + 1);
+  // Strict JSON first; then with comments and trailing commas removed (outside
+  // strings only); last, with typographic quotes taken as quotes (a reply that
+  // went through a "smart quotes" editor).
+  const tries = [src, relax(src), relax(src.replace(/[“”]/g, '"'))];
+  let err: unknown;
+  for (const t of tries) { try { return JSON.parse(t); } catch (e) { err = e; } }
+  throw err;
+}
+
+/** Drops // and /* *\/ comments and trailing commas, leaving string contents alone. */
+function relax(src: string): string {
+  let out = "", i = 0, inStr = false;
+  while (i < src.length) {
+    const c = src[i];
+    if (inStr) {
+      out += c;
+      if (c === "\\") { out += src[i + 1] ?? ""; i += 2; continue; }
+      if (c === '"') inStr = false;
+      i++;
+      continue;
+    }
+    if (c === '"') { inStr = true; out += c; i++; continue; }
+    if (c === "/" && src[i + 1] === "/") { while (i < src.length && src[i] !== "\n") i++; continue; }
+    if (c === "/" && src[i + 1] === "*") { const e = src.indexOf("*/", i + 2); i = e < 0 ? src.length : e + 2; continue; }
+    if (c === ",") {
+      let j = i + 1;
+      while (j < src.length && /\s/.test(src[j])) j++;
+      if (src[j] === "}" || src[j] === "]") { i++; continue; }
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/** A number, or a string that is one; anything else (null, true, "", [5]) is not. */
+function num(raw: unknown): number {
+  if (typeof raw === "number") return raw;
+  if (typeof raw === "string" && raw.trim() !== "") return Number(raw);
+  return NaN;
 }
 
 /** Applies an answer to `p` (mutating). Returns what happened, one line each. */
-export function applyAnswer(p: Params, answer: unknown, selectLook: (id: string) => boolean): { applied: string[]; ignored: string[] } {
+export function applyAnswer(p: Params, answer: unknown, selectLook: (id: string) => boolean): { applied: string[]; ignored: string[]; previous: Array<[string, unknown]> } {
   const applied: string[] = [], ignored: string[] = [];
+  // What each touched path held before, so undo restores only those.
+  const previous: Array<[string, unknown]> = [];
+  const remember = (path: string) => { if (!previous.some(([q]) => q === path)) previous.push([path, structuredClone(get(p, path))]); };
   if (!answer || typeof answer !== "object") throw new Error("the answer is not a JSON object");
   const o = answer as Record<string, unknown>;
   // A flat object without "set" is accepted too.
   const changes = (o.set && typeof o.set === "object" ? o.set : Object.fromEntries(Object.entries(o).filter(([k]) => k !== "look" && k !== "why"))) as Record<string, unknown>;
   if (typeof o.look === "string" && o.look) {
     if (o.look === p.profile.id) applied.push(`look ${o.look} (already active)`);
-    else if (selectLook(o.look)) applied.push(`look → ${o.look}`);
-    else ignored.push(`look ${o.look}: no such look`);
+    else {
+      const before = structuredClone(p.profile);
+      if (selectLook(o.look)) {
+        previous.push(["profile", before]);
+        // As the prompt says: a new look is at full strength unless the answer sets it.
+        p.profile.intensity = 1;
+        applied.push(`look → ${o.look}`);
+      } else ignored.push(`look ${o.look}: no such look`);
+    }
   }
   for (const [path, raw] of Object.entries(changes)) {
-    const num = NUMS.find((n) => n.path === path);
-    if (num) {
-      const v = Number(raw);
+    const n = NUMS.find((q) => q.path === path);
+    if (n) {
+      const v = num(raw);
       if (!Number.isFinite(v)) { ignored.push(`${path}: not a number`); continue; }
-      const c = clamp(v, num.min, num.max);
+      const c = clamp(v, n.min, n.max);
+      if (!previous.some(([q]) => q === "profile") || !path.startsWith("profile.")) remember(path);
       set(p, path, c);
       applied.push(`${path} = ${r3(c)}${c !== v ? ` (clamped from ${v})` : ""}`);
       continue;
@@ -197,30 +249,37 @@ export function applyAnswer(p: Params, answer: unknown, selectLook: (id: string)
     const sm = /^semantic\.(\w+)\.(\w+)$/.exec(path);
     if (sm) {
       const g = sm[1] as (typeof GROUPS)[number], def = SEM.find((q) => q.key === sm[2]);
-      const v = Number(raw);
+      const v = num(raw);
       if (!GROUPS.includes(g) || !def) { ignored.push(`${path}: unknown region or key`); continue; }
       if (!Number.isFinite(v)) { ignored.push(`${path}: not a number`); continue; }
       const c = clamp(v, def.min, def.max);
+      remember(path);
       p.semantic[g][def.key] = c;
       applied.push(`${path} = ${r3(c)}${c !== v ? ` (clamped from ${v})` : ""}`);
       continue;
     }
     const cm = /^curves\.([lrgb])$/.exec(path);
     if (cm) {
-      const pts = Array.isArray(raw) ? raw.map((q) => Array.isArray(q) ? { x: Number(q[0]), y: Number(q[1]) } : { x: Number((q as CurvePoint)?.x), y: Number((q as CurvePoint)?.y) }) : [];
-      const ok = pts.filter((q) => Number.isFinite(q.x) && Number.isFinite(q.y)).map((q) => ({ x: clamp(q.x, 0, 1), y: clamp(q.y, 0, 1) })).sort((a, b) => a.x - b.x);
+      const pts = Array.isArray(raw) ? raw.map((q) => Array.isArray(q) ? { x: num(q[0]), y: num(q[1]) } : { x: num((q as CurvePoint)?.x), y: num((q as CurvePoint)?.y) }) : [];
+      const ok = pts.filter((q) => Number.isFinite(q.x) && Number.isFinite(q.y)).map((q) => ({ x: clamp(q.x, 0, 1), y: clamp(q.y, 0, 1) })).sort((a, b) => a.x - b.x)
+        .filter((q, i, arr) => i === 0 || q.x - arr[i - 1].x > 1e-4); // one point per x
       if (ok.length < 2 || ok.length > 16) { ignored.push(`${path}: needs 2…16 points`); continue; }
+      // A curve without its ends would hold the first/last value flat to 0 and 1
+      // (crushed shadows, clipped highlights): missing ends are the identity.
+      if (ok[0].x > 1e-4) ok.unshift({ x: 0, y: 0 });
+      if (ok[ok.length - 1].x < 1 - 1e-4) ok.push({ x: 1, y: 1 });
+      remember(path);
       p.curves[cm[1] as (typeof CURVES)[number]] = ok;
       applied.push(`${path} = ${curveText(ok)}`);
       continue;
     }
     ignored.push(`${path}: not an adjustable parameter`);
   }
-  return { applied, ignored };
+  return { applied, ignored, previous };
 }
 
 export function createLlmPanel(root: HTMLElement, ctx: Ctx) {
-  let undo: Params | undefined;
+  let undo: Array<[string, unknown]> | undefined;
 
   const goal = el("textarea", { class: "llm-text", rows: "3", placeholder: t("llm.goalPlaceholder") });
   const promptBox = el("textarea", { class: "llm-text mono", rows: "8", readonly: "" });
@@ -252,18 +311,19 @@ export function createLlmPanel(root: HTMLElement, ctx: Ctx) {
   };
   imgBtn.onclick = () => {
     if (!ctx.params() || !ctx.canvas.width) return;
-    ctx.canvas.toBlob(async (blob) => {
-      if (!blob) return;
-      try {
-        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-        note(imgBtn, t("llm.copied"));
-      } catch {
-        // No image clipboard (older Safari, Firefox): save the preview instead.
-        const a = el("a", { href: URL.createObjectURL(blob), download: (ctx.summary()?.file ?? "photo").replace(/\.[^.]+$/, "") + "-preview.png" });
-        document.body.append(a); a.click();
-        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
-      }
-    }, "image/png");
+    // The clipboard item is created right in the tap (Safari refuses one created
+    // later, in the toBlob callback); the PNG arrives as a promise.
+    const png = new Promise<Blob>((res, rej) => ctx.canvas.toBlob((b) => (b ? res(b) : rej(new Error("no image"))), "image/png"));
+    const save = (blob: Blob) => {
+      // No image clipboard (older browsers, Firefox): save the preview instead.
+      const a = el("a", { href: URL.createObjectURL(blob), download: (ctx.summary()?.file ?? "photo").replace(/\.[^.]+$/, "") + "-preview.png" });
+      document.body.append(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
+    };
+    try {
+      navigator.clipboard.write([new ClipboardItem({ "image/png": png })])
+        .then(() => note(imgBtn, t("llm.copied")), () => png.then(save, () => {}));
+    } catch { png.then(save, () => {}); }
   };
   applyBtn.onclick = () => {
     const p = ctx.params();
@@ -271,11 +331,10 @@ export function createLlmPanel(root: HTMLElement, ctx: Ctx) {
     let parsed: unknown;
     try { parsed = extractJson(answer.value); }
     catch (e) { status.textContent = t("llm.parseError", { msg: (e as Error).message }); return; }
-    const before = structuredClone(p);
-    let res: { applied: string[]; ignored: string[] };
+    let res: { applied: string[]; ignored: string[]; previous: Array<[string, unknown]> };
     try { res = applyAnswer(p, parsed, ctx.selectLook); }
     catch (e) { status.textContent = t("llm.parseError", { msg: (e as Error).message }); return; }
-    if (res.applied.length) { undo = before; undoBtn.disabled = false; ctx.changed(); }
+    if (res.applied.length) { undo = res.previous; undoBtn.disabled = false; ctx.changed(); }
     status.textContent = [
       t("llm.applied", { n: res.applied.length }), ...res.applied.map((l) => "  ✓ " + l),
       ...(res.ignored.length ? [t("llm.ignored", { n: res.ignored.length }), ...res.ignored.map((l) => "  ✗ " + l)] : []),
@@ -285,7 +344,8 @@ export function createLlmPanel(root: HTMLElement, ctx: Ctx) {
   undoBtn.onclick = () => {
     const p = ctx.params();
     if (!p || !undo) return;
-    Object.assign(p, undo);
+    // Only what the answer changed goes back; later edits elsewhere stay.
+    for (const [path, v] of [...undo].reverse()) set(p, path, structuredClone(v));
     undo = undefined;
     undoBtn.disabled = true;
     status.textContent = t("llm.undone");
