@@ -13,6 +13,7 @@
  *               whites that never reach near-white (and nothing clipped) → opened
  *   sky         washed out (median high) → lights/highlights down: a deeper sky
  *   skin        faces (people's upper tones) too dark → lifted; too bright → eased
+ *   ground      always a contrast curve (house style, with its lower saturation)
  *   vegetation, water, buildings
  *               low local contrast → a small contrast around the region's median
  *   near        flat foreground → a little contrast (depth: the front pops)
@@ -36,7 +37,7 @@ export interface AutoCurvesInput {
   local: Params["local"];
   clipHi: number;
   photo: HistStats;
-  regions: Partial<Record<"sky" | "vegetation" | "water" | "building" | "person", HistStats>>;
+  regions: Partial<Record<"sky" | "vegetation" | "water" | "building" | "person" | "ground", HistStats>>;
   bands?: Partial<Record<DepthBand, HistStats>>;
 }
 export interface AutoCurvesResult {
@@ -149,6 +150,14 @@ export function autoCurves(i: AutoCurvesInput): AutoCurvesResult {
       b.bands = [0, 0, -a * 0.4, -a * 0.8, -a];
       put(b, (c) => (out.regions.skin = c), "curves.skin", `faces render bright: people's upper tones at ${m.toFixed(2)} (> 0.82) → skin highlights eased`, { level: r2(m), area: r2(person.area) });
     }
+  }
+
+  // --- ground: always more contrast (house style, with its lower saturation) ------------
+  const ground = i.regions.ground;
+  if (ground && ground.area >= 0.02) {
+    const [m] = q(ground, [0.5]);
+    put(contrastAround(m, 0.28), (c) => (out.regions.ground = c), "curves.ground",
+      `ground: more contrast around its median ${m.toFixed(2)} (house style)`, { median: r2(m), area: r2(ground.area) });
   }
 
   // --- textured regions: a little contrast where it is missing --------------------

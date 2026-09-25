@@ -336,11 +336,10 @@ export function decide(ctx: EngineContext): DecisionResult {
         break;
       }
       case "vegetation": {
-        // Hue correction: phone greens lean yellow; pull hue toward ~128° when measured yellower.
-        if (lch.h > 85 && lch.h < 125 && lch.C > 0.03) {
-          a.hue = r2(clamp((122 - lch.h) * 0.25, 0, 5));
-          why.push(`foliage hue ${lch.h.toFixed(0)}° (yellowish) → +${a.hue}°`);
-        }
+        // House style: warm greens — warmer, a touch toward magenta and toward
+        // yellow in hue, so foliage loses the cold blue-cyan cast of digital greens.
+        a.warmth = 0.25; a.tint = 0.08; a.hue = -3;
+        why.push(`warm greens: warmth +${a.warmth}, tint +${a.tint} (less cyan), hue ${a.hue}° toward yellow`);
         a.saturation = r2(clamp((0.085 - lch.C) * 1.2, -0.12, 0.08));
         a.texture = r2(1 + 0.3 * (1 - smooth(0.004, 0.012, sMid)));
         a.clarity = 1.1; a.sharpen = 1.05; a.denoise = r2(0.6 + 0.4 * smooth(0.02, 0.06, 0.03 - s.texture));
@@ -372,7 +371,12 @@ export function decide(ctx: EngineContext): DecisionResult {
       case "animal": a.texture = 1.0; a.sharpen = 0.9; a.vibrance = -0.3; break;
       case "vehicle": a.clarity = 0.9; a.sharpen = 1.0; a.highlights = r2(clamp(s.clipHi * 1.5, 0, 0.5)); break;
       case "terrain": a.texture = 1.2; a.clarity = 1.15; a.sharpen = 1.05; a.denoise = 0.75; break;
-      case "ground": a.texture = 0.9; a.sharpen = 0.85; break;
+      case "ground":
+        // House style: a quieter, more graphic ground — part of the way to black and
+        // white, with more local contrast (a contrast curve comes from autoCurves).
+        a.saturation = -0.3; a.clarity = 1.25; a.texture = 0.9; a.sharpen = 0.85;
+        why.push(`ground: saturation ${a.saturation} (toward black and white), clarity ×${a.clarity}`);
+        break;
       case "interior": a.clarity = 0.85; a.sharpen = 0.85; break;
       case "other": break;
     }

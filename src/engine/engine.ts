@@ -362,7 +362,7 @@ export class Engine {
       const ac = autoCurves({
         tone: params.tone, exposure: params.exposure, local: params.local, clipHi: report.global.clipHi,
         photo: { hist: report.global.hist, area: 1 },
-        regions: { sky: st("sky"), vegetation: st("vegetation"), water: st("water"), building: st("building"), person: st("person") },
+        regions: { sky: st("sky"), vegetation: st("vegetation"), water: st("water"), building: st("building"), person: st("person"), ground: st("ground") },
         bands: bandHist,
       });
       decision.autoCurves = { photo: ac.photo, regions: ac.regions, depth: ac.depth };

@@ -89,3 +89,11 @@ test("the strength slider rescales automatic curves and keeps hand-edited ones",
   applyAutoCurves(q, a, 0, 0.5);
   assert.deepEqual(q.curves.l, [{ x: 0, y: 0 }, { x: 1, y: 1 }], "0 = none");
 });
+
+test("ground always gets a contrast curve around its own median", () => {
+  const r = autoCurves(base({ regions: { ground: { hist: hist(G - 1, 1.5), area: 0.2 } } }));
+  assert.ok(r.regions.ground, "fires");
+  const b = r.regions.ground!.bands;
+  assert.ok(b[0] < 0 && b[4] > 0, `S: ${b}`);
+  assert.equal(autoCurves(base({ regions: { ground: { hist: hist(G, 1), area: 0.01 } } })).regions.ground, undefined, "not on a sliver of ground");
+});
