@@ -12,14 +12,15 @@ import { en, type Dict, type Key } from "./locales/en.ts";
 import { ru } from "./locales/ru.ts";
 import { pt } from "./locales/pt.ts";
 import { es } from "./locales/es.ts";
+import { zh } from "./locales/zh.ts";
 
 export type { Key };
-export const LANGS = ["en", "ru", "pt", "es"] as const;
+export const LANGS = ["en", "ru", "pt", "es", "zh"] as const;
 export type Lang = (typeof LANGS)[number];
 /** Native names for the picker. */
-export const LANG_NAMES: Record<Lang, string> = { en: "English", ru: "Русский", pt: "Português", es: "Español" };
+export const LANG_NAMES: Record<Lang, string> = { en: "English", ru: "Русский", pt: "Português", es: "Español", zh: "中文" };
 
-const DICTS: Record<Lang, Dict> = { en, ru, pt, es };
+const DICTS: Record<Lang, Dict> = { en, ru, pt, es, zh };
 const STORE = "uiLang";
 
 const isLang = (v: unknown): v is Lang => LANGS.includes(v as Lang);
@@ -39,7 +40,7 @@ function detect(): Lang {
 }
 
 export const lang: Lang = storedLang() ?? detect();
-if (typeof document !== "undefined") document.documentElement.lang = lang === "pt" ? "pt-BR" : lang;
+if (typeof document !== "undefined") document.documentElement.lang = lang === "pt" ? "pt-BR" : lang === "zh" ? "zh-Hans" : lang;
 
 /** Persists the choice (undefined = back to automatic) and reloads to rebuild the UI. */
 export function setLang(l: Lang | undefined) {

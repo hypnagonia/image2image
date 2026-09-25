@@ -44,10 +44,24 @@ export interface AutoFocus {
 }
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
+const smoothstep01 = (t: number) => { const u = clamp(t, 0, 1); return u * u * (3 - 2 * u); };
+
+export interface BlurContext {
+  /** Blur already in the photo: Gaussian σ (px, working resolution) per analysis block, NaN where no edges. */
+  blur?: { bw: number; bh: number; data: Float32Array };
+  /** Long edge of the working image, px. */
+  longPx?: number;
+}
+
+/** How much a kind of subject calls for background blur (portraits most, architecture little). */
+const BLUR_BY_KIND: Record<string, number> = { person: 1, animal: 1, object: 0.9, vehicle: 0.7, building: 0.3 };
+/** Background blur radius per unit (magnification × depth behind), as a fraction of the long edge. */
+const LENS_K = 0.035; // a close portrait (size 0.85, background 0.6 behind) → ≈ 1.8 % of the long edge
 
 export function autoFocus(
   dist: { w: number; h: number; data: Float32Array },
   seg: { width: number; height: number; probs: Float32Array },
+  ctx: BlurContext = {},
 ): AutoFocus {
   const { w, h, data } = dist;
   const plane = seg.width * seg.height;
@@ -111,11 +125,52 @@ export function autoFocus(
   }
   const behindFrac = behind / counted, subjectFrac = subject / counted;
   const bgDist = behind ? farSum / behind : focus;
-  const justified = behindFrac > 0.3 && subjectFrac > 0.03 && subjectFrac < 0.6 && focus < farLimit;
-  const strength = clamp(((bgDist - focus) / Math.max(margin * 4, 0.2)) * 1.1, 0.25, 0.65);
+  const separable = behindFrac > 0.3 && subjectFrac > 0.03 && subjectFrac < 0.6 && focus < farLimit;
+
+  // How much blur — a thin-lens model. In disparity (which this distance is linear
+  // in) the blur disc of the background grows with the subject's magnification
+  // (its size in the frame) times how far behind it the background lies:
+  //   r = K · size · (background − subject's far end) · kind
+  // then scaled by how busy the background is (clutter benefits most), minus blur
+  // the lens already produced (added in quadrature), and converted to the renderer's
+  // strength through its own ramp at the background's distance.
+  const hiD = obj?.hi ?? focus;
+  const size = obj?.size ?? Math.sqrt(Math.max(subjectFrac, 0.01));
+  const kindF = obj ? BLUR_BY_KIND[obj.kind] ?? 0.8 : 0.6;
+  const behindD = Math.max(0, bgDist - hiD);
+  let busy = 0.5, existing = 0;
+  if (ctx.blur && ctx.longPx) {
+    // Background blocks: those whose distance is clearly behind the subject.
+    const { bw, bh, data: bl } = ctx.blur;
+    const sig: number[] = [];
+    let edges = 0, n = 0;
+    for (let by2 = 0; by2 < bh; by2++) for (let bx2 = 0; bx2 < bw; bx2++) {
+      const dx = Math.min(w - 1, Math.floor(((bx2 + 0.5) / bw) * w)), dy = Math.min(h - 1, Math.floor(((by2 + 0.5) / bh) * h));
+      if (data[dy * w + dx] <= hiD + margin) continue;
+      n++;
+      const v = bl[by2 * bw + bx2];
+      if (Number.isFinite(v)) { edges++; sig.push(v); }
+    }
+    if (n) busy = edges / n;
+    sig.sort((a, b) => a - b);
+    if (sig.length >= 5) existing = (2 * sig[Math.floor(sig.length / 2)]) / ctx.longPx; // blur disc ≈ 2σ
+  }
+  const target = Math.min(0.03, LENS_K * size * behindD * kindF * (0.85 + 0.3 * busy));
+  const add = Math.sqrt(Math.max(0, target * target - existing * existing));
+  // The renderer's ramp (render_dof.wgsl coc1) reaches full blur only at the far end;
+  // at the background's own distance it is partway. Meeting the target exactly there
+  // would over-blur whatever lies farther, so the conversion splits the difference
+  // (square root of the ramp).
+  const ramp = smoothstep01(behindD / clamp((1 - hiD) * 0.9, 0.12, 0.55));
+  const strength = clamp(add / (0.022 * Math.sqrt(Math.max(ramp, 0.1))), 0, 0.9);
+  const justified = separable && strength >= 0.12;
+  const blurWhy = `blur: subject ${Math.round(size * 100)}% of the frame, background ${behindD.toFixed(2)} behind, ${kindF < 1 ? `${obj?.kind ?? "subject"} ×${kindF}, ` : ""}background ${Math.round(busy * 100)}% busy` +
+    (existing > 0.002 ? `, already ${(existing * 100).toFixed(1)}% blurred by the lens` : "") + ` → ${(add * 100).toFixed(1)}% of the frame (strength ${strength.toFixed(2)})`;
   const reason = `subject: ${what} at (${((bx + 0.5) / w).toFixed(2)}, ${((by + 0.5) / h).toFixed(2)}) — ` + (justified
-    ? `subject at distance ${focus.toFixed(2)} (${(subjectFrac * 100).toFixed(0)}% of the frame) with ${(behindFrac * 100).toFixed(0)}% of the frame clearly behind it`
-    : focus >= farLimit
+    ? `subject at distance ${focus.toFixed(2)} (${(subjectFrac * 100).toFixed(0)}% of the frame) with ${(behindFrac * 100).toFixed(0)}% of the frame clearly behind it; ${blurWhy}`
+    : separable
+      ? `too little blur would be natural here — ${blurWhy}`
+      : focus >= farLimit
       ? `the likely subject is itself far away (${focus.toFixed(2)}) — nothing to separate`
       : behindFrac <= 0.3
         ? `only ${(behindFrac * 100).toFixed(0)}% of the frame lies clearly behind the subject — not enough depth separation`
@@ -139,7 +194,7 @@ function composition(u: number, v: number, thirds: number[][]): number {
   return 0.25 + Math.max(centre, 0.85 * third);
 }
 
-export interface Subject { kind: Kind; x: number; y: number; focus: number; area: number; score: number; lo?: number; hi?: number }
+export interface Subject { kind: Kind; x: number; y: number; focus: number; area: number; score: number; lo?: number; hi?: number; /** Largest side of its bounding box, as a fraction of the frame's (magnification). */ size?: number }
 
 /**
  * Candidate objects → the one the photograph is about (see the header).
@@ -217,6 +272,9 @@ export function findSubject(
     const ds = pix.map((i) => data[i]).sort((a, b) => a - b);
     best.lo = ds[Math.floor(ds.length * 0.03)];
     best.hi = ds[Math.floor(ds.length * 0.97)];
+    let x0 = w, x1 = 0, y0 = h, y1 = 0;
+    for (const i of pix) { const x = i % w, y = (i - x) / w; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+    best.size = Math.max((x1 - x0 + 1) / w, (y1 - y0 + 1) / h);
   }
   if (best.kind === "person" || best.kind === "animal") {
     // The head: the top 30% of the region's rows; focus on the upper half's median distance.

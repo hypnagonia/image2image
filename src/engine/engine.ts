@@ -339,7 +339,7 @@ export class Engine {
     this.s = s;
     await this.cacheDistance();
     // Automatic focus: subject from refined depth + segmentation + composition.
-    const af = autoFocus(s.distCPU!, scene.seg);
+    const af = autoFocus(s.distCPU!, scene.seg, { blur: { bw: report.blocks.bw, bh: report.blocks.bh, data: report.blur.perBlock }, longPx: Math.max(work.width, work.height) });
     decision.dofSuggestion = { justified: af.justified, focus: af.focus, strength: af.strength, reason: af.reason, x: af.x, y: af.y };
     // Depth zones by natural breaks of this photo's depth (boundaries fall in the
     // gaps between layers). Initial blur per zone follows the automatic focus
@@ -425,7 +425,9 @@ export class Engine {
     const dofNote = decision.decisions.find((d) => d.id === "dof");
     if (dofNote) { dofNote.value = af.justified ? "justified" : "not justified"; dofNote.reason = `auto focus at distance ${af.focus.toFixed(2)}: ${af.reason}`; }
     for (const p of [decision.params, params]) {
-      p.dof = { ...p.dof, focus: af.focus, focusSpan: af.span, strength: DEFAULT_DOF_STRENGTH, points: [] };
+      // Blur amount from the lens model (auto focus) when the photo calls for it; the
+      // default is only a starting point for turning depth of field on by hand.
+      p.dof = { ...p.dof, focus: af.focus, focusSpan: af.span, strength: af.justified ? af.strength : DEFAULT_DOF_STRENGTH, points: [] };
       if (autoDof && af.justified) p.enable = { ...p.enable, dof: true };
     }
     this.log(`auto focus: distance ${af.focus.toFixed(2)} at (${af.x.toFixed(2)}, ${af.y.toFixed(2)}) — ${af.justified ? "blur justified" : "no blur"}: ${af.reason}${autoDof && af.justified ? " — applied (Auto depth of field)" : ""}`);
