@@ -274,11 +274,15 @@ export const es: Dict = {
   "reg.skinHint": "La piel es una capa sobre las personas: la máscara de piel de Apple en ProRAW; si no, personas × color de piel — caras y manos, no ropa. Sus ajustes sustituyen a los de la región donde hay piel. Baja Textura para suavizar la piel y Claridad para un aspecto más suave.",
 
   // ---- Regions tab
-  "reg.hint": "Ajusta cada región detectada por separado. Los cambios siguen las máscaras suaves, así que los bordes no se notan.",
+  "reg.hint": "Ajusta cada parte de la foto por separado: por lo que es, por su distancia o por ambas (por ejemplo, solo los edificios lejanos). Los cambios siguen máscaras suaves, sin bordes visibles.",
   "reg.highlight": "Resaltar la región seleccionada",
   "reg.showAll": "Mostrar regiones que no están en esta foto",
   "reg.reset": "Restablecer región a automático",
   "reg.resetAll": "Restablecer todas las regiones",
+  "reg.byRegion": "Por región",
+  "reg.byDistance": "Por distancia",
+  "reg.all": "Todo",
+  "reg.relHint": "Ajusta solo esta parte, sobre los ajustes de su región: los desplazamientos se suman y los multiplicadores (×) se multiplican. Doble toque en el nombre para ningún cambio.",
   "reg.light": "Luz",
   "reg.colour": "Color",
   "reg.detail": "Detalle",

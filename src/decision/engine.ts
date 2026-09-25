@@ -71,6 +71,8 @@ export interface DecisionResult {
   /** Conservative exposure correction the engine would apply with Auto exposure on (EV). */
   exposureSuggestion: number;
   /** Automatic depth-of-field justification (not applied unless enabled). */
+  /** Share of the frame (%) of each region at each distance (cell), set once depth is known. */
+  cellCoverage?: Record<string, number>;
   /** Automatic curve settings (unscaled), set by the engine once depth is known (autoCurves.ts). */
   autoCurves?: AutoCurveBands;
   dofSuggestion: { justified: boolean; focus: number; strength: number; reason: string; x?: number; y?: number; zoneEdges?: number[]; zones?: Array<{ share: number; label: string; lo: number; hi: number }>; bands?: Array<{ share: number; label: string; lo: number; hi: number }> };

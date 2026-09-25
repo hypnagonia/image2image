@@ -56,3 +56,18 @@ test("distance curves", () => {
   assert.equal(r.ignored.length, 1);
   assert.equal(r.previous.find(([k]) => k === "depthCurves.far")?.[1], undefined);
 });
+
+test("by distance and by region at a distance, with undo", () => {
+  const p = defaultParams();
+  const r = applyAnswer(p, { set: { "distance.far.saturation": -0.1, "cells.building.far.warmth": -0.2, "cells.building.near.exposure": 0.3, "cellCurves.building.far.l": [[0.5, 0.45]], "cells.building.behind.warmth": 1 } }, () => true);
+  assert.equal(p.distance.far.saturation, -0.1);
+  assert.equal(p.cells["building.far"]?.warmth, -0.2);
+  assert.equal(p.cells["building.far"]?.clarity, 1, "other keys neutral");
+  assert.equal(p.cells["building.near"]?.exposure, 0.3);
+  assert.deepEqual(p.cellCurves["building.far"]?.l, [{ x: 0, y: 0 }, { x: 0.5, y: 0.45 }, { x: 1, y: 1 }]);
+  assert.equal(r.ignored.length, 1);
+  // undo: cells that did not exist are removed again
+  const prev = new Map(r.previous);
+  assert.ok(prev.has("cells.building.far") && prev.get("cells.building.far") === undefined);
+  assert.equal(prev.get("distance.far.saturation"), 0);
+});

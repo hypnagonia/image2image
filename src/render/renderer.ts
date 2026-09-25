@@ -21,7 +21,7 @@ import { CURVE_LUT_SIZE, TONE_LUT_SIZE, curveLUT, isFlat, toneCurveLUT } from ".
 import { buildLUT, LOOKS, type Look } from "./looks.ts";
 import { DEPTH_CURVE_SIZE, HUE_CURVE_SIZE, PROFILE_CURVE_SIZE, depthTable, hueCurveTable, profileCurveTable, profileUniforms, isNeutral } from "../looks/profile.ts";
 import { GROUPS } from "../neural/scene.ts";
-import { DEPTH_BANDS, neutralSemantic, type Curves, type DepthBand, type Params } from "../decision/params.ts";
+import { CELLS, DEPTH_BANDS, neutralSemantic, type CellKey, type Curves, type DepthBand, type Params, type SemanticAdjust } from "../decision/params.ts";
 import type { RefinedMaps } from "../refine/refine.ts";
 
 export interface RenderSource {
@@ -54,16 +54,26 @@ export interface RenderOptions {
 
 const MIDDLE_GREY_EV = Math.log2(0.18);
 
-/** Rows of the curve table: the photo's curves, each region's, skin's, then each distance band's. */
-const REGION_ROWS = ["photo", ...GROUPS, "skin", ...DEPTH_BANDS] as const;
+/** Rows of the curve table: the photo's curves, each region's, skin's, each distance band's, then each region-at-a-distance cell's. */
+const REGION_ROWS = ["photo", ...GROUPS, "skin", ...DEPTH_BANDS, ...CELLS] as const;
 const isBand = (r: string): r is DepthBand => (DEPTH_BANDS as string[]).includes(r);
+const isCell = (r: string): r is CellKey => r.includes(".");
+/** First cell row (16): bits 0–15 of the curve mask are the rows before it; cells have their own mask words. */
+const CELL_ROW0 = REGION_ROWS.indexOf(CELLS[0]);
+const semNeutral = (s: SemanticAdjust | undefined) => !s || (["exposure", "highlights", "saturation", "vibrance", "hue", "warmth", "tint"] as const).every((k) => Math.abs(s[k] ?? 0) < 1e-6)
+  && (["clarity", "texture", "sharpen", "denoise", "dehaze"] as const).every((k) => Math.abs((s[k] ?? 1) - 1) < 1e-6);
+/** A relative adjustment as the shader's three vec4 (hue in radians). */
+const semVec = (s: SemanticAdjust | undefined): number[] => {
+  const n = s ?? neutralSemantic();
+  return [n.exposure, n.highlights, n.saturation, n.vibrance, (n.hue * Math.PI) / 180, n.clarity, n.texture, n.sharpen, n.denoise, n.dehaze, n.warmth ?? 0, n.tint ?? 0];
+};
 const CURVE_ROWS = REGION_ROWS.length;
 const FLAT_PTS = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
 const FLAT_CURVES: Curves = { l: FLAT_PTS, r: FLAT_PTS, g: FLAT_PTS, b: FLAT_PTS };
 const curvesFlat = (c: Partial<Curves> | undefined) => !c || (["l", "r", "g", "b"] as const).every((k) => !c[k] || isFlat(c[k]!));
 /** A region's curves, channel by channel (a missing channel is flat). */
 function regionCurvesOf(p: Params, r: Exclude<(typeof REGION_ROWS)[number], "photo">): Curves {
-  const c = isBand(r) ? p.depthCurves?.[r] : p.regionCurves?.[r];
+  const c = isCell(r) ? p.cellCurves?.[r] : isBand(r) ? p.depthCurves?.[r] : p.regionCurves?.[r];
   return { l: c?.l ?? FLAT_CURVES.l, r: c?.r ?? FLAT_CURVES.r, g: c?.g ?? FLAT_CURVES.g, b: c?.b ?? FLAT_CURVES.b };
 }
 /** Bit 0: the photo's curves; bit i: row i (regions, skin, distance bands) has a curve. Region curves need region processing on. */
@@ -71,8 +81,9 @@ function curveBits(p: Params): number {
   if (!p.enable.curves) return 0;
   let bits = curvesFlat(p.curves) ? 0 : 1;
   REGION_ROWS.forEach((r, i) => {
-    if (r === "photo") return;
+    if (r === "photo" || i >= CELL_ROW0) return;
     // Region and skin curves are region processing; distance curves are not.
+    if (isCell(r)) return; // cells: their own mask words (cm)
     if (isBand(r) ? !curvesFlat(p.depthCurves?.[r]) : p.enable.semantic && !curvesFlat(p.regionCurves?.[r])) bits |= 1 << i;
   });
   return bits;
@@ -119,8 +130,8 @@ export class Renderer {
       if (!this.toneLut) this.toneLut = gpu.tex("toneLUT", TONE_LUT_SIZE, 1, "rgba16float", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
       gpu.device.queue.writeTexture({ texture: this.toneLut }, floatsToHalves(toneCurveLUT(p.tone, hdrStops)), { bytesPerRow: TONE_LUT_SIZE * 8 }, { width: TONE_LUT_SIZE, height: 1 });
     }
-    // Curve table: row 0 = the photo's curves, rows 1…11 = the regions', 12 = skin, 13…15 = near / middle / far.
-    const ck = JSON.stringify([p.curves, p.regionCurves, p.depthCurves]);
+    // Curve table: row 0 = the photo's curves, rows 1…11 = the regions', 12 = skin, 13…15 = near / middle / far, 16… = cells.
+    const ck = JSON.stringify([p.curves, p.regionCurves, p.depthCurves, p.cellCurves]);
     if (ck !== this.curveKey) {
       this.curveKey = ck;
       if (!this.curveLut) this.curveLut = gpu.tex("curveLUT", CURVE_LUT_SIZE, CURVE_ROWS, "rgba16float", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
@@ -220,14 +231,25 @@ export class Renderer {
     // Tone uniforms followed by the target rectangle (tgt: offset x/y, width, height).
     const base = this.toneUniforms(p, src, maps, o, lutSize, lutOn);
     // Tone uniforms, then tgt, hl, vig (amount, midpoint, feather, roundness), vig2 (vignette highlights, depth band edges near|middle, middle|far, band crossfade), hdr (on).
-    const buf = new ArrayBuffer(base.byteLength + 80);
+    const buf = new ArrayBuffer(base.byteLength + 80 + 144 + 1584 + 16);
     new Uint8Array(buf).set(new Uint8Array(base));
     new Int32Array(buf, base.byteLength, 4).set([0, ty0, src.width, th]);
-    new Float32Array(buf, base.byteLength + 16, 4).set([o.zoneRange?.[0] ?? 0, o.zoneRange?.[1] ?? 1, 0, 0]);
+    new Float32Array(buf, base.byteLength + 16, 4).set([o.zoneRange?.[0] ?? -1, o.zoneRange?.[1] ?? 2, 0, 0]);
     const v = p.vignette ?? { amount: 0, midpoint: 0.5, feather: 0.6, roundness: 0.3, highlights: 0.5 };
     const db = p.depthBands ?? [0.33, 0.66];
     new Float32Array(buf, base.byteLength + 32, 8).set([v.amount, v.midpoint, v.feather, v.roundness, v.highlights, db[0], db[1], 0.06]);
     new Float32Array(buf, base.byteLength + 64, 4).set([gainT ? 1 : 0, 0, 0, 0]);
+    // By distance and by region at a distance: relative settings, then which are active.
+    const regionsOn = p.enable.semantic;
+    new Float32Array(buf, base.byteLength + 80, 36).set(DEPTH_BANDS.flatMap((b) => semVec(p.distance?.[b])));
+    new Float32Array(buf, base.byteLength + 224, 396).set(CELLS.flatMap((c) => semVec(p.cells?.[c])));
+    const cm = new Uint32Array(4);
+    CELLS.forEach((c, i) => {
+      if (regionsOn && !semNeutral(p.cells?.[c])) cm[i < 32 ? 0 : 1] |= i < 32 ? (1 << i) >>> 0 : 1;
+      if (regionsOn && p.enable.curves && !curvesFlat(p.cellCurves?.[c])) cm[i < 32 ? 2 : 3] |= i < 32 ? (1 << i) >>> 0 : 1;
+    });
+    DEPTH_BANDS.forEach((b, i) => { if (regionsOn && !semNeutral(p.distance?.[b])) cm[1] |= 1 << (1 + i); });
+    new Uint32Array(buf, base.byteLength + 1808, 4).set(cm);
     const u = gpu.uniform(buf, "tone.u");
     const profU = gpu.uniform(profileUniforms(p.profile, profileOn, lutOn, lutSize), "profile.u");
     temp.push(u, profU);

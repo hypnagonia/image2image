@@ -279,11 +279,15 @@ export const en = {
   "reg.skinHint": "Skin is a layer across people: Apple's skin mask on ProRAW, otherwise people × skin colour — faces and hands, not clothes. Its settings replace the region's where there is skin. Lower Texture to smooth skin, lower Clarity for a softer look.",
 
   // ---- Regions tab
-  "reg.hint": "Adjust each detected region on its own. Changes follow the soft region masks, so boundaries stay invisible.",
+  "reg.hint": "Adjust each part of the photo on its own — by what it is, by how far away it is, or both (e.g. only the far buildings). Changes follow soft masks, so boundaries stay invisible.",
   "reg.highlight": "Highlight the selected region",
   "reg.showAll": "Show regions not found in this photo",
   "reg.reset": "Reset region to automatic",
   "reg.resetAll": "Reset all regions",
+  "reg.byRegion": "By region",
+  "reg.byDistance": "By distance",
+  "reg.all": "All",
+  "reg.relHint": "Adjusts only this part, on top of its region's own settings: offsets add, multipliers (×) multiply. Double-tap a label for no change.",
   "reg.light": "Light",
   "reg.colour": "Colour",
   "reg.detail": "Detail",

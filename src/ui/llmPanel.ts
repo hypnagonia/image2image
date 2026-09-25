@@ -7,7 +7,7 @@
  * every key is checked against the table below and clamped to its range, and
  * anything unknown is reported and ignored. One step of undo is kept.
  */
-import { DEPTH_BANDS, type CurvePoint, type Decision, type DepthBand, type Params, type Region, type SemanticAdjust } from "../decision/params.ts";
+import { DEPTH_BANDS, neutralSemantic, type CurvePoint, type Curves, type Decision, type DepthBand, type Params, type Region, type SemanticAdjust } from "../decision/params.ts";
 import { isFlat } from "../render/curves.ts";
 import { flatCurves } from "./toneCurves.ts";
 import type { Summary } from "../engine/protocol.ts";
@@ -20,6 +20,8 @@ type Ctx = {
   summary: () => Summary | undefined;
   decisions: () => Decision[];
   looks: () => Array<{ id: string; name: string; description: string }>;
+  /** Share of the frame (%) of each region at each distance. */
+  cellCoverage?: () => Record<string, number> | undefined;
   /** Makes the look with this id the active one; false if there is none. */
   selectLook: (id: string) => boolean;
   changed: () => void;
@@ -92,18 +94,24 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string,
   return e;
 }
 
-const get = (o: unknown, path: string): unknown => path.split(".").reduce((a: unknown, k) => (a as Record<string, unknown> | undefined)?.[k], o);
-function set(o: unknown, path: string, v: unknown) {
+/** Path segments; under `cells` / `cellCurves` the region and distance form one key ("building.far"). */
+function keys(path: string): string[] {
   const ks = path.split(".");
+  return (ks[0] === "cells" || ks[0] === "cellCurves") && ks.length >= 3 ? [ks[0], `${ks[1]}.${ks[2]}`, ...ks.slice(3)] : ks;
+}
+const get = (o: unknown, path: string): unknown => keys(path).reduce((a: unknown, k) => (a as Record<string, unknown> | undefined)?.[k], o);
+function set(o: unknown, path: string, v: unknown) {
+  const ks = keys(path);
   const last = ks.pop()!;
-  (ks.reduce((a: unknown, k) => (a as Record<string, unknown>)[k], o) as Record<string, unknown>)[last] = v;
+  const parent = ks.reduce((a: Record<string, unknown>, k) => (a[k] ??= {}) as Record<string, unknown>, o as Record<string, unknown>);
+  if (v === undefined) delete parent[last]; else parent[last] = v;
 }
 const r3 = (v: number) => Math.round(v * 1000) / 1000;
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 const curveText = (c: CurvePoint[]) => JSON.stringify(c.map((q) => [r3(q.x), r3(q.y)]));
 
 /** The prompt: context, parameters, looks, answer format. Always in English (it is for the model). */
-export function buildPrompt(p: Params, auto: Params | undefined, s: Summary | undefined, decisions: Decision[], looks: Array<{ id: string; name: string; description: string }>, goal: string): string {
+export function buildPrompt(p: Params, auto: Params | undefined, s: Summary | undefined, decisions: Decision[], looks: Array<{ id: string; name: string; description: string }>, goal: string, cells?: Record<string, number>): string {
   const L: string[] = [];
   L.push("You are a photo editor adjusting a photograph in a raw development app (\"Shikarno\"). I will show you the current rendering (attached image, if any), the measurements the app made, and every parameter you can change. Propose changes that make this photograph look its best" + (goal.trim() ? " while following my request below." : "."));
   if (goal.trim()) L.push("", "## My request", goal.trim());
@@ -147,6 +155,20 @@ export function buildPrompt(p: Params, auto: Params | undefined, s: Summary | un
     if (diff.length) { any = true; L.push(`- ${g}: ` + diff.map((q) => `${q.key} ${r3(cur[q.key])}`).join(", ")); }
   }
   if (!any) L.push("- (all neutral)");
+  L.push("", "### By distance, and by region at a distance",
+    "The semantic and depth maps together split every region by distance, so the near buildings and the far buildings (or near and far trees) are separate and can be treated differently — e.g. a warmer, brighter foreground building and a cooler, softer one behind it.",
+    "- distance.<near|middle|far>.<key> — everything at that distance (all regions).",
+    "- cells.<region>.<near|middle|far>.<key> — one region at one distance, e.g. cells.building.far.saturation.",
+    "- cellCurves.<region>.<near|middle|far>.<l|r|g|b> — that part's own curve (same format as curves.l).",
+    "Keys and ranges as for regions, but these are RELATIVE layers on top of the region's own settings: exposure/highlights/warmth/tint/saturation/vibrance/hue add (0 = no change), clarity/texture/sharpen/denoise/dehaze multiply (1 = no change). Order: region → distance → region at a distance → skin.",
+    "Present in this photo (share of the frame): " + (Object.entries(cells ?? {}).filter(([, v]) => v >= 1).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}%`).join(", ") || "(unknown)"));
+  const relDiff = (s: SemanticAdjust | undefined) => s ? SEM.filter((q) => Math.abs(s[q.key] - (["clarity", "texture", "sharpen", "denoise", "dehaze"].includes(q.key) ? 1 : 0)) > 1e-3).map((q) => `${q.key} ${r3(s[q.key])}`) : [];
+  const layers = [
+    ...DEPTH_BANDS.map((b) => [`distance.${b}`, relDiff(p.distance?.[b])] as const),
+    ...Object.entries(p.cells ?? {}).map(([k, s]) => [`cells.${k}`, relDiff(s)] as const),
+  ].filter(([, d]) => d.length).map(([k, d]) => `- ${k}: ${d.join(", ")}`);
+  const cellCurveText = Object.entries(p.cellCurves ?? {}).flatMap(([r, c]) => CURVES.filter((k) => c?.[k] && !isFlat(c[k])).map((k) => `${r}.${k} ${curveText(c![k])}`));
+  L.push("Current: " + (layers.length ? "" : "(none)"), ...layers, "Current region-at-a-distance curves: " + (cellCurveText.join(" · ") || "(none)"));
   L.push("", "### Curves",
     "Paths: curves.l (luminance), curves.r, curves.g, curves.b. Value: list of [x, y] points in display-encoded 0…1 (x = input, y = output), sorted by x, including [0, y0] and [1, y1], at most 8 points. The user edits them as point curves, so a few well-placed points read best. [[0,0],[1,1]] = unchanged. Examples: gentle S-curve [[0,0],[0.25,0.22],[0.75,0.79],[1,1]]; matte blacks [[0,0.04],[0.2,0.2],[1,1]]; cooler shadows via curves.b [[0,0.03],[0.3,0.31],[1,1]].",
     "Current: " + CURVES.map((c) => `${c} ${curveText(p.curves[c])}`).join(" · "),
@@ -286,6 +308,48 @@ export function applyAnswer(p: Params, answer: unknown, selectLook: (id: string)
       applied.push(`${path} = ${r3(c)}${c !== v ? ` (clamped from ${v})` : ""}`);
       continue;
     }
+    // By distance (relative): distance.<near|middle|far>.<key>
+    const ds = /^distance\.(\w+)\.(\w+)$/.exec(path);
+    if (ds) {
+      const def = SEM.find((q) => q.key === ds[2]);
+      const v = num(raw);
+      if (!DEPTH_BANDS.includes(ds[1] as DepthBand) || !def) { ignored.push(`${path}: use near, middle or far and a region key`); continue; }
+      if (!Number.isFinite(v)) { ignored.push(`${path}: not a number`); continue; }
+      const c = clamp(v, def.min, def.max);
+      p.distance ??= { near: neutralSemantic(), middle: neutralSemantic(), far: neutralSemantic() };
+      remember(path);
+      set(p, path, c);
+      applied.push(`${path} = ${r3(c)}${c !== v ? ` (clamped from ${v})` : ""}`);
+      continue;
+    }
+    // A region at a distance (relative): cells.<region>.<band>.<key>, cellCurves.<region>.<band>.<c>
+    const cs = /^(cells|cellCurves)\.(\w+)\.(\w+)\.(\w+)$/.exec(path);
+    if (cs) {
+      const [, what, g, b, k] = cs;
+      if (!GROUPS.includes(g as (typeof GROUPS)[number]) || !DEPTH_BANDS.includes(b as DepthBand)) { ignored.push(`${path}: unknown region or distance`); continue; }
+      const cell = `${g}.${b}`;
+      if (what === "cells") {
+        const def = SEM.find((q) => q.key === k);
+        const v = num(raw);
+        if (!def) { ignored.push(`${path}: unknown key`); continue; }
+        if (!Number.isFinite(v)) { ignored.push(`${path}: not a number`); continue; }
+        const c = clamp(v, def.min, def.max);
+        p.cells ??= {};
+        remember(`cells.${cell}`);
+        (p.cells as Record<string, SemanticAdjust>)[cell] = { ...((p.cells as Record<string, SemanticAdjust>)[cell] ?? neutralSemantic()), [k]: c };
+        applied.push(`${path} = ${r3(c)}${c !== v ? ` (clamped from ${v})` : ""}`);
+      } else {
+        if (!/^[lrgb]$/.test(k)) { ignored.push(`${path}: channel must be l, r, g or b`); continue; }
+        const ok = parseCurve(raw);
+        if (!ok) { ignored.push(`${path}: needs 1…16 points`); continue; }
+        p.cellCurves ??= {};
+        remember(`cellCurves.${cell}`);
+        const cc = p.cellCurves as Record<string, Curves>;
+        cc[cell] = { ...(cc[cell] ?? flatCurves()), [k]: ok };
+        applied.push(`${path} = ${curveText(ok)}`);
+      }
+      continue;
+    }
     const rc = /^regionCurves\.(\w+)\.([lrgb])$/.exec(path);
     if (rc) {
       const r = rc[1] as Region;
@@ -345,7 +409,7 @@ export function createLlmPanel(root: HTMLElement, ctx: Ctx) {
 
   function refresh() {
     const p = ctx.params();
-    promptBox.value = p ? buildPrompt(p, ctx.auto(), ctx.summary(), ctx.decisions(), ctx.looks(), goal.value) : t("llm.noPhoto");
+    promptBox.value = p ? buildPrompt(p, ctx.auto(), ctx.summary(), ctx.decisions(), ctx.looks(), goal.value, ctx.cellCoverage?.()) : t("llm.noPhoto");
   }
   goal.oninput = refresh;
 

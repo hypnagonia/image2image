@@ -10,8 +10,10 @@
  */
 import { GROUPS } from "../neural/scene.ts";
 
-export const HIST_TARGETS = ["photo", ...GROUPS, "skin", "near", "middle", "far"] as const;
+const BANDS = ["near", "middle", "far"] as const;
+export const HIST_TARGETS = ["photo", ...GROUPS, "skin", ...BANDS, ...GROUPS.flatMap((g) => BANDS.map((b) => `${g}.${b}` as const))] as const;
 export type HistTarget = (typeof HIST_TARGETS)[number];
+const CELL0 = 2 + GROUPS.length + BANDS.length;
 export const HIST_BINS = 64;
 const CH = 4;
 
@@ -40,25 +42,31 @@ export function previewHistograms(
       const l = Math.round(0.2290 * r + 0.6917 * g + 0.0793 * b);
       const v = [l, r, g, b];
       add(0, 1, v);
+      let wb: number[] | undefined;
+      if (dist) {
+        const dx = Math.min(dist.w - 1, Math.floor((x / w) * dist.w)), dy = Math.min(dist.h - 1, Math.floor((y / h) * dist.h));
+        const d = dist.data[dy * dist.w + dx];
+        const wn = 1 - smooth(bands[0] - f, bands[0] + f, d), wf = smooth(bands[1] - f, bands[1] + f, d);
+        wb = [wn, Math.max(0, 1 - wn - wf), wf];
+      }
       if (seg) {
         const sx = Math.min(seg.width - 1, Math.floor((x / w) * seg.width)), sy = Math.min(seg.height - 1, Math.floor((y / h) * seg.height));
         const k = sy * seg.width + sx;
         for (let gi = 0; gi < GROUPS.length; gi++) {
           const p = seg.probs[gi * plane + k];
-          if (p > 0.05) add(1 + gi, p, v);
+          if (p > 0.05) {
+            add(1 + gi, p, v);
+            // The same region at each distance (a cell).
+            if (wb) for (let b = 0; b < 3; b++) if (p * wb[b] > 0.05) add(CELL0 + gi * 3 + b, p * wb[b], v);
+          }
         }
         const warm = r > g && g > b && r - b > 15 ? 1 : 0;
         const sk = seg.probs[person * plane + k] * warm;
         if (sk > 0.05) add(1 + GROUPS.length, sk, v);
       }
-      if (dist) {
-        const dx = Math.min(dist.w - 1, Math.floor((x / w) * dist.w)), dy = Math.min(dist.h - 1, Math.floor((y / h) * dist.h));
-        const d = dist.data[dy * dist.w + dx];
-        const wn = 1 - smooth(bands[0] - f, bands[0] + f, d), wf = smooth(bands[1] - f, bands[1] + f, d), wm = Math.max(0, 1 - wn - wf);
+      if (wb) {
         const t0 = 2 + GROUPS.length;
-        if (wn > 0.05) add(t0, wn, v);
-        if (wm > 0.05) add(t0 + 1, wm, v);
-        if (wf > 0.05) add(t0 + 2, wf, v);
+        for (let b = 0; b < 3; b++) if (wb[b] > 0.05) add(t0 + b, wb[b], v);
       }
     }
   }
@@ -73,8 +81,34 @@ export function previewHistograms(
 
 /** One histogram out of the packed array. */
 export function histogramOf(all: Float32Array | undefined, target: HistTarget, chan: "l" | "r" | "g" | "b"): Float32Array | undefined {
+  if (!all || all.length < HIST_TARGETS.length * 4 * HIST_BINS) return undefined;
   if (!all) return undefined;
   const t = HIST_TARGETS.indexOf(target), c = ["l", "r", "g", "b"].indexOf(chan);
   const h = all.subarray((t * CH + c) * HIST_BINS, (t * CH + c + 1) * HIST_BINS);
   return h.some((v) => v > 0) ? h : undefined;
+}
+
+/** Share of the frame (percent) of each region at each distance — soft, as the renderer weighs cells. */
+export function cellCoverage(
+  seg: { width: number; height: number; probs: Float32Array },
+  dist: { w: number; h: number; data: Float32Array },
+  bands: [number, number],
+): Record<string, number> {
+  const plane = seg.width * seg.height, f = 0.06;
+  const acc = new Float64Array(GROUPS.length * 3);
+  let n = 0;
+  for (let y = 0; y < dist.h; y += 2) for (let x = 0; x < dist.w; x += 2) {
+    const d = dist.data[y * dist.w + x];
+    const wn = 1 - smooth(bands[0] - f, bands[0] + f, d), wf = smooth(bands[1] - f, bands[1] + f, d);
+    const wb = [wn, Math.max(0, 1 - wn - wf), wf];
+    const k = Math.min(seg.height - 1, Math.floor((y / dist.h) * seg.height)) * seg.width + Math.min(seg.width - 1, Math.floor((x / dist.w) * seg.width));
+    for (let g = 0; g < GROUPS.length; g++) {
+      const p = seg.probs[g * plane + k];
+      if (p > 0.01) for (let b = 0; b < 3; b++) acc[g * 3 + b] += p * wb[b];
+    }
+    n++;
+  }
+  const out: Record<string, number> = {};
+  GROUPS.forEach((g, gi) => BANDS.forEach((b, bi) => { out[`${g}.${b}`] = Math.round((acc[gi * 3 + bi] / Math.max(n, 1)) * 1000) / 10; }));
+  return out;
 }

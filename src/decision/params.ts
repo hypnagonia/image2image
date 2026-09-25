@@ -20,6 +20,15 @@ export type Region = Group | "skin";
 export type DepthBand = "near" | "middle" | "far";
 export const DEPTH_BANDS: DepthBand[] = ["near", "middle", "far"];
 
+/**
+ * A region at a distance — "building.near", "building.far": semantic and depth
+ * maps together, so two buildings at different distances are separate. Cell
+ * index = group index × 3 + band index (render_tone.wgsl).
+ */
+export type CellKey = `${Group}.${DepthBand}`;
+export const cellKey = (g: Group, b: DepthBand): CellKey => `${g}.${b}`;
+export const CELLS: CellKey[] = GROUPS.flatMap((g) => DEPTH_BANDS.map((b) => cellKey(g, b)));
+
 /** A user-chosen focus point: position in the image (0..1) and the refined distance there. */
 export interface FocusPoint {
   x: number; y: number; dist: number;
@@ -106,6 +115,17 @@ export interface Params {
    * ProRAW, else the person mask × a skin-colour likelihood).
    */
   skin: SemanticAdjust;
+  /**
+   * Adjustments by distance (everything near / middle / far) and by region at a
+   * distance (cells). Both are *relative*, layered on the region's own settings:
+   * exposure, highlights, warmth, tint, saturation, vibrance and hue add;
+   * clarity, texture, sharpening, noise reduction and dehaze multiply.
+   * Neutral = no change. Order: region → distance → cell → skin.
+   */
+  distance: Record<DepthBand, SemanticAdjust>;
+  cells: Partial<Record<CellKey, SemanticAdjust>>;
+  /** Curves per cell, after the region and distance curves. */
+  cellCurves: Partial<Record<CellKey, Curves>>;
   depth: { near: number; far: number };
   /**
    * Vignette, applied in linear light as an exposure falloff (like a lens):
@@ -161,6 +181,9 @@ export function defaultParams(): Params {
     dehaze: { strength: 0, light: [1, 1, 1], beta: 1, minT: 0.45 },
     semantic: Object.fromEntries(GROUPS.map((g) => [g, neutralSemantic()])) as Record<Group, SemanticAdjust>,
     skin: neutralSemantic(),
+    distance: { near: neutralSemantic(), middle: neutralSemantic(), far: neutralSemantic() },
+    cells: {},
+    cellCurves: {},
     regionCurves: {},
     depthCurves: {},
     depthBands: [0.33, 0.66],

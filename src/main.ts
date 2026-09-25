@@ -578,6 +578,8 @@ adjustPane.append(
 // Curves for this photo (L, R, G, B), independent of the look's own curves and of
 // the per-region curves (Regions tab): tone-range sliders (src/ui/toneCurves.ts).
 let histograms: Float32Array | undefined;
+/** Share of the frame (%) of each region at each distance. */
+let cellCov: Record<string, number> | undefined;
 const photoCurves = createToneCurves({
   histogram: (c) => histogramOf(histograms, "photo", c),
   get: () => params?.curves,
@@ -642,6 +644,7 @@ const llmPanel = createLlmPanel(llmPane, {
   summary: () => summary,
   decisions: () => decisions,
   looks: () => lookPanel.list(),
+  cellCoverage: () => cellCov,
   selectLook: (id) => lookPanel.select(id),
   changed: () => { lookPanel.invalidate(); regionsPanel.render(); syncControls(); pushParams(); },
   canvas,
@@ -652,9 +655,13 @@ const regionsPanel = createRegionsPanel(regionsPane, {
   params: () => params,
   auto: () => autoParams,
   coverage: () => summary?.coverage,
-  histogram: (region, c) => histogramOf(histograms, region, c),
+  cellCoverage: () => cellCov,
+  bandShare: () => dofInfo?.bands?.map((b) => b.share),
+  histogram: (target, c) => histogramOf(histograms, target, c),
   changed: () => { lookPanel.invalidate(); pushParams(); },
-  highlight: (i) => send(i === undefined ? { type: "view", view: currentView } : { type: "view", view: 4, region: i }),
+  // A region (view 4, optionally only at a depth range: a region at a distance) or only a depth range (view 5).
+  highlight: (h) => send(h === undefined ? { type: "view", view: currentView }
+    : h.region === undefined ? { type: "view", view: 5, range: h.range } : { type: "view", view: 4, region: h.region, range: h.range }),
 });
 
 // Depth / DoF
@@ -1068,6 +1075,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case "analysis":
       summary = m.summary; decisions = m.decisions; autoParams = m.auto; params = m.params; dofInfo = m.dof;
       autoCurveBands = m.autoCurves;
+      cellCov = m.cellCoverage;
       histograms = undefined; // the previous photo's; the first final preview brings new ones
       exposureSuggestion = m.exposureSuggestion;
       aeNote.textContent = exposureSuggestion ? t("adj.suggests", { ev: `${exposureSuggestion > 0 ? "+" : ""}${exposureSuggestion.toFixed(2)}` }) : t("adj.noCorrection");

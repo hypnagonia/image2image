@@ -33,7 +33,7 @@ import type { AnalysisReport } from "../analysis/types.ts";
 import { decide, type DecisionResult } from "../decision/engine.ts";
 import { autoFocus } from "../decision/focus.ts";
 import { depthZones } from "../decision/zones.ts";
-import { previewHistograms } from "../analysis/previewHist.ts";
+import { cellCoverage, previewHistograms } from "../analysis/previewHist.ts";
 import { applyAutoCurves, autoCurves } from "../decision/autoCurves.ts";
 import type { Params } from "../decision/params.ts";
 import { Renderer, type RenderSource } from "../render/renderer.ts";
@@ -132,7 +132,7 @@ export class Engine {
 
   /** Depth range of the highlighted zone (view 5; `region` holds the zone index, or `viewRange` an explicit range). */
   private zoneRange(): [number, number] | undefined {
-    if (this.view === 5 && this.viewRange) return this.viewRange;
+    if ((this.view === 5 || this.view === 4) && this.viewRange) return this.viewRange; // view 4: a region at a distance
     const e = this.s?.decision.dofSuggestion.zoneEdges;
     if (this.view !== 5 || !e) return undefined;
     const i = Math.min(4, Math.max(0, this.region));
@@ -348,6 +348,7 @@ export class Engine {
       const b1 = z3[1].lo, b2 = Math.max(z3[2].lo, b1 + 0.02);
       for (const p of [decision.params, params]) p.depthBands = [b1, b2];
       decision.dofSuggestion.bands = z3.map((z) => ({ share: z.share, label: z.label, lo: z.lo, hi: z.hi }));
+      decision.cellCoverage = cellCoverage(scene.seg, s.distCPU!, [b1, b2]);
       this.log("distance bands for curves: " + z3.map((z, i) => `${["near", "middle", "far"][i]} ${z.lo.toFixed(2)}–${z.hi.toFixed(2)} ${Math.round(z.share * 100)}% ${z.label}`).join(" | "));
 
       // Automatic curves: the photo, regions, skin and distance, measured through the rendering.
@@ -373,7 +374,7 @@ export class Engine {
       if (autoDof && af.justified) p.enable = { ...p.enable, dof: true };
     }
     this.log(`auto focus: distance ${af.focus.toFixed(2)} at (${af.x.toFixed(2)}, ${af.y.toFixed(2)}) — ${af.justified ? "blur justified" : "no blur"}: ${af.reason}${autoDof && af.justified ? " — applied (Auto depth of field)" : ""}`);
-    this.post({ type: "analysis", summary: this.summary(file.name), decisions: decision.decisions, auto: decision.params, params, dof: decision.dofSuggestion, exposureSuggestion: decision.exposureSuggestion, autoCurves: decision.autoCurves });
+    this.post({ type: "analysis", summary: this.summary(file.name), decisions: decision.decisions, auto: decision.params, params, dof: decision.dofSuggestion, exposureSuggestion: decision.exposureSuggestion, autoCurves: decision.autoCurves, cellCoverage: decision.cellCoverage });
     this.post({ type: "profile", stages: P.stages });
 
     // --- first preview (before neural restoration) --------------------------------------

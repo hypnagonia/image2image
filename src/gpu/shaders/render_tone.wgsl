@@ -44,6 +44,9 @@ struct U {
   vig: vec4<f32>,           // vignette: amount, midpoint, feather, roundness
   vig2: vec4<f32>,          // vignette highlight protection; distance band edges (near|middle, middle|far) and crossfade
   hdr: vec4<f32>,           // x: write the HDR gain (1) or not (0)
+  dsem: array<vec4<f32>, 9>,  // by distance (near, middle, far), relative to the region: 3 vec4 each, laid out like sem
+  csem: array<vec4<f32>, 99>, // by region at a distance (cell = group·3 + band), relative, same layout
+  cm: vec4<u32>,            // x: cells 0–31 with settings; y: bit 0 cell 32, bits 1–3 distance bands with settings; z: cells 0–31 with curves; w: bit 0 cell 32 with curves
 }
 
 @group(0) @binding(0) var<uniform> u: U;
@@ -406,6 +409,34 @@ fn mix_sem(a: Sem, b: Sem, t: f32) -> Sem {
   s.denoise = mix(a.denoise, b.denoise, t); s.dehaze = mix(a.dehaze, b.dehaze, t); s.warmth = mix(a.warmth, b.warmth, t); s.tint = mix(a.tint, b.tint, t);
   return s;
 }
+/** Soft weights of the three distance bands at this distance (sum 1; edges and crossfade in vig2). */
+fn band_w(d: f32) -> vec3<f32> {
+  let f = u.vig2.w;
+  let wn = 1.0 - smoothstep(u.vig2.y - f, u.vig2.y + f, d);
+  let wf = smoothstep(u.vig2.z - f, u.vig2.z + f, d);
+  return vec3<f32>(wn, max(0.0, 1.0 - wn - wf), wf);
+}
+fn sem_from(a0: vec4<f32>, a1: vec4<f32>, a2: vec4<f32>) -> Sem {
+  var s: Sem;
+  s.exp = a0.x; s.hl = a0.y; s.sat = a0.z; s.vib = a0.w;
+  s.hue = a1.x; s.clarity = a1.y; s.texture = a1.z; s.sharpen = a1.w;
+  s.denoise = a2.x; s.dehaze = a2.y; s.warmth = a2.z; s.tint = a2.w;
+  return s;
+}
+fn dsem_at(b: u32) -> Sem { return sem_from(u.dsem[b * 3u], u.dsem[b * 3u + 1u], u.dsem[b * 3u + 2u]); }
+fn csem_at(c: u32) -> Sem { return sem_from(u.csem[c * 3u], u.csem[c * 3u + 1u], u.csem[c * 3u + 2u]); }
+/** A relative layer (distance or cell) at weight w: offsets add, multipliers multiply. */
+fn add_rel(s: Sem, r: Sem, w: f32) -> Sem {
+  var o = s;
+  o.exp += w * r.exp; o.hl += w * r.hl; o.sat += w * r.sat; o.vib += w * r.vib; o.hue += w * r.hue;
+  o.warmth += w * r.warmth; o.tint += w * r.tint;
+  o.clarity *= 1.0 + w * (r.clarity - 1.0); o.texture *= 1.0 + w * (r.texture - 1.0); o.sharpen *= 1.0 + w * (r.sharpen - 1.0);
+  o.denoise *= 1.0 + w * (r.denoise - 1.0); o.dehaze *= 1.0 + w * (r.dehaze - 1.0);
+  return o;
+}
+fn cell_on(c: u32) -> bool { return select((u.cm.y & 1u) != 0u, ((u.cm.x >> c) & 1u) != 0u, c < 32u); }
+fn cell_curve_on(c: u32) -> bool { return select((u.cm.w & 1u) != 0u, ((u.cm.z >> c) & 1u) != 0u, c < 32u); }
+
 /** Skin-colour likelihood of a linear P3 colour: OkLab hue ≈ 25…80°, moderate chroma, not black or white. */
 fn skin_colour(p3: vec3<f32>) -> f32 {
   let lab = lin_srgb_to_oklab(P3_TO_SRGB * max(p3, vec3<f32>(0.0)));
@@ -413,8 +444,8 @@ fn skin_colour(p3: vec3<f32>) -> f32 {
   return exp(-pow(angdiff(atan2(lab.z, lab.y), 0.9) / 0.45, 2.0)) * smoothstep(0.012, 0.03, C) * (1.0 - smoothstep(0.17, 0.24, C))
     * smoothstep(0.12, 0.28, lab.x) * (1.0 - smoothstep(0.93, 0.99, lab.x));
 }
-/** User curves, row r of the curve table (0 = the photo's, 1…11 regions, 12 skin, 13…15 near/middle/far): L, then R/G/B. */
-const CURVE_ROWS = 16.0;
+/** User curves, row r of the curve table (0 = the photo's, 1…11 regions, 12 skin, 13…15 near/middle/far, 16 + cell): L, then R/G/B. */
+const CURVE_ROWS = 49.0; // + 33 cell rows from 16
 fn curve_row(e: vec3<f32>, r: u32) -> vec3<f32> {
   let v = (f32(r) + 0.5) / CURVE_ROWS;
   let l = vec3<f32>(textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.r, v), 0.0).r, textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.g, v), 0.0).r, textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.b, v), 0.0).r);
@@ -457,6 +488,24 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let uv = (vec2<f32>(px) + 0.5) / vec2<f32>(f32(W), f32(H));
   let apple_skin = textureSampleLevel(skin_tex, lsamp, uv, 0.0).r;
   let skin_w = clamp(max(apple_skin, clamp(maps.g[6], 0.0, 1.0) * skin_colour(REC2020_TO_P3 * (u.wb * c0) * k)), 0.0, 1.0);
+  // Layers on the regions' own settings: by distance, then by region at a distance
+  // (so "the far buildings" can differ from "the near buildings"), then skin.
+  let bw0 = band_w(clamp(maps.dist, 0.0, 1.0));
+  if (((u.cm.y >> 1u) & 7u) != 0u) {
+    for (var b = 0u; b < 3u; b++) { if (((u.cm.y >> (1u + b)) & 1u) != 0u) { sem = add_rel(sem, dsem_at(b), bw0[b]); } }
+  }
+  if (u.cm.x != 0u || (u.cm.y & 1u) != 0u) {
+    var gc = maps.g;
+    for (var g = 0u; g < 11u; g++) {
+      let pg = clamp(gc[g], 0.0, 1.0);
+      if (pg < 1e-3) { continue; }
+      for (var b = 0u; b < 3u; b++) {
+        let c = g * 3u + b;
+        let w = pg * bw0[b];
+        if (w > 1e-3 && cell_on(c)) { sem = add_rel(sem, csem_at(c), w); }
+      }
+    }
+  }
   sem = mix_sem(sem, skin_sem(), skin_w);
   let flags = u.flags.x;
   if ((flags & EN_SEMANTIC) == 0u) {
@@ -611,6 +660,23 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     e = acc;
   }
+  // Region at a distance ("the far buildings"): each cell's curve by mask × band weight.
+  if (u.cm.z != 0u || (u.cm.w & 1u) != 0u) {
+    let bw2 = band_w(dist);
+    var gk = maps.g;
+    var acc = vec3<f32>(0.0); var wsum = 0.0;
+    for (var g = 0u; g < 11u; g++) {
+      let pg = clamp(gk[g], 0.0, 1.0);
+      if (pg < 1e-3) { continue; }
+      for (var b = 0u; b < 3u; b++) {
+        let c = g * 3u + b;
+        let w = pg * bw2[b];
+        if (w > 1e-3 && cell_curve_on(c)) { acc += w * curve_row(e, 16u + c); wsum += w; }
+      }
+    }
+    if (wsum > 1.0) { acc /= wsum; wsum = 1.0; }
+    e = acc + (1.0 - wsum) * e;
+  }
   // Skin last: faces are never re-shaped by distance.
   if ((cb & (1u << 12u)) != 0u && skin_w > 1e-3) { e = mix(e, curve_row(e, 12u), skin_w); }
 
@@ -672,7 +738,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // Selected region at full brightness, everything else dimmed (soft, by probability).
     let sel = u32(u.color.z);
     var gs2 = maps.g;
-    let w = select(clamp(gs2[min(sel, 10u)], 0.0, 1.0), skin_w, sel == 11u); // 11 = skin
+    // 11 = skin; with a depth range (u.hl) only that distance of the region: a cell.
+    let inr = smoothstep(u.hl.x - 0.015, u.hl.x + 0.015, dist) * (1.0 - smoothstep(u.hl.y - 0.015, u.hl.y + 0.015, dist));
+    let w = select(clamp(gs2[min(sel, 10u)], 0.0, 1.0), skin_w, sel == 11u) * inr;
     e = mix(e * 0.22, e, smoothstep(0.1, 0.6, w));
   }
   var sharpen = sem.sharpen * mix(u.tone.z, u.tone.w, smoothstep(0.1, 0.9, dist));

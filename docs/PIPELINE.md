@@ -377,6 +377,16 @@ of the photo's own depth layers from natural breaks of the refined depth),
 applied after the region curves and never on skin. All curves share one
 16-row table (photo, 11 regions, skin, 3 distance bands) in a single pass.
 
+**By distance, and by region at a distance.** The semantic and depth maps
+together split every region into near / middle / far (the photo's own depth
+layers): "the far buildings" and "the near buildings" are separate cells
+(weight = region probability × band weight). Distance and cell settings are
+*relative* layers on the region's own settings — offsets add, multipliers
+multiply — in the order region → distance → cell → skin; each cell also has
+its own curves (curve-table rows 16…48). The Regions tab groups them either
+way: by region (a region → all, or one of its distances) or by distance (a
+distance → all, or one region there).
+
 **Automatic curves** (`src/decision/autoCurves.ts`): every luminance histogram
 (the photo, each region, people as a stand-in for faces, and each distance
 band — measured on the refined image) is pushed through exposure, the
