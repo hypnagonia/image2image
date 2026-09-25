@@ -40,7 +40,7 @@ langSel.value = storedLang() ?? "";
 langSel.onchange = () => setLang((langSel.value || undefined) as Lang | undefined);
 const langPill = el("label", { class: "btn small lang", title: t("app.language") }, lang.toUpperCase(), langSel);
 const stage = el("div", { class: "stage" });
-const canvas = el("canvas");
+let canvas = el("canvas");
 const badge = el("div", { class: "badge" });
 const rings = el("div", { class: "rings" });
 const progress = el("div", { class: "progress" }, el("div", { class: "t" }), el("div", { class: "bar indet" }, el("i")));
@@ -270,13 +270,52 @@ function stageText(stage: string, detail?: string): string {
 }
 
 // --------------------------------------------------------------------------- preview
-const ctx = (() => {
+// Created on first use: a canvas with a 2D context can no longer be handed to the worker.
+let ctx2d: CanvasRenderingContext2D | undefined;
+const ctx = () => (ctx2d ??= (() => {
   try { return canvas.getContext("2d", { colorSpace: "display-p3" }) as CanvasRenderingContext2D; } catch { return canvas.getContext("2d")!; }
-})();
+})());
+/**
+ * GPU display: the canvas belongs to the worker, which draws each preview into it
+ * (no readback, transfer or putImageData per frame). Off with ?display=cpu, or
+ * where the browser cannot hand a canvas over or set it up for WebGPU.
+ */
+let gpuDisplay = false;
+/** Size of the frame on screen (the canvas's own size cannot be read reliably once it is the worker's). */
+let shownW = 0, shownH = 0;
+const dispW = () => shownW || canvas.width, dispH = () => shownH || canvas.height;
+function handCanvasToWorker() {
+  if (new URLSearchParams(location.search).get("display") === "cpu" || caps?.backend !== "webgpu") return;
+  if (typeof canvas.transferControlToOffscreen !== "function" || ctx2d) return;
+  try {
+    const off = canvas.transferControlToOffscreen();
+    gpuDisplay = true;
+    worker.postMessage({ type: "canvas", canvas: off } satisfies ToWorker, [off]);
+  } catch { gpuDisplay = false; }
+}
+/** The worker could not use the canvas: a fresh one, drawn by the page as before. */
+function takeCanvasBack() {
+  gpuDisplay = false;
+  const fresh = el("canvas");
+  fresh.className = canvas.className;
+  fresh.style.cssText = canvas.style.cssText;
+  canvas.replaceWith(fresh);
+  canvas = fresh;
+  ctx2d = undefined;
+  shownW = shownH = 0;
+}
 /** Drafts (smaller, same shape) are drawn scaled through this, so the canvas keeps its size during a drag. */
 const scratch = document.createElement("canvas");
 const scratchCtx = (() => { try { return scratch.getContext("2d", { colorSpace: "display-p3" }); } catch { return null; } })() ?? scratch.getContext("2d")!;
 function drawPreview(m: Extract<FromWorker, { type: "preview" }>) {
+  if (!m.data) {
+    // Already on the canvas (GPU display): only its size is news here.
+    shownW = m.width; shownH = m.height;
+    renderRings();
+    return;
+  }
+  if (gpuDisplay) return; // the canvas is the worker's (a frame from before the hand-over)
+  shownW = shownH = 0;
   let img: ImageData;
   try { img = new ImageData(new Uint8ClampedArray(m.data), m.width, m.height, { colorSpace: "display-p3" }); }
   catch { img = new ImageData(new Uint8ClampedArray(m.data), m.width, m.height); }
@@ -285,10 +324,10 @@ function drawPreview(m: Extract<FromWorker, { type: "preview" }>) {
     // Resizing the canvas reallocates its backing store twice per drag (in and out of drafts).
     if (scratch.width !== m.width || scratch.height !== m.height) { scratch.width = m.width; scratch.height = m.height; }
     scratchCtx.putImageData(img, 0, 0);
-    ctx.drawImage(scratch, 0, 0, canvas.width, canvas.height);
+    ctx().drawImage(scratch, 0, 0, canvas.width, canvas.height);
   } else {
     if (canvas.width !== m.width || canvas.height !== m.height) { canvas.width = m.width; canvas.height = m.height; }
-    ctx.putImageData(img, 0, 0);
+    ctx().putImageData(img, 0, 0);
   }
   renderRings();
 }
@@ -296,8 +335,8 @@ function drawPreview(m: Extract<FromWorker, { type: "preview" }>) {
 /** On-screen rectangle of the photo inside the letterboxed canvas (object-fit: contain). */
 function imageRect() {
   const c = canvas.getBoundingClientRect();
-  const k = Math.min(c.width / (canvas.width || 1), c.height / (canvas.height || 1));
-  const w = canvas.width * k, h = canvas.height * k;
+  const k = Math.min(c.width / (dispW() || 1), c.height / (dispH() || 1));
+  const w = dispW() * k, h = dispH() * k;
   return { left: c.left + (c.width - w) / 2, top: c.top + (c.height - h) / 2, width: w, height: h };
 }
 
@@ -351,8 +390,8 @@ const basePreviewLong = () => Math.max(window.innerWidth, window.innerHeight) * 
 function applyZoom() {
   const st = stage.getBoundingClientRect();
   // Photo size on screen at zoom 1 (object-fit: contain).
-  const k = Math.min(st.width / (canvas.width || 1), st.height / (canvas.height || 1));
-  const maxX = Math.max(0, (canvas.width * k * zoom - st.width) / 2), maxY = Math.max(0, (canvas.height * k * zoom - st.height) / 2);
+  const k = Math.min(st.width / (dispW() || 1), st.height / (dispH() || 1));
+  const maxX = Math.max(0, (dispW() * k * zoom - st.width) / 2), maxY = Math.max(0, (dispH() * k * zoom - st.height) / 2);
   panX = Math.min(maxX, Math.max(-maxX, panX));
   panY = Math.min(maxY, Math.max(-maxY, panY));
   canvas.style.transform = zoom === 1 ? "" : `translate(${panX}px, ${panY}px) scale(${zoom})`;
@@ -701,7 +740,7 @@ adjustPane.append(
 let histograms: Float32Array | undefined;
 /** Dev builds only: a read-only view of the state for the automated photo checks (scripts, not the UI). */
 let finalPreviews = 0;
-if (import.meta.env.DEV) (globalThis as unknown as { __shk: unknown }).__shk = () => ({ summary, decisions, params, autoParams, finalPreviews, busy, log: logLines,
+if (import.meta.env.DEV) (globalThis as unknown as { __shk: unknown }).__shk = () => ({ summary, decisions, params, autoParams, finalPreviews, busy, log: logLines, gpuDisplay, caps,
   /** Test harness: change the parameters and render. */
   apply: (f: (p: Params) => void) => { if (params) { f(params); syncControls(); pushParams(); } } });
 /** Share of the frame (%) of each region at each distance. */
@@ -1162,11 +1201,16 @@ function showError(text: string) {
 worker.onmessage = (ev: MessageEvent<FromWorker>) => {
   const m = ev.data;
   switch (m.type) {
+    case "display":
+      if (!m.ok) { logLines.push(`GPU display unavailable (${m.message ?? "?"}): previews drawn by the page`); takeCanvasBack(); }
+      else logLines.push("GPU display: previews drawn by the worker");
+      break;
     case "ready":
       caps = m.caps;
       looks = m.looks;
       lookPanel.onLuts(looks);
       capsEl.textContent = ""; // "Starting…" done; the header keeps only errors
+      handCanvasToWorker();
       // Shown in Info.
       capsText = `${caps.backend === "webgpu" ? "WebGPU" : "WASM"}${caps.f16 ? " · fp16" : ""}${caps.crossOriginIsolated ? ` · ${t("app.threads", { n: caps.threads })}` : ""}`;
       renderAuto();

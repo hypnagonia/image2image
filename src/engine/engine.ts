@@ -153,6 +153,23 @@ export class Engine {
     return [i === 0 ? -1 : e[i], i === 4 ? 2 : e[i + 1]];
   }
 
+  /** The page's canvas, when previews are drawn straight into it on the GPU. */
+  private display?: { canvas: OffscreenCanvas; ctx: GPUCanvasContext };
+  setCanvas(canvas: OffscreenCanvas) {
+    try {
+      if (!this.gpu) throw new Error("no GPU");
+      const ctx = canvas.getContext("webgpu") as GPUCanvasContext | null;
+      if (!ctx) throw new Error("no WebGPU canvas context");
+      // The preview is display-encoded Display P3 in rgba8unorm: copied as is.
+      ctx.configure({ device: this.gpu.device, format: "rgba8unorm", colorSpace: "display-p3", alphaMode: "opaque", usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+      this.display = { canvas, ctx };
+      this.post({ type: "display", ok: true });
+    } catch (e) {
+      this.display = undefined;
+      this.post({ type: "display", ok: false, message: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
   private draftIdle = 0;
   /** The draft copy is freed a few seconds after the last drag (it comes back on the next one). */
   private scheduleDraftRelease(s: Session) {
@@ -718,10 +735,23 @@ export class Engine {
     if (s.draft) this.scheduleDraftRelease(s);
     const dof = p.enable.dof && p.dof.strength > 0;
     const r = await this.renderer.render(src, s.maps, p, { wb: this.wbFor(p), gain: s.gain, lightLinear: s.lightLinear, output: "p38", debugView: this.view, region: this.region, zoneRange: this.zoneRange(), draft }, dof);
-    const data = await this.gpu.readTexture(r.tex, 0, 0, src.width, src.height, 4);
     // Histograms for the curve boxes (the edit as rendered; not for "before" or debug views),
     // computed after the preview is on its way so they never delay it.
     const wantHist = final && !draft && !this.before && this.view === 0;
+    const wantCalib = final && !draft && !this.before && this.view === 0 && !!s.calib && (s.calib.rounds < 2 || !s.calib.black) && Math.abs(p.exposure - s.decision.params.exposure) < 1e-6;
+    if (this.display) {
+      // Straight onto the page's canvas: no readback, transfer or drawing on the page.
+      const { canvas, ctx } = this.display;
+      if (canvas.width !== src.width || canvas.height !== src.height) { canvas.width = src.width; canvas.height = src.height; }
+      await this.gpu.run("present", (enc) => {
+        enc.copyTextureToTexture({ texture: r.tex, origin: { x: 0, y: r.top } }, { texture: ctx.getCurrentTexture() }, { width: src.width, height: src.height });
+      });
+      if (!wantHist && !wantCalib) {
+        this.post({ type: "preview", width: src.width, height: src.height, space: "p3", final, ms: performance.now() - t0 });
+        return;
+      }
+    }
+    const data = await this.gpu.readTexture(r.tex, 0, 0, src.width, src.height, 4);
     // Only the pixels the histograms read (every 3rd in each direction: ~1/9 of the frame), not a full copy.
     const HS = 3;
     const hw = Math.ceil(src.width / HS), hh = Math.ceil(src.height / HS);
@@ -732,9 +762,9 @@ export class Engine {
       for (let y = 0, k = 0; y < src.height; y += HS) for (let x = 0; x < src.width; x += HS) sub[k++] = all[y * src.width + x];
       pixels = new Uint8Array(sub.buffer);
     }
-    const calib = final && !draft && !this.before && this.view === 0 && s.calib && (s.calib.rounds < 2 || !s.calib.black) && Math.abs(p.exposure - s.decision.params.exposure) < 1e-6
-      ? renderedQuantiles(new Uint8Array(data)) : undefined; // read before `data` is transferred
-    this.post({ type: "preview", width: src.width, height: src.height, data, space: "p3", final, ms: performance.now() - t0 }, [data]);
+    const calib = wantCalib ? renderedQuantiles(new Uint8Array(data)) : undefined; // read before `data` is transferred
+    if (this.display) this.post({ type: "preview", width: src.width, height: src.height, space: "p3", final, ms: performance.now() - t0 });
+    else this.post({ type: "preview", width: src.width, height: src.height, data, space: "p3", final, ms: performance.now() - t0 }, [data]);
     if (calib !== undefined && s.calib) {
       // The display model misjudges some scenes (backlight, night): correct on what was rendered.
       const ours = calib[MEDIAN], ref = s.calib.ref[MEDIAN];

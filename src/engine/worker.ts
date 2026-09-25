@@ -17,6 +17,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
   if (m.type === "params") { engine.setParams(m.params, m.draft); return; }
   if (m.type === "view") { engine.setView(m.view, m.before, m.region, m.range); return; }
   if (m.type === "preview-size") { engine.setPreviewSize(m.long); return; }
+  if (m.type === "canvas") { engine.setCanvas(m.canvas); return; }
   // Heavy work shares the engine's serial GPU queue with preview renders.
   engine.exclusive(() => handle(m)).catch((e: unknown) => {
     post({ type: "error", message: e instanceof Error ? e.message : String(e) });

@@ -67,12 +67,17 @@ export type ToWorker =
   | { type: "thumbs"; profiles: LookProfile[]; long: number }
   | { type: "palette" }
   | { type: "reference"; file: File; mode: "create" | "match"; amount: number }
-  | { type: "preview-size"; long: number };
+  | { type: "preview-size"; long: number }
+  /** The page's canvas, handed over: previews are drawn into it on the GPU (no readback per frame). */
+  | { type: "canvas"; canvas: OffscreenCanvas };
 
 export type FromWorker =
   | { type: "ready"; caps: Capabilities; looks: Array<{ id: string; name: string; description: string }> }
   | { type: "progress"; stage: string; detail?: string; frac?: number }
-  | { type: "preview"; width: number; height: number; data: ArrayBuffer; space: "p3" | "srgb"; final: boolean; ms: number }
+  /** `data` absent: the frame is already on the page's canvas (GPU display). */
+  | { type: "preview"; width: number; height: number; data?: ArrayBuffer; space: "p3" | "srgb"; final: boolean; ms: number }
+  /** Whether the handed-over canvas could be set up for GPU display (else the page draws previews itself). */
+  | { type: "display"; ok: boolean; message?: string }
   | { type: "analysis"; summary: Summary; decisions: Decision[]; auto: Params; params: Params; dof: { justified: boolean; focus: number; strength: number; reason: string; x?: number; y?: number; zoneEdges?: number[]; zones?: Array<{ share: number; label: string; lo: number; hi: number }>; bands?: Array<{ share: number; label: string; lo: number; hi: number }> }; exposureSuggestion: number; autoCurves?: AutoCurveBands; cellCoverage?: Record<string, number> }
   | { type: "params"; params: Params }
   /** Automatic exposure corrected after measuring the first preview against the camera's rendering. */
