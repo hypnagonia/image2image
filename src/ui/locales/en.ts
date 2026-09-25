@@ -270,6 +270,9 @@ export const en = {
   "group.animal": "Animals",
   "group.interior": "Interior",
   "group.other": "Other",
+  "group.skin": "Skin",
+  "reg.curves": "Curves (this region)",
+  "reg.skinHint": "Skin is a layer across people: Apple's skin mask on ProRAW, otherwise people × skin colour — faces and hands, not clothes. Its settings replace the region's where there is skin. Lower Texture to smooth skin, lower Clarity for a softer look.",
 
   // ---- Regions tab
   "reg.hint": "Adjust each detected region on its own. Changes follow the soft region masks, so boundaries stay invisible.",

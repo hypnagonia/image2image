@@ -20,7 +20,7 @@ import { CURVE_LUT_SIZE, TONE_LUT_SIZE, curveLUT, isFlat, toneCurveLUT } from ".
 import { buildLUT, LOOKS, type Look } from "./looks.ts";
 import { DEPTH_CURVE_SIZE, HUE_CURVE_SIZE, PROFILE_CURVE_SIZE, depthTable, hueCurveTable, profileCurveTable, profileUniforms, isNeutral } from "../looks/profile.ts";
 import { GROUPS } from "../neural/scene.ts";
-import type { Params } from "../decision/params.ts";
+import { neutralSemantic, type Curves, type Params } from "../decision/params.ts";
 import type { RefinedMaps } from "../refine/refine.ts";
 
 export interface RenderSource {
@@ -48,6 +48,25 @@ export interface RenderOptions {
 }
 
 const MIDDLE_GREY_EV = Math.log2(0.18);
+
+/** Rows of the curve table: the photo's curves, then each region's, then skin's. */
+const REGION_ROWS = ["photo", ...GROUPS, "skin"] as const;
+const CURVE_ROWS = REGION_ROWS.length;
+const FLAT_PTS = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+const FLAT_CURVES: Curves = { l: FLAT_PTS, r: FLAT_PTS, g: FLAT_PTS, b: FLAT_PTS };
+const curvesFlat = (c: Partial<Curves> | undefined) => !c || (["l", "r", "g", "b"] as const).every((k) => !c[k] || isFlat(c[k]!));
+/** A region's curves, channel by channel (a missing channel is flat). */
+function regionCurvesOf(p: Params, r: Exclude<(typeof REGION_ROWS)[number], "photo">): Curves {
+  const c = p.regionCurves?.[r];
+  return { l: c?.l ?? FLAT_CURVES.l, r: c?.r ?? FLAT_CURVES.r, g: c?.g ?? FLAT_CURVES.g, b: c?.b ?? FLAT_CURVES.b };
+}
+/** Bit 0: the photo's curves; bit 1 + i: row 1 + i (regions, then skin) has a curve. Region curves need region processing on. */
+function curveBits(p: Params): number {
+  if (!p.enable.curves) return 0;
+  let bits = curvesFlat(p.curves) ? 0 : 1;
+  if (p.enable.semantic) REGION_ROWS.forEach((r, i) => { if (r !== "photo" && !curvesFlat(p.regionCurves?.[r])) bits |= 1 << i; });
+  return bits;
+}
 
 export class Renderer {
   private gpu: Gpu;
@@ -89,11 +108,14 @@ export class Renderer {
       if (!this.toneLut) this.toneLut = gpu.tex("toneLUT", TONE_LUT_SIZE, 1, "rgba16float", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
       gpu.device.queue.writeTexture({ texture: this.toneLut }, floatsToHalves(toneCurveLUT(p.tone)), { bytesPerRow: TONE_LUT_SIZE * 8 }, { width: TONE_LUT_SIZE, height: 1 });
     }
-    const ck = JSON.stringify(p.curves);
+    // Curve table: row 0 = the photo's curves, rows 1…11 = the regions', row 12 = skin.
+    const ck = JSON.stringify([p.curves, p.regionCurves]);
     if (ck !== this.curveKey) {
       this.curveKey = ck;
-      if (!this.curveLut) this.curveLut = gpu.tex("curveLUT", CURVE_LUT_SIZE, 1, "rgba16float", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
-      gpu.device.queue.writeTexture({ texture: this.curveLut }, floatsToHalves(curveLUT(p.curves)), { bytesPerRow: CURVE_LUT_SIZE * 8 }, { width: CURVE_LUT_SIZE, height: 1 });
+      if (!this.curveLut) this.curveLut = gpu.tex("curveLUT", CURVE_LUT_SIZE, CURVE_ROWS, "rgba16float", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
+      const table = new Float32Array(CURVE_LUT_SIZE * 4 * CURVE_ROWS);
+      REGION_ROWS.forEach((r, i) => table.set(curveLUT(r === "photo" ? p.curves : regionCurvesOf(p, r)), i * CURVE_LUT_SIZE * 4));
+      gpu.device.queue.writeTexture({ texture: this.curveLut }, floatsToHalves(table), { bytesPerRow: CURVE_LUT_SIZE * 8, rowsPerImage: CURVE_ROWS }, { width: CURVE_LUT_SIZE, height: CURVE_ROWS });
     }
     // Profile components, cached by content: switching between loaded profiles
     // re-uploads nothing unless a component actually differs.
@@ -132,7 +154,7 @@ export class Renderer {
   private toneUniforms(p: Params, src: RenderSource, maps: RefinedMaps, o: RenderOptions, lutSize: number, lutOn: boolean): ArrayBuffer {
     const e = p.enable;
     const bits = (e.denoise ? 1 : 0) | (e.wb ? 2 : 0) | (e.exposure ? 4 : 0) | (e.localTone ? 8 : 0) | (e.semantic ? 16 : 0) | (e.dehaze ? 32 : 0) | (e.sharpen ? 64 : 0);
-    const u = new Uniforms(176)
+    const u = new Uniforms(188)
       .u32(src.width, src.height, maps.w, maps.h)
       .mat3(o.wb)
       .f32(p.exposure, o.gain, p.denoise.luma, p.denoise.chroma)
@@ -141,9 +163,10 @@ export class Renderer {
       .f32(p.local.compression, p.local.clarity, p.local.texture, p.local.anchorEV ?? MIDDLE_GREY_EV)
       .f32(p.tone.shadows, p.tone.highlights, p.depth.near, p.depth.far)
       .f32(p.color.saturation, p.color.vibrance, o.region ?? 0, lutSize)
-      .u32(bits, e.curves && !(isFlat(p.curves.l) && isFlat(p.curves.r) && isFlat(p.curves.g) && isFlat(p.curves.b)) ? 1 : 0, lutOn ? 1 : 0, o.debugView ?? 0);
-    for (const g of GROUPS) {
-      const s = p.semantic[g];
+      .u32(bits, curveBits(p), lutOn ? 1 : 0, o.debugView ?? 0);
+    // Regions, then skin (index 11: a layer over the regions, see render_tone.wgsl).
+    for (const g of [...GROUPS, "skin"] as const) {
+      const s = g === "skin" ? (p.skin ?? neutralSemantic()) : p.semantic[g];
       u.f32(s.exposure, s.highlights, s.saturation, s.vibrance);
       u.f32((s.hue * Math.PI) / 180, s.clarity, s.texture, s.sharpen);
       u.f32(s.denoise, s.dehaze, s.warmth ?? 0, s.tint ?? 0);

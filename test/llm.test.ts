@@ -35,3 +35,16 @@ test("undo data covers only what the answer touched", () => {
   assert.deepEqual(r.previous.map(([k]) => k).sort(), ["exposure", "semantic.sky.hue"]);
   assert.deepEqual(r.previous.find(([k]) => k === "exposure")?.[1], 0);
 });
+
+test("skin settings and region curves", () => {
+  const p = defaultParams();
+  const r = applyAnswer(p, { set: { "semantic.skin.warmth": 0.2, "regionCurves.sky.l": [[0, 0], [0.5, 0.45], [1, 1]], "regionCurves.skin.r": [[0.5, 0.53]], "regionCurves.moon.l": [[0, 0], [1, 1]] } }, () => true);
+  assert.equal(p.skin.warmth, 0.2);
+  assert.deepEqual(p.regionCurves.sky?.l, [{ x: 0, y: 0 }, { x: 0.5, y: 0.45 }, { x: 1, y: 1 }]);
+  assert.deepEqual(p.regionCurves.sky?.g, [{ x: 0, y: 0 }, { x: 1, y: 1 }], "other channels stay flat");
+  assert.deepEqual(p.regionCurves.skin?.r, [{ x: 0, y: 0 }, { x: 0.5, y: 0.53 }, { x: 1, y: 1 }]);
+  assert.equal(r.ignored.length, 1);
+  // undo data: the sky curves did not exist before
+  assert.equal(r.previous.find(([k]) => k === "regionCurves.sky")?.[1], undefined);
+  assert.equal(r.previous.find(([k]) => k === "skin.warmth")?.[1], 0);
+});

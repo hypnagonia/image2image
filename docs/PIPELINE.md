@@ -352,6 +352,14 @@ Priority: **skin → semantic objects → global palette → depth.**
 
 ## Per-region control
 
+Every region — and **skin**, a layer across people (Apple's skin matte on
+ProRAW, else the person mask × a skin-colour likelihood of the
+white-balanced source: faces and hands, not clothes) — has the full set of
+technical settings and its own tone-range curves (L, R, G, B). Region curves
+run after the photo's curves, each weighted by its soft mask; skin's settings
+and curves replace the region's by the skin weight. All curves share one
+13-row table (photo, 11 regions, skin) in a single render pass.
+
 The Regions tab exposes the technical per-region parameters the decision
 engine sets (exposure, highlights, warmth, tint, saturation, vibrance, hue,
 clarity, texture, sharpening, noise reduction, dehaze) for each of the 11

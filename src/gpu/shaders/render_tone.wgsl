@@ -37,8 +37,8 @@ struct U {
   local: vec4<f32>,         // compression, clarity, texture, anchor EV
   tone: vec4<f32>,          // shadows, highlights, depth near mult, depth far mult
   color: vec4<f32>,         // saturation, vibrance, look strength, look size
-  flags: vec4<u32>,         // x: enable bits, y: curves on, z: lut on, w: debug view
-  sem: array<vec4<f32>, 33>,// per group: [exp, hl, sat, vib] [hue rad, clarity, texture, sharpen] [denoise, dehaze, warmth, tint]
+  flags: vec4<u32>,         // x: enable bits, y: curve rows on (bit 0 photo, bit 1+i region i, bit 12 skin), z: lut on, w: debug view
+  sem: array<vec4<f32>, 36>,// per group, then skin (index 11): [exp, hl, sat, vib] [hue rad, clarity, texture, sharpen] [denoise, dehaze, warmth, tint]
   tgt: vec4<i32>,           // render target: offset x, y in the full image, target width, height (strip rendering)
   hl: vec4<f32>,            // view 5: highlighted depth range (lo, hi)
   vig: vec4<f32>,           // vignette: amount, midpoint, feather, roundness
@@ -386,6 +386,37 @@ fn sem_at(m: Maps) -> Sem {
   return s;
 }
 
+/** The same 12 settings for skin, stored after the 11 groups. */
+fn skin_sem() -> Sem {
+  var s: Sem;
+  let a0 = u.sem[33]; let a1 = u.sem[34]; let a2 = u.sem[35];
+  s.exp = a0.x; s.hl = a0.y; s.sat = a0.z; s.vib = a0.w;
+  s.hue = a1.x; s.clarity = a1.y; s.texture = a1.z; s.sharpen = a1.w;
+  s.denoise = a2.x; s.dehaze = a2.y; s.warmth = a2.z; s.tint = a2.w;
+  return s;
+}
+fn mix_sem(a: Sem, b: Sem, t: f32) -> Sem {
+  var s: Sem;
+  s.exp = mix(a.exp, b.exp, t); s.hl = mix(a.hl, b.hl, t); s.sat = mix(a.sat, b.sat, t); s.vib = mix(a.vib, b.vib, t);
+  s.hue = mix(a.hue, b.hue, t); s.clarity = mix(a.clarity, b.clarity, t); s.texture = mix(a.texture, b.texture, t); s.sharpen = mix(a.sharpen, b.sharpen, t);
+  s.denoise = mix(a.denoise, b.denoise, t); s.dehaze = mix(a.dehaze, b.dehaze, t); s.warmth = mix(a.warmth, b.warmth, t); s.tint = mix(a.tint, b.tint, t);
+  return s;
+}
+/** Skin-colour likelihood of a linear P3 colour: OkLab hue ≈ 25…80°, moderate chroma, not black or white. */
+fn skin_colour(p3: vec3<f32>) -> f32 {
+  let lab = lin_srgb_to_oklab(P3_TO_SRGB * max(p3, vec3<f32>(0.0)));
+  let C = length(lab.yz);
+  return exp(-pow(angdiff(atan2(lab.z, lab.y), 0.9) / 0.45, 2.0)) * smoothstep(0.012, 0.03, C) * (1.0 - smoothstep(0.17, 0.24, C))
+    * smoothstep(0.12, 0.28, lab.x) * (1.0 - smoothstep(0.93, 0.99, lab.x));
+}
+/** User curves, row r of the curve table (0 = the photo's, 1…11 regions, 12 skin): L, then R/G/B. */
+const CURVE_ROWS = 13.0;
+fn curve_row(e: vec3<f32>, r: u32) -> vec3<f32> {
+  let v = (f32(r) + 0.5) / CURVE_ROWS;
+  let l = vec3<f32>(textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.r, v), 0.0).r, textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.g, v), 0.0).r, textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.b, v), 0.0).r);
+  return vec3<f32>(textureSampleLevel(curve_lut, lsamp, vec2<f32>(l.r, v), 0.0).g, textureSampleLevel(curve_lut, lsamp, vec2<f32>(l.g, v), 0.0).b, textureSampleLevel(curve_lut, lsamp, vec2<f32>(l.b, v), 0.0).a);
+}
+
 fn tone_curve(ev: f32) -> f32 {
   let x = clamp((ev + 14.0) / 20.0, 0.0, 1.0);
   return textureSampleLevel(tone_lut, lsamp, vec2<f32>(x, 0.5), 0.0).r;
@@ -411,6 +442,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let gp = (vec2<f32>(px) + 0.5) * vec2<f32>(f32(u.size.z), f32(u.size.w)) / vec2<f32>(f32(W), f32(H));
   var maps = maps_at(gp, enc0);
   var sem = sem_at(maps);
+  // Skin: Apple's matte where the file has one, else person × skin colour (of the
+  // white-balanced source, so a warm cast does not make everything "skin").
+  // A layer over the regions: skin settings replace the region's by this weight.
+  let uv = (vec2<f32>(px) + 0.5) / vec2<f32>(f32(W), f32(H));
+  let apple_skin = textureSampleLevel(skin_tex, lsamp, uv, 0.0).r;
+  let skin_w = clamp(max(apple_skin, clamp(maps.g[6], 0.0, 1.0) * skin_colour(REC2020_TO_P3 * (u.wb * c0) * k)), 0.0, 1.0);
+  sem = mix_sem(sem, skin_sem(), skin_w);
   let flags = u.flags.x;
   if ((flags & EN_SEMANTIC) == 0u) {
     sem.exp = 0.0; sem.hl = 0.0; sem.sat = 0.0; sem.vib = 0.0; sem.hue = 0.0;
@@ -527,10 +565,23 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   var e = srgb_oetf(clamp(p3, vec3<f32>(0.0), vec3<f32>(1.0)));
 
   // --- curves ------------------------------------------------------------------------
-  if (u.flags.y != 0u) {
-    let lr = vec3<f32>(textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.r, 0.5), 0.0).r, textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.g, 0.5), 0.0).r, textureSampleLevel(curve_lut, lsamp, vec2<f32>(e.b, 0.5), 0.0).r);
-    e = vec3<f32>(textureSampleLevel(curve_lut, lsamp, vec2<f32>(lr.r, 0.5), 0.0).g, textureSampleLevel(curve_lut, lsamp, vec2<f32>(lr.g, 0.5), 0.0).b, textureSampleLevel(curve_lut, lsamp, vec2<f32>(lr.b, 0.5), 0.0).a);
+  // The photo's curves, then each region's blended by its soft mask (a pixel that
+  // is 70% sky gets 70% of the sky curve), then skin's by the skin weight.
+  let cb = u.flags.y;
+  if ((cb & 1u) != 0u) { e = curve_row(e, 0u); }
+  if ((cb & 0xFFEu) != 0u) {
+    var acc = vec3<f32>(0.0); var wsum = 0.0;
+    var gw = maps.g;
+    for (var g = 0u; g < 11u; g++) {
+      if ((cb & (2u << g)) == 0u) { continue; }
+      let w = clamp(gw[g], 0.0, 1.0);
+      if (w < 1e-3) { continue; }
+      acc += w * curve_row(e, g + 1u); wsum += w;
+    }
+    if (wsum > 1.0) { acc /= wsum; wsum = 1.0; }
+    e = acc + (1.0 - wsum) * e;
   }
+  if ((cb & (1u << 12u)) != 0u && skin_w > 1e-3) { e = mix(e, curve_row(e, 12u), skin_w); }
 
   // --- colour: saturation / vibrance / per-region hue & saturation (OkLab) ----------------
   var lin = P3_TO_SRGB * srgb_eotf(e);
@@ -569,8 +620,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
   // --- creative layer --------------------------------------------------------------------
   if (prof.f.x > 0.5) {
-    let uv = (vec2<f32>(px) + 0.5) / vec2<f32>(f32(W), f32(H));
-    e = apply_profile(e, maps.g, dist, textureSampleLevel(skin_tex, lsamp, uv, 0.0).r);
+    e = apply_profile(e, maps.g, dist, apple_skin);
   }
 
   // Debug views (flags.w): 1 = masks (argmax colours), 2 = depth.
@@ -591,7 +641,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // Selected region at full brightness, everything else dimmed (soft, by probability).
     let sel = u32(u.color.z);
     var gs2 = maps.g;
-    let w = clamp(gs2[min(sel, 10u)], 0.0, 1.0);
+    let w = select(clamp(gs2[min(sel, 10u)], 0.0, 1.0), skin_w, sel == 11u); // 11 = skin
     e = mix(e * 0.22, e, smoothstep(0.1, 0.6, w));
   }
   var sharpen = sem.sharpen * mix(u.tone.z, u.tone.w, smoothstep(0.1, 0.9, dist));

@@ -265,6 +265,9 @@ export const pt: Dict = {
   "group.animal": "Animais",
   "group.interior": "Interior",
   "group.other": "Outros",
+  "group.skin": "Pele",
+  "reg.curves": "Curvas (desta região)",
+  "reg.skinHint": "A pele é uma camada sobre as pessoas: a máscara de pele da Apple no ProRAW, senão pessoas × cor de pele — rostos e mãos, não roupas. Seus ajustes substituem os da região onde há pele. Reduza Textura para suavizar a pele, Claridade para um visual mais suave.",
 
   // ---- Regions tab
   "reg.hint": "Ajuste cada região detectada separadamente. As mudanças seguem as máscaras suaves, então as bordas ficam invisíveis.",

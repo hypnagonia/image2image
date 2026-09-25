@@ -10,6 +10,12 @@ import { BUILTIN_PROFILES, DEFAULT_PROFILE_ID } from "../looks/builtin.ts";
 
 export interface CurvePoint { x: number; y: number }
 
+/** Point curves per channel: l (luminance), r, g, b — display-encoded 0…1. */
+export interface Curves { l: CurvePoint[]; r: CurvePoint[]; g: CurvePoint[]; b: CurvePoint[] }
+
+/** A region with its own adjustments: a semantic group, or skin (a layer across people). */
+export type Region = Group | "skin";
+
 /** A user-chosen focus point: position in the image (0..1) and the refined distance there. */
 export interface FocusPoint {
   x: number; y: number; dist: number;
@@ -69,7 +75,9 @@ export interface Params {
     anchorEV: number;
   };
   color: { saturation: number; vibrance: number };
-  curves: { l: CurvePoint[]; r: CurvePoint[]; g: CurvePoint[]; b: CurvePoint[] };
+  curves: Curves;
+  /** Curves per region, blended by the soft masks (only regions that have them). */
+  regionCurves: Partial<Record<Region, Curves>>;
   /** The creative layer: one look profile on top of the technical base. */
   profile: LookProfile;
   denoise: { luma: number; chroma: number; shadowBoost: number };
@@ -77,6 +85,12 @@ export interface Params {
   sharpen: { amount: number; radius: number; threshold: number };
   dehaze: { strength: number; light: [number, number, number]; beta: number; minT: number };
   semantic: Record<Group, SemanticAdjust>;
+  /**
+   * Skin: the same adjustments as a region, applied on top of whichever region
+   * the pixel belongs to, weighted by skin likelihood (Apple's skin matte on
+   * ProRAW, else the person mask × a skin-colour likelihood).
+   */
+  skin: SemanticAdjust;
   depth: { near: number; far: number };
   /**
    * Vignette, applied in linear light as an exposure falloff (like a lens):
@@ -131,6 +145,8 @@ export function defaultParams(): Params {
     sharpen: { amount: 0, radius: 1, threshold: 0.01 },
     dehaze: { strength: 0, light: [1, 1, 1], beta: 1, minT: 0.45 },
     semantic: Object.fromEntries(GROUPS.map((g) => [g, neutralSemantic()])) as Record<Group, SemanticAdjust>,
+    skin: neutralSemantic(),
+    regionCurves: {},
     depth: { near: 1, far: 1 },
     vignette: { amount: 0, midpoint: 0.5, feather: 0.6, roundness: 0.3, highlights: 0.5 },
     grain: { amount: 0, size: 0.35, roughness: 0.5, color: 0 },

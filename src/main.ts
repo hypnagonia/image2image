@@ -9,8 +9,7 @@ import { createLookPanel } from "./ui/lookPanel.ts";
 import { createRegionsPanel } from "./ui/regionsPanel.ts";
 import { createLlmPanel } from "./ui/llmPanel.ts";
 import { normalizeProfile } from "./looks/profile.ts";
-import { CurveEditor } from "./ui/curveEditor.ts";
-import { bandsFromCurve, curveFromBands, isFlat, type CurveBands } from "./render/curves.ts";
+import { createToneCurves } from "./ui/toneCurves.ts";
 import { crashedWhileProcessing, lastStage, markCompleted, markInflight, noteStage, rememberParams, rememberPhoto, restorablePhoto } from "./ui/session.ts";
 import { LANGS, LANG_NAMES, lang, setLang, storedLang, t, tOr, type Lang } from "./ui/i18n.ts";
 
@@ -462,8 +461,6 @@ let currentView: 0 | 1 | 2 = 0;
 let pushTimer = 0;
 // While a slider is held, previews render at a quarter of the pixels (drafts);
 // releasing it renders the full preview once.
-/** A curve that changes nothing. */
-const FLAT_CURVE = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
 let dragging = false;
 document.addEventListener("pointerdown", (e) => { if ((e.target as HTMLElement).matches?.('input[type="range"], .curve-editor')) dragging = true; }, true);
 const endDrag = () => { if (!dragging) return; dragging = false; pushParams(); };
@@ -570,94 +567,20 @@ adjustPane.append(
   slider({ path: "grain.color", label: t("adj.grainColour"), min: 0, max: 1, step: 0.01, fmt: pct }),
   el("p", { class: "muted", text: t("adj.grainHint") }),
 );
-// Curves for this photo (L, R, G, B), independent of the look's own curves: one
-// slider per tone range instead of dragging points (curves.ts: a view of the
-// curve, so curves set elsewhere show up here). The small curve is a preview.
-const photoCurve = new CurveEditor(150);
-photoCurve.el.style.pointerEvents = "none";
-let photoChan: "l" | "r" | "g" | "b" = "l";
-const photoChips = el("div", { class: "chips" });
-const CURVE_COLOURS = { l: "#ece9e3", r: "#ff6b6b", g: "#6bdc7a", b: "#6b9bff" } as const;
-// The slider values last set, per channel, while the curve is still the one they
-// made: a curve cannot hold contradictory settings (it is never inverted), and
-// reading them back from it would make one slider move another.
-const bandMemo = new Map<string, { key: string; bands: CurveBands }>();
-function bandsOf(c: "l" | "r" | "g" | "b"): CurveBands {
-  const pts = params!.curves[c];
-  const m = bandMemo.get(c);
-  return m && m.key === JSON.stringify(pts) ? structuredClone(m.bands) : bandsFromCurve(pts);
-}
-function setBands(c: "l" | "r" | "g" | "b", b: CurveBands) {
-  const pts = curveFromBands(b);
-  params!.curves[c] = pts;
-  bandMemo.set(c, { key: JSON.stringify(pts), bands: structuredClone(b) });
-}
-const bandRows: Array<{ input: HTMLInputElement; out: HTMLOutputElement; get: (b: CurveBands) => number; set: (b: CurveBands, v: number) => void }> = [];
-function bandRow(label: string, min: number, get: (b: CurveBands) => number, set: (b: CurveBands, v: number) => void, max = 1): HTMLElement {
-  const input = el("input", { type: "range", min: String(min), max: String(max), step: "0.01" });
-  const out = el("output");
-  const row = el("div", { class: "row" }, el("label", { text: label }), input, out);
-  input.oninput = () => {
-    if (!params) return;
-    const b = bandsOf(photoChan);
-    set(b, parseFloat(input.value));
-    setBands(photoChan, b);
-    lookPanel.invalidate();
-    renderPhotoCurve();
-    pushParams();
-  };
-  // Double-tap the label: this range back to unchanged.
-  row.querySelector("label")!.addEventListener("dblclick", () => {
-    if (!params) return;
-    const b = bandsOf(photoChan);
-    set(b, 0);
-    setBands(photoChan, b);
-    lookPanel.invalidate();
-    renderPhotoCurve();
-    pushParams();
-  });
-  bandRows.push({ input, out, get, set });
-  return row;
-}
-const bandSliders = el("div", {},
-  bandRow(t("curve.blackLevel"), 0, (b) => b.black, (b, v) => { b.black = v; }),
-  ...[t("curve.shadows"), t("curve.darks"), t("curve.midtones"), t("curve.lights"), t("curve.highlights")].map((label, i) =>
-    bandRow(label, -1, (b) => b.bands[i], (b, v) => { b.bands[i] = v; })),
-  bandRow(t("curve.whiteLevel"), -1, (b) => b.white, (b, v) => { b.white = v; }, 0),
-);
-const curveResetBtn = el("button", { class: "btn small", text: t("adj.curvesReset") });
-curveResetBtn.onclick = () => {
-  if (!params) return;
-  params.curves = { l: [...FLAT_CURVE], r: [...FLAT_CURVE], g: [...FLAT_CURVE], b: [...FLAT_CURVE] };
-  renderPhotoCurve();
-  pushParams();
-};
-function renderPhotoCurve() {
-  photoChips.replaceChildren(...(["l", "r", "g", "b"] as const).map((c) => {
-    const changed = params ? !isFlat(params.curves[c]) : false;
-    const b = el("button", { class: "chip" + (c === photoChan ? " on" : ""), text: t(`chip.${c === "l" ? "master" : c}`) + (changed ? " •" : "") });
-    b.onclick = () => { photoChan = c; renderPhotoCurve(); };
-    return b;
-  }));
-  const pts = params?.curves[photoChan] ?? FLAT_CURVE;
-  photoCurve.set(pts.map((q) => [q.x, q.y] as [number, number]), CURVE_COLOURS[photoChan]);
-  const b = params ? bandsOf(photoChan) : bandsFromCurve(pts);
-  for (const r of bandRows) {
-    const v = r.get(b);
-    r.input.value = String(v);
-    r.out.textContent = `${v > 0 ? "+" : ""}${Math.round(v * 100)}`;
-    r.out.classList.toggle("auto", Math.abs(v) < 1e-3);
-  }
-}
+// Curves for this photo (L, R, G, B), independent of the look's own curves and of
+// the per-region curves (Regions tab): tone-range sliders (src/ui/toneCurves.ts).
+const photoCurves = createToneCurves({
+  get: () => params?.curves,
+  set: (c) => { if (params) params.curves = c; },
+  key: () => "photo",
+  changed: () => { lookPanel.invalidate(); pushParams(); },
+  enabled: () => !!params,
+});
 adjustPane.append(
   el("div", { class: "group-title", text: t("adj.curves") }),
-  photoChips,
-  bandSliders,
-  el("div", { class: "curve-wrap" }, photoCurve.el),
+  photoCurves.el,
   el("p", { class: "muted", text: t("adj.curvesHint") }),
-  el("div", { class: "actions" }, curveResetBtn),
 );
-renderPhotoCurve();
 
 const dnBtn = el("button", { class: "btn small", text: t("adj.scunet") });
 dnBtn.onclick = () => { if (params) { markInflight(); setProgress(stageText("denoise (SCUNet)")); send({ type: "restore", scunet: true, nafnet: false }); } };
@@ -960,7 +883,7 @@ function renderAuto() {
 
 function syncControls() {
   sliders.forEach(refreshSlider);
-  renderPhotoCurve();
+  photoCurves.render();
   renderLooks();
   renderStageToggles();
   if (params) { dofToggle.checked = params.enable.dof; }

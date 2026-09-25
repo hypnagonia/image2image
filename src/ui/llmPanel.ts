@@ -7,7 +7,9 @@
  * every key is checked against the table below and clamped to its range, and
  * anything unknown is reported and ignored. One step of undo is kept.
  */
-import type { CurvePoint, Decision, Params, SemanticAdjust } from "../decision/params.ts";
+import type { CurvePoint, Decision, Params, Region, SemanticAdjust } from "../decision/params.ts";
+import { isFlat } from "../render/curves.ts";
+import { flatCurves } from "./toneCurves.ts";
 import type { Summary } from "../engine/protocol.ts";
 import { GROUPS } from "../neural/scene.ts";
 import { t } from "./i18n.ts";
@@ -110,6 +112,7 @@ export function buildPrompt(p: Params, auto: Params | undefined, s: Summary | un
     "",
     "The app has already analysed the photo and built two maps. You don't draw masks: name a region or a depth range and the app applies it through these maps.",
     "- Semantic objects map: every pixel has soft probabilities for 11 regions (sky, vegetation, building, ground, terrain, water, person, vehicle, animal, interior, other), from a segmentation network (and Apple's own sky/skin mattes on ProRAW), snapped to the real edges of the photo. Any semantic.<region>.<key> value is applied through this map, blended softly, with no hard edges or halos. So \"darken only the sky by 0.3 EV\", \"warm the people\", \"desaturate the buildings\" or \"more clarity on vegetation\" is one line each. The share of the frame each region covers is listed under Photo.",
+    "- Skin: a layer across people (Apple's skin mask on ProRAW, otherwise the person region × skin colour) — faces and hands, not clothes. It takes all the same settings as a region (semantic.skin.<key>), which replace the region's own where there is skin: e.g. warmer or brighter faces, lower texture to smooth skin, less saturation for natural skin. Prefer small skin changes; people notice skin first.",
     "- Depth map: every pixel has a relative distance (near 0 … far 1) from a depth network, also edge-snapped. depth.near / depth.far scale clarity, texture and sharpening by distance (e.g. crisper foreground, softer background for depth). Dehaze uses it too (it clears distant haze more than near objects), and so does the look's depth-aware grading (far = slightly hazier and cooler, near = a touch more contrast). Skin is always protected from depth grading.",
     "- Curves: point curves on the display-encoded image. They are the most precise tone and colour tool here, so use them. curves.l shapes brightness and contrast: an S-curve for punch, a lifted first point for matte blacks, a lowered last point for softer whites, a bump in the mids to open up a dark photo. curves.r / curves.g / curves.b grade colour by tone: e.g. lift blue and lower red in the shadows and do the opposite in the highlights for teal/orange split toning; a small red lift in the mids for warmth. Keep them smooth (3–6 points; moves of about 0.02–0.08 are already clearly visible). They combine with the look, so a look plus a gentle curve is a good way to get a specific mood.");
   if (s) {
@@ -133,19 +136,21 @@ export function buildPrompt(p: Params, auto: Params | undefined, s: Summary | un
     L.push(`- ${n.path} — ${n.min}…${n.max} — ${r3(cur)}${a !== undefined && n.path !== "profile.intensity" ? ` [${r3(a)}]` : ""} — ${n.what}`);
   }
   L.push("", "### Per-region adjustments",
-    `Path: semantic.<region>.<key>. Regions: ${GROUPS.join(", ")}. Only regions present in the photo matter.`,
+    `Path: semantic.<region>.<key>. Regions: ${GROUPS.join(", ")}, and skin (the layer described above). Only regions present in the photo matter.`,
     "Keys: " + SEM.map((q) => `${q.key} (${q.min}…${q.max}${q.what ? ", " + q.what : ""})`).join("; ") + ".",
     "Current values that differ from neutral (exposure/highlights/warmth/tint/saturation/vibrance/hue 0, multipliers 1):");
   let any = false;
-  for (const g of GROUPS) {
-    const cur = p.semantic[g];
+  for (const g of [...GROUPS, "skin"] as const) {
+    const cur = g === "skin" ? p.skin : p.semantic[g];
     const diff = SEM.filter((q) => Math.abs(cur[q.key] - (["clarity", "texture", "sharpen", "denoise", "dehaze"].includes(q.key) ? 1 : 0)) > 1e-3);
     if (diff.length) { any = true; L.push(`- ${g}: ` + diff.map((q) => `${q.key} ${r3(cur[q.key])}`).join(", ")); }
   }
   if (!any) L.push("- (all neutral)");
   L.push("", "### Curves",
     "Paths: curves.l (luminance), curves.r, curves.g, curves.b. Value: list of [x, y] points in display-encoded 0…1 (x = input, y = output), sorted by x, including [0, y0] and [1, y1], at most 8 points. The app shows each curve as tone-range sliders at x = 0, 0.1, 0.3, 0.5, 0.7, 0.9, 1 (black level, shadows, darks, midtones, lights, highlights, white level), so put your points at exactly those x values. [[0,0],[1,1]] = unchanged. Examples: gentle S-curve [[0,0],[0.25,0.22],[0.75,0.79],[1,1]]; matte blacks [[0,0.04],[0.2,0.2],[1,1]]; cooler shadows via curves.b [[0,0.03],[0.3,0.31],[1,1]].",
-    "Current: " + CURVES.map((c) => `${c} ${curveText(p.curves[c])}`).join(" · "));
+    "Current: " + CURVES.map((c) => `${c} ${curveText(p.curves[c])}`).join(" · "),
+    "Every region, and skin, also has its own curves, blended through its mask: regionCurves.<region>.l / .r / .g / .b (same format), applied after the photo's curves. E.g. regionCurves.sky.l to deepen only the sky, regionCurves.skin.r to warm only the skin's mid-tones, regionCurves.vegetation.g for greener foliage.",
+    "Current region curves: " + (Object.entries(p.regionCurves ?? {}).flatMap(([r, c]) => CURVES.filter((k) => c?.[k] && !isFlat(c[k])).map((k) => `${r}.${k} ${curveText(c![k])}`)).join(" · ") || "(none)"));
   L.push("", "### Look (creative grade, applied after the technical rendering)",
     `Active: ${p.profile.id} (intensity ${r3(p.profile.intensity)}). Choose one with "look": "<id>" — available:`);
   for (const l of looks) L.push(`- ${l.id}: ${l.name}${l.description ? " — " + l.description : ""}`);
@@ -217,6 +222,20 @@ function num(raw: unknown): number {
   return NaN;
 }
 
+/** A curve from a reply: [[x, y], …] or [{x, y}, …], sorted, one point per x, with identity ends added. */
+function parseCurve(raw: unknown): CurvePoint[] | undefined {
+  const pts = Array.isArray(raw) ? raw.map((q) => Array.isArray(q) ? { x: num(q[0]), y: num(q[1]) } : { x: num((q as CurvePoint)?.x), y: num((q as CurvePoint)?.y) }) : [];
+  const ok = pts.filter((q) => Number.isFinite(q.x) && Number.isFinite(q.y)).map((q) => ({ x: clamp(q.x, 0, 1), y: clamp(q.y, 0, 1) })).sort((a, b) => a.x - b.x)
+    .filter((q, i, arr) => i === 0 || q.x - arr[i - 1].x > 1e-4); // one point per x
+  if (!ok.length) return undefined;
+  // A curve without its ends would hold the first/last value flat to 0 and 1
+  // (crushed shadows, clipped highlights): missing ends are the identity — so a
+  // single mid point ([[0.5, 0.53]]) is a valid gentle lift.
+  if (ok[0].x > 1e-4) ok.unshift({ x: 0, y: 0 });
+  if (ok[ok.length - 1].x < 1 - 1e-4) ok.push({ x: 1, y: 1 });
+  return ok.length <= 16 ? ok : undefined;
+}
+
 /** Applies an answer to `p` (mutating). Returns what happened, one line each. */
 export function applyAnswer(p: Params, answer: unknown, selectLook: (id: string) => boolean): { applied: string[]; ignored: string[]; previous: Array<[string, unknown]> } {
   const applied: string[] = [], ignored: string[] = [];
@@ -252,26 +271,34 @@ export function applyAnswer(p: Params, answer: unknown, selectLook: (id: string)
     }
     const sm = /^semantic\.(\w+)\.(\w+)$/.exec(path);
     if (sm) {
-      const g = sm[1] as (typeof GROUPS)[number], def = SEM.find((q) => q.key === sm[2]);
+      const g = sm[1], def = SEM.find((q) => q.key === sm[2]);
       const v = num(raw);
-      if (!GROUPS.includes(g) || !def) { ignored.push(`${path}: unknown region or key`); continue; }
+      const isSkin = g === "skin";
+      if (!(isSkin || GROUPS.includes(g as (typeof GROUPS)[number])) || !def) { ignored.push(`${path}: unknown region or key`); continue; }
       if (!Number.isFinite(v)) { ignored.push(`${path}: not a number`); continue; }
       const c = clamp(v, def.min, def.max);
-      remember(path);
-      p.semantic[g][def.key] = c;
+      const target = isSkin ? `skin.${def.key}` : path; // where it lives in the parameters
+      remember(target);
+      set(p, target, c);
       applied.push(`${path} = ${r3(c)}${c !== v ? ` (clamped from ${v})` : ""}`);
+      continue;
+    }
+    const rc = /^regionCurves\.(\w+)\.([lrgb])$/.exec(path);
+    if (rc) {
+      const r = rc[1] as Region;
+      if (!(r === "skin" || GROUPS.includes(r as (typeof GROUPS)[number]))) { ignored.push(`${path}: unknown region`); continue; }
+      const ok = parseCurve(raw);
+      if (!ok) { ignored.push(`${path}: needs 1…16 points`); continue; }
+      p.regionCurves ??= {};
+      remember(`regionCurves.${r}`);
+      p.regionCurves[r] = { ...(p.regionCurves[r] ?? flatCurves()), [rc[2]]: ok };
+      applied.push(`${path} = ${curveText(ok)}`);
       continue;
     }
     const cm = /^curves\.([lrgb])$/.exec(path);
     if (cm) {
-      const pts = Array.isArray(raw) ? raw.map((q) => Array.isArray(q) ? { x: num(q[0]), y: num(q[1]) } : { x: num((q as CurvePoint)?.x), y: num((q as CurvePoint)?.y) }) : [];
-      const ok = pts.filter((q) => Number.isFinite(q.x) && Number.isFinite(q.y)).map((q) => ({ x: clamp(q.x, 0, 1), y: clamp(q.y, 0, 1) })).sort((a, b) => a.x - b.x)
-        .filter((q, i, arr) => i === 0 || q.x - arr[i - 1].x > 1e-4); // one point per x
-      if (ok.length < 2 || ok.length > 16) { ignored.push(`${path}: needs 2…16 points`); continue; }
-      // A curve without its ends would hold the first/last value flat to 0 and 1
-      // (crushed shadows, clipped highlights): missing ends are the identity.
-      if (ok[0].x > 1e-4) ok.unshift({ x: 0, y: 0 });
-      if (ok[ok.length - 1].x < 1 - 1e-4) ok.push({ x: 1, y: 1 });
+      const ok = parseCurve(raw);
+      if (!ok) { ignored.push(`${path}: needs 1…16 points`); continue; }
       remember(path);
       p.curves[cm[1] as (typeof CURVES)[number]] = ok;
       applied.push(`${path} = ${curveText(ok)}`);
