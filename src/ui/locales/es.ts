@@ -249,6 +249,8 @@ export const es: Dict = {
 
   // ---- errors
   "err.gpu": "Algo falló en la GPU de este dispositivo",
+  "err.noWebgpu": "Este navegador no tiene WebGPU",
+  "err.noWebgpuHow": "La app procesa las fotos en la GPU mediante WebGPU. En iPhone, actualiza a iOS 26 o posterior o, en un iOS anterior, actívalo: Ajustes → Apps → Safari → Avanzado → Feature Flags → WebGPU, y recarga la página.",
   "err.seeLog": "Todos los detalles en Depuración → Registro.",
   "err.dismiss": "Cerrar",
   "err.worker": "error del worker: {msg}",

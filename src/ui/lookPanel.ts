@@ -231,7 +231,7 @@ export function createLookPanel(root: HTMLElement, ctx: Ctx) {
   exportBtn.onclick = () => {
     const p = cur();
     if (!p) return;
-    ctx.download(new Blob([serialize(p)], { type: "application/json" }), `${p.id}.json`);
+    ctx.download(new Blob([serialize(p)], { type: "application/json;charset=utf-8" }), `${p.id}.json`);
   };
   const exportBtn2 = el("button", { class: "btn small", text: t("look.export") });
   exportBtn2.onclick = exportBtn.onclick;

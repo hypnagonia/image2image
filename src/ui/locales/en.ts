@@ -254,6 +254,8 @@ export const en = {
 
   // ---- errors
   "err.gpu": "Something failed on this device's GPU",
+  "err.noWebgpu": "This browser has no WebGPU",
+  "err.noWebgpuHow": "The app develops photos on the GPU through WebGPU. On iPhone, update to iOS 26 or later, or on older iOS turn it on: Settings → Apps → Safari → Advanced → Feature Flags → WebGPU, then reload this page.",
   "err.seeLog": "Debug → Log has the full details.",
   "err.dismiss": "Dismiss",
   "err.worker": "worker error: {msg}",

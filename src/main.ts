@@ -884,7 +884,7 @@ function renderStageToggles() {
   }));
 }
 dlReport.onclick = () => {
-  const blob = new Blob([JSON.stringify({ summary, decisions, auto: autoParams, params, profile, log: logLines }, null, 2)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify({ summary, decisions, auto: autoParams, params, profile, log: logLines }, null, 2)], { type: "application/json;charset=utf-8" });
   download(blob, (summary?.file ?? "photo").replace(/\.[^.]+$/, "") + "-analysis.json");
 };
 
@@ -1018,9 +1018,12 @@ const errorBox = el("div", { class: "error-box" });
 errorBox.hidden = true;
 stage.append(errorBox);
 function showError(text: string) {
+  // No WebGPU at all: not a failure of this photo — say what to do, in the UI language.
+  const noGpu = text.startsWith("WebGPU is not available");
+  if (noGpu) text = t("err.noWebgpuHow");
   errorBox.hidden = false;
   errorBox.replaceChildren(
-    el("strong", { text: t("err.gpu") }),
+    el("strong", { text: noGpu ? t("err.noWebgpu") : t("err.gpu") }),
     el("div", { text: text.slice(0, 600) }),
     el("div", { class: "muted", text: t("err.seeLog") }),
   );
@@ -1157,8 +1160,11 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       logLines.push("ERROR: " + m.message);
       logPre.textContent = logLines.join("\n");
       capsEl.innerHTML = "";
-      capsEl.append(el("span", { class: "error", text: m.message.slice(0, 140) }));
-      if (!params) { empty.style.display = ""; canvas.style.display = "none"; (empty.querySelector("p") as HTMLElement).textContent = m.message; }
+      {
+        const shown = m.message.startsWith("WebGPU is not available") ? t("err.noWebgpuHow") : m.message;
+        capsEl.append(el("span", { class: "error", text: m.message.startsWith("WebGPU is not available") ? t("err.noWebgpu") : shown.slice(0, 140) }));
+        if (!params) { empty.style.display = ""; canvas.style.display = "none"; (empty.querySelector("p") as HTMLElement).textContent = shown; }
+      }
       break;
   }
 };
