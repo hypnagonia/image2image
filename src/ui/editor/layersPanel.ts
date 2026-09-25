@@ -20,6 +20,7 @@ import { t, tOr } from "../i18n.ts";
 import { icon } from "./icons.ts";
 import { createGradientEditor } from "./gradientEditor.ts";
 import { liveLayers } from "../../layers/gpu.ts";
+import { el } from "../dom.ts";
 
 type Ctx = {
   params: () => Params | undefined;
@@ -40,16 +41,6 @@ type Ctx = {
 /** Layer types in the ＋ sheet (each type's icon has the type's name). */
 const ADD: LayerType[] = ["curves", "hueSat", "basic", "gradientMap", "gradientFill", "brightContrast", "exposure"];
 
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, string> = {}, ...kids: Array<Node | string>): HTMLElementTagNameMap[K] {
-  const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === "class") e.className = v;
-    else if (k === "text") e.textContent = v;
-    else e.setAttribute(k, v);
-  }
-  for (const k of kids) e.append(k);
-  return e;
-}
 
 /** A layer's name as shown: automatic layers in the interface language (unless renamed). */
 export function layerName(l: Layer): string {

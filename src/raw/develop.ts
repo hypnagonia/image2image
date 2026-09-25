@@ -60,7 +60,11 @@ async function developRaw(gpu: Gpu, src: RawSource, orientation: number, opt: De
   // Staging for 3-sample LinearRaw (expanded to 4) — not needed for 1 or 4.
   const expand = src.channels === 3 ? new Uint16Array(W * stripH * 4) : undefined;
 
+  let strip = 0;
   for (let y0 = 0; y0 < outH * f; y0 += stripRows) {
+    // writeTexture copies at once and the GPU consumes later: without a pause every
+    // strip would be queued at once (≈ 390 MB for a 48 MP file, a phone's limit).
+    if (++strip % 4 === 0) await gpu.device.queue.onSubmittedWorkDone();
     const own1 = Math.min(y0 + stripRows, outH * f);
     const first = Math.max(0, y0 - apron);
     const last = Math.min(H, own1 + apron);

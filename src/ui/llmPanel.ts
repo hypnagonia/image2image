@@ -13,6 +13,7 @@ import { flatCurves } from "./toneCurves.ts";
 import type { Summary } from "../engine/protocol.ts";
 import { GROUPS } from "../neural/scene.ts";
 import { t } from "./i18n.ts";
+import { el } from "./dom.ts";
 
 type Ctx = {
   params: () => Params | undefined;
@@ -83,16 +84,6 @@ const SEM: Array<{ key: keyof SemanticAdjust; min: number; max: number; what: st
 ];
 const CURVES = ["l", "r", "g", "b"] as const;
 
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, string> = {}, ...kids: Array<Node | string>): HTMLElementTagNameMap[K] {
-  const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === "class") e.className = v;
-    else if (k === "text") e.textContent = v;
-    else e.setAttribute(k, v);
-  }
-  for (const k of kids) e.append(k);
-  return e;
-}
 
 /** Path segments; under `cells` / `cellCurves` the region and distance form one key ("building.far"). */
 function keys(path: string): string[] {

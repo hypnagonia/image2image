@@ -1,3 +1,4 @@
+import { srgbEotf as eotf, srgbOetf as oetf } from "../color/transfer.ts";
 /**
  * The neutral display transform around the upscaling network: scene-linear
  * (normalised by the exposure gain) ↔ display-referred [0, 1]. Extended
@@ -7,8 +8,6 @@
 /** Reinhard white point in normalised (gain-applied) linear units. */
 export const WHITE = 4;
 
-const oetf = (v: number) => (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
-const eotf = (v: number) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
 
 /** Normalised linear → display-referred [0, 1]. */
 export function toDisplay(v: number): number {

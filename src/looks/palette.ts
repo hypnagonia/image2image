@@ -12,6 +12,7 @@ import { linSrgbToOklab, oklabToLinSrgb } from "../color/oklab.ts";
 import { mulVec } from "../color/mat3.ts";
 import { P3_TO_SRGB } from "../color/spaces.ts";
 import { HUE_CENTRES, HUE_RANGES, type HueRange } from "./profile.ts";
+import { srgbEotf as eotf, srgbOetf as oetf } from "../color/transfer.ts";
 
 export interface Swatch { lab: [number, number, number]; hex: string; weight: number }
 
@@ -35,8 +36,6 @@ export interface ColorStats {
   mean: [number, number, number];
 }
 
-const eotf = (v: number) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
-const oetf = (v: number) => (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(Math.max(v, 0), 1 / 2.4) - 0.055);
 const EOTF8 = Float32Array.from({ length: 256 }, (_, i) => eotf(i / 255));
 
 export function labToHex(lab: readonly number[]): string {

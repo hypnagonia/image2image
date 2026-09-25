@@ -50,6 +50,7 @@ import { canEncodeHeic, encodeGainMapJpeg, encodeHeic, encodeJpeg, encodeLinearD
 import { Profiler } from "./profiler.ts";
 import type { Capabilities, ExportFormat, FromWorker, Summary, UpscaleInfo } from "./protocol.ts";
 import type { CameraColor } from "../color/dng.ts";
+import { srgbEotf, srgbOetf } from "../color/transfer.ts";
 
 type Post = (m: FromWorker, transfer?: Transferable[]) => void;
 
@@ -211,7 +212,7 @@ export class Engine {
     this.s = undefined;
   }
 
-  async open(file: File, resolution: "auto" | "full" | "half", autoExposure = false, autoDof = false, upscaleMode: UpscaleMode = "auto") {
+  async open(file: File, resolution: "auto" | "full" | "half", autoExposure = false, autoDof = false, upscaleMode: UpscaleMode = "auto", safeAnalysis = false) {
     const gen = ++this.generation;
     this.closeSession();
     const P = new Profiler(this.gpu);
@@ -261,14 +262,14 @@ export class Engine {
     for (let i = 0; i < gw * gh * 4; i += 4) {
       for (let c = 0; c < 3; c++) {
         const v = Math.min(1, Math.max(0, linF[i + c] * gain));
-        analysisRgba[i + c] = v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+        analysisRgba[i + c] = srgbOetf(v);
       }
       analysisRgba[i + 3] = 1;
     }
     this.log(`analysis image ${gw}×${gh}; normalisation gain ${gain.toFixed(3)} (${Math.log2(gain).toFixed(2)} EV)`);
 
     // --- semantic segmentation + depth (reduced image only) ------------------------
-    const scene = await P.time("segmentation + depth", () => analyseScene(this.neural, { rgba: analysisRgba, width: gw, height: gh }, (s) => this.progress(s), true, !isMobile() /* detail tiles: 4 more depth passes, too heavy for phones */), (s) => Object.entries(s.timings).map(([k, v]) => `${k} ${v.toFixed(0)}ms`).join(", "));
+    const scene = await P.time("segmentation + depth", () => analyseScene(this.neural, { rgba: analysisRgba, width: gw, height: gh }, (s) => this.progress(s), true, !isMobile() /* detail tiles: 4 more depth passes, too heavy for phones */, safeAnalysis ? "wasm" : this.neural.backend), (s) => Object.entries(s.timings).map(([k, v]) => `${k} ${v.toFixed(0)}ms`).join(", "));
     if (import.meta.env.DEV) {
       // Dev only: dump the analysis image and distance map (PGM) for offline inspection.
       const pgm = (w: number, h: number, v: (i: number) => number) => {
@@ -361,7 +362,7 @@ export class Engine {
     });
     const params = structuredClone(decision.params);
     // Atmospheric light: dark-channel estimate is in the analysis encoding → linear working.
-    const A = decision.params.dehaze.light.map((v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)) / gain) as [number, number, number];
+    const A = decision.params.dehaze.light.map((v) => srgbEotf(v) / gain) as [number, number, number];
 
     const s: Session = { name: file.name, decoded, work, denoised: work.tex, gain, scene, maps, report, decision, params, lightLinear: A, scale: 1, skin: skinTex };
     if (reference && autoExposure) s.calib = { ref: reference.q[0], rounds: 0 };
@@ -708,8 +709,7 @@ export class Engine {
     this.post({ type: "preview", width: src.width, height: src.height, data, space: "p3", final, ms: performance.now() - t0 }, [data]);
     if (calib !== undefined && s.calib) {
       // The display model misjudges some scenes (backlight, night): correct on what was rendered.
-      const dec = (v: number) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
-      const d = Math.log2(Math.max(dec(s.calib.ref), 1e-4) / Math.max(dec(calib), 1e-4));
+      const d = Math.log2(Math.max(srgbEotf(s.calib.ref), 1e-4) / Math.max(srgbEotf(calib), 1e-4));
       s.calib.rounds++;
       if (Math.abs(calib - s.calib.ref) > 6 / 255) {
         const ev = Math.round(Math.min(2.5, Math.max(-1.5, p.exposure + 0.9 * d)) * 100) / 100;

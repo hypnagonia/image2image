@@ -29,6 +29,7 @@
 import { curveFromBands, toneCurve, type CurveBands, TONE_BANDS } from "../render/curves.ts";
 import { blackPoint } from "./blackPoint.ts";
 import type { CurvePoint, Curves, DepthBand, Params, Region } from "./params.ts";
+import { srgbOetf as enc } from "../color/transfer.ts";
 
 const HIST_MIN = -14, HIST_RANGE = 18;
 const CAP = 0.35;
@@ -68,7 +69,6 @@ export interface AutoCurvesResult {
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 const smooth = (a: number, b: number, x: number) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 const r2 = (v: number) => Math.round(v * 100) / 100;
-const enc = (v: number) => (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
 const flat = (): CurveBands => ({ black: 0, bands: [0, 0, 0, 0, 0], white: 0 });
 
 /** Display-encoded level of a scene EV through exposure, local tone and the tone curve (as render_tone.wgsl). */

@@ -1,3 +1,4 @@
+import { srgbEotf as eotf, srgbOetf as oetf } from "../color/transfer.ts";
 /**
  * The camera's own rendering, embedded in a DNG: Apple ProRAW (and most camera
  * DNGs) carry a full-size JPEG preview of the photo as the phone showed it. Its
@@ -45,8 +46,6 @@ export function findPreview(head: Uint8Array): JpegInfo | null {
   return best;
 }
 
-const eotf = (v: number) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
-const oetf = (v: number) => (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
 
 /** Median display-encoded luminance of rendered 8-bit P3 pixels (rgba), subsampled. */
 export function renderedMedian(px: Uint8Array, stride = 7): number {
@@ -79,7 +78,8 @@ export async function embeddedPreviewStats(file: Blob, qs: number[], maxMP = Inf
   if (!best || (best.width * best.height) / 1e6 > maxMP) return undefined;
   try {
     const w = 256, h = Math.max(1, Math.round((w * best.height) / best.width));
-    const bmp = await createImageBitmap(file.slice(best.offset), { resizeWidth: w, resizeHeight: h, resizeQuality: "medium" });
+    // The JPEG only (not the raw data after it): ≈ 2 bytes per pixel is a generous bound.
+    const bmp = await createImageBitmap(file.slice(best.offset, best.offset + Math.max(4 << 20, best.width * best.height * 2)), { resizeWidth: w, resizeHeight: h, resizeQuality: "medium" });
     const c = new OffscreenCanvas(bmp.width, bmp.height);
     const g = c.getContext("2d", { willReadFrequently: true })!;
     g.drawImage(bmp, 0, 0);

@@ -12,6 +12,7 @@
  * The mattes are stored in sensor orientation, so they are rotated here the
  * same way the working image is.
  */
+import { jpegInfo } from "./preview.ts";
 export interface DngMask {
   kind: "sky" | "skin" | "subject";
   data: Uint8Array;
@@ -86,7 +87,14 @@ export async function decodeDngMasks(file: Uint8Array, orientation: number): Pro
   const out: DngMask[] = [];
   for (const m of found) {
     try {
-      const bmp = await createImageBitmap(new Blob([m.bytes as Uint8Array<ArrayBuffer>], { type: "image/jpeg" }));
+      // Used on the analysis grid and as a soft skin matte: 1024 px is plenty, and decoding
+      // at full size (4032×3024) briefly costs ≈ 150 MB per matte on a phone.
+      const info = jpegInfo(m.bytes, 0);
+      const k = info ? Math.min(1, 1024 / Math.max(info.width, info.height)) : 1;
+      const blob = new Blob([m.bytes as Uint8Array<ArrayBuffer>], { type: "image/jpeg" });
+      const bmp = await (info && k < 1
+        ? createImageBitmap(blob, { resizeWidth: Math.round(info.width * k), resizeHeight: Math.round(info.height * k), resizeQuality: "medium" })
+        : createImageBitmap(blob));
       const rot = orientation >= 5; // 5…8 exchange width and height
       const w = rot ? bmp.height : bmp.width, h = rot ? bmp.width : bmp.height;
       const cv = new OffscreenCanvas(w, h);

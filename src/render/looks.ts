@@ -11,6 +11,7 @@ import { linSrgbToOklab, oklabToLinSrgb } from "../color/oklab.ts";
 import { mulVec } from "../color/mat3.ts";
 import { P3_TO_SRGB, rgbToXYZ, SRGB, P3_D65 } from "../color/spaces.ts";
 import { inverse, mul } from "../color/mat3.ts";
+import { srgbEotf as eotf, srgbOetf as oetf } from "../color/transfer.ts";
 
 export interface Look {
   id: string;
@@ -23,8 +24,6 @@ export interface Look {
 }
 
 const SRGB_TO_P3 = mul(inverse(rgbToXYZ(P3_D65)), rgbToXYZ(SRGB));
-const eotf = (v: number) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
-const oetf = (v: number) => (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
 const smooth = (e0: number, e1: number, x: number) => { const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
 
 function hueDist(a: number, b: number) {

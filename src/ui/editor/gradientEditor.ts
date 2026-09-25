@@ -8,19 +8,10 @@
 import { GRADIENT_PRESETS, gradientAt, gradientCss, gradientFrom, rgbToHex, type Gradient } from "../../layers/gradient.ts";
 import { t } from "../i18n.ts";
 import { icon } from "./icons.ts";
+import { el } from "../dom.ts";
 
 type Target = { gradient: Gradient; reverse: boolean; preset?: string };
 
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, string> = {}, ...kids: Array<Node | string>): HTMLElementTagNameMap[K] {
-  const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === "class") e.className = v;
-    else if (k === "text") e.textContent = v;
-    else e.setAttribute(k, v);
-  }
-  for (const k of kids) e.append(k);
-  return e;
-}
 
 /**
  * `changed(label?)`: the gradient was edited (a label = a finished step, e.g. a preset).

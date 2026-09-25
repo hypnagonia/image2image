@@ -1,3 +1,4 @@
+import { srgbEotf as eotf, srgbOetf as oetf } from "../color/transfer.ts";
 /**
  * Gradients for the Gradient Map and Gradient Fill layers: colour stops (sRGB
  * hex, location 0…1, opacity), preset palettes, and the 1024-sample table the
@@ -69,8 +70,6 @@ export function gradientAt(g: Gradient, x: number): [number, number, number, num
   return [ca[0] + (cb[0] - ca[0]) * t, ca[1] + (cb[1] - ca[1]) * t, ca[2] + (cb[2] - ca[2]) * t, a.alpha + (b.alpha - a.alpha) * t];
 }
 
-const eotf = (v: number) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
-const oetf = (v: number) => (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
 
 /** sRGB (encoded) → Display P3 (encoded): the same colour in the tone pass's encoding. */
 export function srgbToP3Encoded(r: number, g: number, b: number): [number, number, number] {

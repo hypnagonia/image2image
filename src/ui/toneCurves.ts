@@ -9,6 +9,7 @@ import type { CurvePoint, Curves } from "../decision/params.ts";
 import { isFlat } from "../render/curves.ts";
 import { CurveEditor } from "./curveEditor.ts";
 import { t } from "./i18n.ts";
+import { el } from "./dom.ts";
 
 export type Chan = "l" | "r" | "g" | "b";
 const CHANS: Chan[] = ["l", "r", "g", "b"];
@@ -16,16 +17,6 @@ const COLOURS = { l: "#ece9e3", r: "#ff6b6b", g: "#6bdc7a", b: "#6b9bff" } as co
 export const FLAT: CurvePoint[] = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
 export const flatCurves = (): Curves => ({ l: [...FLAT], r: [...FLAT], g: [...FLAT], b: [...FLAT] });
 
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, string> = {}, ...kids: Array<Node | string>): HTMLElementTagNameMap[K] {
-  const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === "class") e.className = v;
-    else if (k === "text") e.textContent = v;
-    else e.setAttribute(k, v);
-  }
-  for (const k of kids) e.append(k);
-  return e;
-}
 
 export interface ToneCurvesOptions {
   /** The curves being edited (undefined = unchanged / no photo). */

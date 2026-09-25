@@ -14,6 +14,7 @@ import type { ColorStats } from "../looks/palette.ts";
 import { GROUPS, type Group } from "../neural/scene.ts";
 import { CurveEditor, hueColor, rainbowGradient } from "./curveEditor.ts";
 import { t, tOr } from "./i18n.ts";
+import { el } from "./dom.ts";
 
 type Ctx = {
   send: (m: ToWorker) => void;
@@ -26,16 +27,6 @@ type Ctx = {
 
 const STORE = "lookProfiles.v1";
 
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, string> = {}, ...kids: Array<Node | string>): HTMLElementTagNameMap[K] {
-  const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === "class") e.className = v;
-    else if (k === "text") e.textContent = v;
-    else e.setAttribute(k, v);
-  }
-  for (const k of kids) e.append(k);
-  return e;
-}
 
 /** Built-in profiles are shown translated; the stored id/name/description stay as they are. */
 const builtinText = (pr: LookProfile, field: "name" | "desc") =>

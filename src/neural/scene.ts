@@ -188,15 +188,42 @@ function percentile(a: Float32Array, q: number): number {
   return s[Math.min(s.length - 1, Math.max(0, Math.floor(q * (s.length - 1))))];
 }
 
-export async function analyseScene(neural: Neural, img: AnalysisImage, onStage?: (s: string) => void, withDepth = true, detailTiles = true): Promise<SceneMaps> {
+/**
+ * Runs `fn` on the first backend that works: `prefer` first, then WASM (a phone's
+ * WebGPU can fail on a network: memory, unsupported operators). Undefined when
+ * every backend failed; each failure is logged.
+ */
+async function firstWorking<T>(neural: Neural, prefer: Backend, what: string, log: string[], fn: (b: Backend) => Promise<T>): Promise<T | undefined> {
+  const order: Backend[] = prefer === "webgpu" && neural.backend === "webgpu" ? ["webgpu", "wasm"] : ["wasm"];
+  for (const b of order) {
+    try {
+      const r = await fn(b);
+      if (b !== neural.backend) log.push(`${what} ran on WASM`);
+      return r;
+    } catch (e) {
+      log.push(`${what} on ${b} failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  return undefined;
+}
+
+/** A session that is released however the work ends. */
+async function withSession<T>(neural: Neural, spec: Parameters<Neural["session"]>[0], backend: Backend, fn: (s: Awaited<ReturnType<Neural["session"]>>) => Promise<T>): Promise<T> {
+  const ses = await neural.session(spec, false, backend);
+  try { return await fn(ses); } finally { await ses.release().catch(() => undefined); }
+}
+
+/**
+ * `prefer`: the backend to try first for both networks ("wasm" after the page
+ * crashed during analysis on this device).
+ */
+export async function analyseScene(neural: Neural, img: AnalysisImage, onStage?: (s: string) => void, withDepth = true, detailTiles = true, prefer: Backend = neural.backend): Promise<SceneMaps> {
   const timings: Record<string, number> = {};
   const log: string[] = [];
 
   // --- SegFormer-B0 ------------------------------------------------------
   onStage?.("segmentation");
   let t = performance.now();
-  const segSession = await neural.session(MODELS.segformer, false);
-  timings["segformer.load"] = performance.now() - t;
   // Sliding window (the standard way to run SegFormer on a large image): 512 px
   // crops with 25% overlap over the ~1036 px analysis image, logits blended
   // with feathered weights. Twice the resolution of a single squeezed pass,
@@ -209,34 +236,39 @@ export async function analyseScene(neural: Neural, img: AnalysisImage, onStage?:
   for (const y of tilePositions(H, chh, STRIDE)) for (const x of tilePositions(W, cw, STRIDE)) crops.push([x, y, Math.min(cw, W), Math.min(chh, H)]);
   // Crops run one at a time (not as a batch): peak GPU memory stays that of a
   // single 512 px pass, which matters on phones.
-  t = performance.now();
   const lw = Math.floor(W / 4), lh = Math.floor(H / 4);
-  let C = 0;
-  let L = new Float32Array(0);
-  const wsumL = new Float32Array(lw * lh);
-  for (const [x0, y0, cwid, chei] of crops) {
-    const segIn = new ort.Tensor("float32", cropsTensor(img, [[x0, y0, cwid, chei]], cw, chh), [1, 3, chh, cw]);
-    const segOut = await segSession.run({ [segSession.inputNames[0]]: segIn });
-    const logitsT = segOut[segSession.outputNames[0]];
-    const dims = logitsT.dims as number[];
-    const clh = dims[2], clw = dims[3];
-    if (!C) { C = dims[1]; L = new Float32Array(C * lw * lh); }
-    const CL = (await logitsT.getData()) as Float32Array;
-    logitsT.dispose();
-    const cplane = clw * clh;
-    const ox = Math.round(x0 / 4), oy = Math.round(y0 / 4);
-    const sx = cwid / 4 / clw, sy = chei / 4 / clh;
-    for (let j = 0; j < clh; j++) for (let i = 0; i < clw; i++) {
-      const X = ox + Math.round(i * sx), Y = oy + Math.round(j * sy);
-      if (X >= lw || Y >= lh) continue;
-      const w = feather(i, clw, clw * 0.2) * feather(j, clh, clh * 0.2);
-      const k = Y * lw + X;
-      wsumL[k] += w;
-      for (let c = 0; c < C; c++) L[c * lw * lh + k] += w * CL[c * cplane + j * clw + i];
+  const seg = await firstWorking(neural, prefer, "Segmentation", log, (backend) => withSession(neural, MODELS.segformer, backend, async (segSession) => {
+    t = performance.now();
+    let C = 0;
+    let L = new Float32Array(0);
+    const wsumL = new Float32Array(lw * lh);
+    for (const [x0, y0, cwid, chei] of crops) {
+      const segIn = new ort.Tensor("float32", cropsTensor(img, [[x0, y0, cwid, chei]], cw, chh), [1, 3, chh, cw]);
+      const segOut = await segSession.run({ [segSession.inputNames[0]]: segIn });
+      const logitsT = segOut[segSession.outputNames[0]];
+      const dims = logitsT.dims as number[];
+      const clh = dims[2], clw = dims[3];
+      if (!C) { C = dims[1]; L = new Float32Array(C * lw * lh); }
+      const CL = (await logitsT.getData()) as Float32Array;
+      logitsT.dispose();
+      const cplane = clw * clh;
+      const ox = Math.round(x0 / 4), oy = Math.round(y0 / 4);
+      const sx = cwid / 4 / clw, sy = chei / 4 / clh;
+      for (let j = 0; j < clh; j++) for (let i = 0; i < clw; i++) {
+        const X = ox + Math.round(i * sx), Y = oy + Math.round(j * sy);
+        if (X >= lw || Y >= lh) continue;
+        const w = feather(i, clw, clw * 0.2) * feather(j, clh, clh * 0.2);
+        const k = Y * lw + X;
+        wsumL[k] += w;
+        for (let c = 0; c < C; c++) L[c * lw * lh + k] += w * CL[c * cplane + j * clw + i];
+      }
     }
-  }
-  timings["segformer.run"] = performance.now() - t;
-  await segSession.release();
+    timings["segformer.run"] = performance.now() - t;
+    return { C, L, wsumL };
+  }));
+  if (!seg) throw new Error("Scene analysis failed (segmentation could not run on this device)");
+  const { C, wsumL } = seg;
+  let L: Float32Array = seg.L;
   for (let k = 0; k < lw * lh; k++) {
     const iw = wsumL[k] > 0 ? 1 / wsumL[k] : 0;
     for (let c = 0; c < C; c++) L[c * lw * lh + k] *= iw;
@@ -263,6 +295,7 @@ export async function analyseScene(neural: Neural, img: AnalysisImage, onStage?:
     }
     counts[best]++;
   }
+  L = new Float32Array(0); // 30 MB of logits: not needed during depth
   const coverage = Object.fromEntries(GROUPS.map((g, i) => [g, counts[i] / plane])) as Record<Group, number>;
   log.push(`SegFormer-B0 ${crops.length} × ${sw}×${sh} sliding window over ${W}×${H} → ${lw}×${lh}: ` + GROUPS.filter((g) => coverage[g] > 0.01).map((g) => `${g} ${(coverage[g] * 100).toFixed(0)}%`).join(", "));
 
@@ -274,89 +307,75 @@ export async function analyseScene(neural: Neural, img: AnalysisImage, onStage?:
   // The depth network is the heaviest step of opening a photo; phones' WebGPU can
   // fail on it (4-bit weights, memory). Then it runs on the CPU, and if that fails
   // too the photo opens without depth (flat distance) instead of breaking.
-  const runDepth = async (backend: Backend) => {
+  const runDepth = (backend: Backend) => withSession(neural, MODELS.depth, backend, async (dSession) => {
+    // Global pass: the whole scene at 518 px — correct layout and ordering.
+    const [dw, dh] = fitDims(img.width, img.height, 518, 14);
     t = performance.now();
-    const dSession = await neural.session(MODELS.depth, false, backend);
-    timings["depth.load"] = performance.now() - t;
-    try {
-      // Global pass: the whole scene at 518 px — correct layout and ordering.
-      const [dw, dh] = fitDims(img.width, img.height, 518, 14);
+    const dIn = new ort.Tensor("float32", cropsTensor(img, [[0, 0, img.width, img.height]], dw, dh), [1, 3, dh, dw]);
+    const dOut = await dSession.run({ [dSession.inputNames[0]]: dIn });
+    const pd = dOut[dSession.outputNames[0]];
+    const gDisp = Float32Array.from((await pd.getData()) as Float32Array);
+    // A GPU that ran out of memory can return garbage instead of throwing.
+    if (!gDisp.every(Number.isFinite) || percentile(gDisp, 0.98) - percentile(gDisp, 0.02) < 1e-6) throw new Error("depth output is not a depth map");
+    const pdDims = pd.dims as number[];
+    const gw = pdDims[pdDims.length - 1], gh = pdDims[pdDims.length - 2];
+    timings["depth.global"] = performance.now() - t;
+    // Detail tiles: 2×2 overlapping tiles at the analysis image's full resolution
+    // (twice the global pass). Relative depth has an arbitrary scale per run, so
+    // each tile is least-squares aligned to the global map and only its fine
+    // detail (leaf gaps, branches, crisp outlines) is merged — the global pass
+    // keeps deciding what is near and far.
+    const W2 = img.width, H2 = img.height;
+    const Gf = resample(gDisp, gw, gh, W2, H2);
+    let disp = Gf;
+    let ow = W2, oh = H2;
+    if (detailTiles && Math.max(W2, H2) > 600) {
       t = performance.now();
-      const dIn = new ort.Tensor("float32", cropsTensor(img, [[0, 0, img.width, img.height]], dw, dh), [1, 3, dh, dw]);
-      const dOut = await dSession.run({ [dSession.inputNames[0]]: dIn });
-      const pd = dOut[dSession.outputNames[0]];
-      const gDisp = Float32Array.from((await pd.getData()) as Float32Array);
-      const pdDims = pd.dims as number[];
-      const gw = pdDims[pdDims.length - 1], gh = pdDims[pdDims.length - 2];
-      timings["depth.global"] = performance.now() - t;
-      // Detail tiles: 2×2 overlapping tiles at the analysis image's full resolution
-      // (twice the global pass). Relative depth has an arbitrary scale per run, so
-      // each tile is least-squares aligned to the global map and only its fine
-      // detail (leaf gaps, branches, crisp outlines) is merged — the global pass
-      // keeps deciding what is near and far.
-      const W2 = img.width, H2 = img.height;
-      const Gf = resample(gDisp, gw, gh, W2, H2);
-      let disp = Gf;
-      let ow = W2, oh = H2;
-      if (detailTiles && Math.max(W2, H2) > 600) {
-        t = performance.now();
-        const tw = Math.min(W2, Math.ceil((W2 * 0.6) / 14) * 14), th = Math.min(H2, Math.ceil((H2 * 0.6) / 14) * 14);
-        const tiles: Array<[number, number, number, number]> = [];
-        for (const y of [0, H2 - th]) for (const x of [0, W2 - tw]) tiles.push([x, y, tw, th]);
-        const detail = new Float32Array(W2 * H2), wsum = new Float32Array(W2 * H2);
-        for (const [x0, y0] of tiles) {
-          const tIn = new ort.Tensor("float32", cropsTensor(img, [[x0, y0, tw, th]], tw, th), [1, 3, th, tw]);
-          const tOut = await dSession.run({ [dSession.inputNames[0]]: tIn });
-          const tp = tOut[dSession.outputNames[0]];
-          const tdims = tp.dims as number[];
-          const otw = tdims[tdims.length - 1], oth = tdims[tdims.length - 2];
-          const tile = resample((await tp.getData()) as Float32Array, otw, oth, tw, th);
-          tp.dispose();
-          // Least-squares scale/offset to the global disparity over the tile.
-          let st = 0, sg = 0, stt = 0, stg = 0;
-          const N = tw * th;
-          for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
-            const tv = tile[y * tw + x], gv = Gf[(y0 + y) * W2 + x0 + x];
-            st += tv; sg += gv; stt += tv * tv; stg += tv * gv;
-          }
-          const vt = stt / N - (st / N) ** 2;
-          const a = vt > 1e-9 ? (stg / N - (st / N) * (sg / N)) / vt : 0;
-          const b = sg / N - a * (st / N);
-          const aligned = tile.map((v) => a * v + b);
-          // Fine detail only: σ ≈ 1% of the long edge.
-          const low = gaussBlur(aligned, tw, th, Math.max(3, Math.max(W2, H2) * 0.01));
-          for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
-            const w = feather(x, tw, tw * 0.25) * feather(y, th, th * 0.25);
-            const k = (y0 + y) * W2 + x0 + x;
-            detail[k] += w * (aligned[y * tw + x] - low[y * tw + x]);
-            wsum[k] += w;
-          }
+      const tw = Math.min(W2, Math.ceil((W2 * 0.6) / 14) * 14), th = Math.min(H2, Math.ceil((H2 * 0.6) / 14) * 14);
+      const tiles: Array<[number, number, number, number]> = [];
+      for (const y of [0, H2 - th]) for (const x of [0, W2 - tw]) tiles.push([x, y, tw, th]);
+      const detail = new Float32Array(W2 * H2), wsum = new Float32Array(W2 * H2);
+      for (const [x0, y0] of tiles) {
+        const tIn = new ort.Tensor("float32", cropsTensor(img, [[x0, y0, tw, th]], tw, th), [1, 3, th, tw]);
+        const tOut = await dSession.run({ [dSession.inputNames[0]]: tIn });
+        const tp = tOut[dSession.outputNames[0]];
+        const tdims = tp.dims as number[];
+        const otw = tdims[tdims.length - 1], oth = tdims[tdims.length - 2];
+        const tile = resample((await tp.getData()) as Float32Array, otw, oth, tw, th);
+        tp.dispose();
+        // Least-squares scale/offset to the global disparity over the tile.
+        let st = 0, sg = 0, stt = 0, stg = 0;
+        const N = tw * th;
+        for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
+          const tv = tile[y * tw + x], gv = Gf[(y0 + y) * W2 + x0 + x];
+          st += tv; sg += gv; stt += tv * tv; stg += tv * gv;
         }
-        // Remove the same band from the global map so detail is replaced, not doubled.
-        const gLow = gaussBlur(Gf, W2, H2, Math.max(3, Math.max(W2, H2) * 0.01));
-        disp = new Float32Array(W2 * H2);
-        for (let k = 0; k < W2 * H2; k++) disp[k] = wsum[k] > 0 ? gLow[k] + detail[k] / wsum[k] : Gf[k];
-        timings["depth.tiles"] = performance.now() - t;
-        log.push(`Depth detail: ${tiles.length} tiles ${tw}×${th} aligned to the global map, merged at ${W2}×${H2}`);
-      } else {
-        ow = gw; oh = gh;
-        disp = gDisp;
+        const vt = stt / N - (st / N) ** 2;
+        const a = vt > 1e-9 ? (stg / N - (st / N) * (sg / N)) / vt : 0;
+        const b = sg / N - a * (st / N);
+        const aligned = tile.map((v) => a * v + b);
+        // Fine detail only: σ ≈ 1% of the long edge.
+        const low = gaussBlur(aligned, tw, th, Math.max(3, Math.max(W2, H2) * 0.01));
+        for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
+          const w = feather(x, tw, tw * 0.25) * feather(y, th, th * 0.25);
+          const k = (y0 + y) * W2 + x0 + x;
+          detail[k] += w * (aligned[y * tw + x] - low[y * tw + x]);
+          wsum[k] += w;
+        }
       }
-      return { disp, ow, oh, dw, dh };
-    } finally {
-      await dSession.release().catch(() => undefined);
+      // Remove the same band from the global map so detail is replaced, not doubled.
+      const gLow = gaussBlur(Gf, W2, H2, Math.max(3, Math.max(W2, H2) * 0.01));
+      disp = new Float32Array(W2 * H2);
+      for (let k = 0; k < W2 * H2; k++) disp[k] = wsum[k] > 0 ? gLow[k] + detail[k] / wsum[k] : Gf[k];
+      timings["depth.tiles"] = performance.now() - t;
+      log.push(`Depth detail: ${tiles.length} tiles ${tw}×${th} aligned to the global map, merged at ${W2}×${H2}`);
+    } else {
+      ow = gw; oh = gh;
+      disp = gDisp;
     }
-  };
-  let depthRun: Awaited<ReturnType<typeof runDepth>> | undefined;
-  for (const backend of neural.backend === "webgpu" ? (["webgpu", "wasm"] as const) : (["wasm"] as const)) {
-    try {
-      depthRun = await runDepth(backend);
-      if (backend !== neural.backend) log.push("Depth ran on WASM (WebGPU failed)");
-      break;
-    } catch (e) {
-      log.push(`Depth on ${backend} failed: ${e instanceof Error ? e.message : e}`);
-    }
-  }
+    return { disp, ow, oh, dw, dh };
+  });
+  const depthRun = await firstWorking(neural, prefer, "Depth", log, runDepth);
   if (!depthRun) {
     log.push("Depth unavailable: the photo opens with a flat distance map (no automatic depth effects)");
     return { seg: { width: lw, height: lh, probs }, depth: { width: 1, height: 1, dist: new Float32Array(1).fill(0.5), raw: new Float32Array(1) }, coverage, timings, log };

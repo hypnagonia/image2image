@@ -7,6 +7,10 @@ import { MAX_FOCUS_POINTS } from "../decision/params.ts";
 const post = (m: FromWorker, transfer: Transferable[] = []) => (self as unknown as DedicatedWorkerGlobalScope).postMessage(m, transfer);
 const engine = new Engine(post);
 
+// A rejected promise nobody awaited must still reach the page (not leave it waiting).
+self.addEventListener("unhandledrejection", (e) => {
+  post({ type: "error", message: e.reason instanceof Error ? e.reason.message : String(e.reason) });
+});
 self.onmessage = (ev: MessageEvent<ToWorker>) => {
   const m = ev.data;
   // Cheap, idempotent messages are handled immediately; heavy ones are serialised.
@@ -33,7 +37,7 @@ async function handle(m: ToWorker) {
       break;
     }
     case "open":
-      await engine.open(m.file, m.resolution, m.autoExposure, m.autoDof, m.upscale);
+      await engine.open(m.file, m.resolution, m.autoExposure, m.autoDof, m.upscale, m.safeAnalysis);
       break;
     case "upscale-now":
       engine.forceUpscale();

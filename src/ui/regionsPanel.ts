@@ -18,6 +18,7 @@ import { GROUPS, type Group } from "../neural/scene.ts";
 import type { HistTarget } from "../analysis/previewHist.ts";
 import { t } from "./i18n.ts";
 import { createToneCurves } from "./toneCurves.ts";
+import { el } from "./dom.ts";
 
 type Ctx = {
   params: () => Params | undefined;
@@ -63,16 +64,6 @@ const DEFS: Array<Def | string> = [
   { key: "dehaze", label: t("reg.dehaze"), min: 0, max: 2, step: 0.01, fmt: mult },
 ];
 
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, string> = {}, ...kids: Array<Node | string>): HTMLElementTagNameMap[K] {
-  const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === "class") e.className = v;
-    else if (k === "text") e.textContent = v;
-    else e.setAttribute(k, v);
-  }
-  for (const k of kids) e.append(k);
-  return e;
-}
 
 /** What the settings and curves below edit. */
 type Target = { kind: "region"; region: Region } | { kind: "distance"; band: DepthBand } | { kind: "cell"; cell: CellKey; group: Group; band: DepthBand };

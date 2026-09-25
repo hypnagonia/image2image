@@ -19,21 +19,13 @@ import { applyAutoCurves, type AutoCurveBands } from "./decision/autoCurves.ts";
 import { isFlat } from "./render/curves.ts";
 import { crashedWhileProcessing, lastStage, markCompleted, markInflight, noteStage, rememberParams, rememberPhoto, restorablePhoto } from "./ui/session.ts";
 import { LANGS, LANG_NAMES, lang, setLang, storedLang, t, tOr, type Lang } from "./ui/i18n.ts";
+import { el } from "./ui/dom.ts";
+import { installTouchSliders } from "./ui/touchSlider.ts";
 
 const worker = new Worker(new URL("./engine/worker.ts", import.meta.url), { type: "module" });
 const send = (m: ToWorker) => worker.postMessage(m);
 
 // --------------------------------------------------------------------------- DOM helpers
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string, string> = {}, ...kids: Array<Node | string>): HTMLElementTagNameMap[K] {
-  const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === "class") e.className = v;
-    else if (k === "text") e.textContent = v;
-    else e.setAttribute(k, v);
-  }
-  for (const k of kids) e.append(k);
-  return e;
-}
 
 const app = document.getElementById("app")!;
 const header = el("header", { class: "top" }, el("h1", { text: "Shikarno" }));
@@ -190,7 +182,11 @@ let upscaleMode: UpscaleMode = (() => { try { const v = localStorage.getItem("up
 /** The open photo (for "back to original size", which reopens it at 1×). */
 let currentFile: File | undefined;
 /** The page died while processing: don't retry automatically — offer a lighter reopen. */
+/** Scene analysis crashed this device before (the page died during segmentation or depth): it runs on the CPU from now on. */
+const SAFE_ANALYSIS = "safeAnalysis", IN_ANALYSIS = "inAnalysis";
+const flag = (store: () => Storage, k: string, v?: boolean) => { try { if (v === undefined) return store().getItem(k) === "1"; if (v) store().setItem(k, "1"); else store().removeItem(k); } catch { /* private mode */ } return false; };
 function offerSafeReopen(file: File, saved?: Params) {
+  if (flag(() => sessionStorage, IN_ANALYSIS)) flag(() => localStorage, SAFE_ANALYSIS, true);
   const box = el("div", { class: "empty" },
     el("h2", { text: t("reopen.title") }),
     el("p", { text: t("reopen.body", { file: file.name }) }),
@@ -236,7 +232,7 @@ function openFile(f: File, restore?: Params, upscaleOverride?: UpscaleMode) {
   logLines.length = 0;
   setProgress(t("progress.opening", { file: f.name }));
   busy = true;
-  send({ type: "open", file: f, resolution, autoExposure, autoDof, upscale: upscaleOverride ?? upscaleMode });
+  send({ type: "open", file: f, resolution, autoExposure, autoDof, upscale: upscaleOverride ?? upscaleMode, safeAnalysis: flag(() => localStorage, SAFE_ANALYSIS) });
 }
 
 // Drag & drop on desktop.
@@ -516,6 +512,7 @@ let pushTimer = 0;
 let dragging = false;
 /** Something was changed during this drag (a draft went out): the release renders the final preview. */
 let draftSent = false;
+installTouchSliders(); // a touch anywhere on a slider sets it (not only on its knob)
 document.addEventListener("pointerdown", (e) => { if ((e.target as HTMLElement).matches?.('input[type="range"], .curve-editor, .hs-range')) { dragging = true; draftSent = false; } }, true);
 // A touch on a curve box that turned into a page scroll changed nothing: no render.
 const endDrag = () => { if (!dragging) return; dragging = false; if (draftSent) pushParams(); };
@@ -1188,6 +1185,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case "progress":
       setProgress(stageText(m.stage, m.detail), m.frac);
       noteStage(stageText(m.stage, m.detail));
+      if (m.stage === "segmentation" || m.stage === "depth") flag(() => sessionStorage, IN_ANALYSIS, true);
       break;
     case "preview":
       if (m.final) finalPreviews++;
@@ -1199,6 +1197,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       busy = false;
       break;
     case "analysis":
+      flag(() => sessionStorage, IN_ANALYSIS, false);
       summary = m.summary; decisions = m.decisions; autoParams = m.auto; params = m.params; dofInfo = m.dof;
       autoCurveBands = m.autoCurves;
       exportTop.disabled = busy;
@@ -1310,7 +1309,14 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
   }
 };
-worker.onerror = (e) => { capsEl.textContent = t("err.worker", { msg: e.message }); };
+// The worker itself failed: say so and let the page be used again (no endless progress).
+worker.onerror = (e) => {
+  capsEl.textContent = t("err.worker", { msg: e.message });
+  busy = false;
+  setProgress(undefined);
+  setExportEnabled(true);
+  markCompleted();
+};
 
 const long = Math.max(window.innerWidth, window.innerHeight) * Math.min(2, window.devicePixelRatio || 1);
 send({ type: "preview-size", long });

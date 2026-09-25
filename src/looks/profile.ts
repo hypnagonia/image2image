@@ -20,6 +20,7 @@
 import { linSrgbToOklab } from "../color/oklab.ts";
 import { monotoneCurve } from "../render/curves.ts";
 import { GROUPS, type Group } from "../neural/scene.ts";
+import { srgbEotf as eotf } from "../color/transfer.ts";
 
 export const HUE_RANGES = ["red", "orange", "yellow", "green", "cyan", "blue", "violet", "magenta"] as const;
 export type HueRange = (typeof HUE_RANGES)[number];
@@ -429,7 +430,6 @@ export function hasDepth(p: LookProfile): boolean {
   return Object.values(p.depth).some((c) => c && c.some((v) => Math.abs(v) > 1e-4));
 }
 
-const eotf = (v: number) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
 
 /** Colour-balance RGB offsets (display-encoded, around mid grey) → OkLab (a, b) shifts. */
 export function balanceToAB(off: RGB): [number, number] {
