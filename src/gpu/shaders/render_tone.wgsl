@@ -415,7 +415,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     sem.clarity = 1.0; sem.texture = 1.0; sem.sharpen = 1.0; sem.denoise = 1.0; sem.dehaze = 1.0; sem.warmth = 0.0; sem.tint = 0.0;
   }
   let dist = clamp(maps.dist, 0.0, 1.0);
-  let Y0 = max(luma2020(c0), 1e-6);
 
   // --- neural denoise blend ---------------------------------------------------
   var c = c0;
@@ -428,6 +427,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let dl = luma2020(d);
     c = c0 + vec3<f32>(dl) * sl + (d - vec3<f32>(dl)) * sc;
   }
+  // Local tone's reference luminance is the *denoised* pixel: referencing the
+  // noisy one would make `delta` below carry the removed noise, and range
+  // compression / texture would add (compression + texture) of it back.
+  let Y0 = max(luma2020(c), 1e-6);
 
   // --- white balance -----------------------------------------------------------
   if ((flags & EN_WB) != 0u) { c = u.wb * c; }
@@ -457,7 +460,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   var Y = max(luma2020(c), 1e-7);
   let L = log2(Y);
   let l0 = log_enc(Y0);
-  let delta = (log2(Y) - log2(Y0)); // what denoise/WB/dehaze/exposure changed, in EV
+  let delta = (log2(Y) - log2(Y0)); // what WB/dehaze/exposure changed, in EV
   let depthMul = mix(u.tone.z, u.tone.w, smoothstep(0.15, 0.95, dist));
   var Lp = L;
   if ((flags & EN_LOCAL) != 0u) {
