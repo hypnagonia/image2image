@@ -268,7 +268,7 @@ export class Engine {
     this.log(`analysis image ${gw}×${gh}; normalisation gain ${gain.toFixed(3)} (${Math.log2(gain).toFixed(2)} EV)`);
 
     // --- semantic segmentation + depth (reduced image only) ------------------------
-    const scene = await P.time("segmentation + depth", () => analyseScene(this.neural, { rgba: analysisRgba, width: gw, height: gh }, (s) => this.progress(s)), (s) => Object.entries(s.timings).map(([k, v]) => `${k} ${v.toFixed(0)}ms`).join(", "));
+    const scene = await P.time("segmentation + depth", () => analyseScene(this.neural, { rgba: analysisRgba, width: gw, height: gh }, (s) => this.progress(s), true, !isMobile() /* detail tiles: 4 more depth passes, too heavy for phones */), (s) => Object.entries(s.timings).map(([k, v]) => `${k} ${v.toFixed(0)}ms`).join(", "));
     if (import.meta.env.DEV) {
       // Dev only: dump the analysis image and distance map (PGM) for offline inspection.
       const pgm = (w: number, h: number, v: (i: number) => number) => {
@@ -326,7 +326,7 @@ export class Engine {
     // --- decisions ----------------------------------------------------------------------
     const colorInput = src.kind !== "rgb" ? src.color : undefined;
     // The camera's own rendering (the JPEG inside a DNG): the brightness reference.
-    const reference = src.kind !== "rgb" && /\.dng$/i.test(file.name) ? await P.time("camera rendering", () => embeddedPreviewStats(file, [0.5])) : undefined;
+    const reference = src.kind !== "rgb" && /\.dng$/i.test(file.name) ? await P.time("camera rendering", () => embeddedPreviewStats(file, [0.5], isMobile() ? 24 : Infinity)) : undefined;
     if (reference) this.log(`camera rendering: ${reference.width}×${reference.height} embedded JPEG, median ${(reference.q[0] * 255).toFixed(0)}/255`);
     const decideWith = (referenceExposure?: { ev: number; note: string }) => decide({
       report,

@@ -69,13 +69,14 @@ export interface PreviewStats {
  * Luminance quantiles of the embedded camera rendering, or undefined when the
  * file has none (or only a thumbnail: under 256 px on the long side).
  */
-export async function embeddedPreviewStats(file: Blob, qs: number[]): Promise<PreviewStats | undefined> {
+export async function embeddedPreviewStats(file: Blob, qs: number[], maxMP = Infinity): Promise<PreviewStats | undefined> {
   if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas === "undefined") return undefined;
   // Previews sit in the first part of the file (before the raw data in Apple's layout,
   // but not always): read up to 48 MB, which also covers most cameras' layouts.
-  const head = new Uint8Array(await file.slice(0, Math.min(file.size, 48 << 20)).arrayBuffer());
+  const head = new Uint8Array(await file.slice(0, Math.min(file.size, (maxMP < Infinity ? 24 : 48) << 20)).arrayBuffer());
   const best = findPreview(head);
-  if (!best) return undefined;
+  // A phone's browser may decode the whole picture before shrinking it (48 MP ≈ 200 MB).
+  if (!best || (best.width * best.height) / 1e6 > maxMP) return undefined;
   try {
     const w = 256, h = Math.max(1, Math.round((w * best.height) / best.width));
     const bmp = await createImageBitmap(file.slice(best.offset), { resizeWidth: w, resizeHeight: h, resizeQuality: "medium" });

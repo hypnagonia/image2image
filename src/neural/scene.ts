@@ -9,7 +9,7 @@
  *        are small (≈ 128×96 and 518×392) and are uploaded and refined on the
  *        GPU by src/refine/.
  */
-import type { Neural } from "./ort.ts";
+import type { Backend, Neural } from "./ort.ts";
 import { MODELS, ort } from "./ort.ts";
 
 export const GROUPS = ["sky", "vegetation", "building", "ground", "terrain", "water", "person", "vehicle", "animal", "interior", "other"] as const;
@@ -271,73 +271,97 @@ export async function analyseScene(neural: Neural, img: AnalysisImage, onStage?:
   }
   // --- Depth Anything V2 Small --------------------------------------------
   onStage?.("depth");
-  t = performance.now();
-  const dSession = await neural.session(MODELS.depth, false);
-  timings["depth.load"] = performance.now() - t;
-  // Global pass: the whole scene at 518 px — correct layout and ordering.
-  const [dw, dh] = fitDims(img.width, img.height, 518, 14);
-  t = performance.now();
-  const dIn = new ort.Tensor("float32", cropsTensor(img, [[0, 0, img.width, img.height]], dw, dh), [1, 3, dh, dw]);
-  const dOut = await dSession.run({ [dSession.inputNames[0]]: dIn });
-  const pd = dOut[dSession.outputNames[0]];
-  const gDisp = Float32Array.from((await pd.getData()) as Float32Array);
-  const pdDims = pd.dims as number[];
-  const gw = pdDims[pdDims.length - 1], gh = pdDims[pdDims.length - 2];
-  timings["depth.global"] = performance.now() - t;
-  // Detail tiles: 2×2 overlapping tiles at the analysis image's full resolution
-  // (twice the global pass). Relative depth has an arbitrary scale per run, so
-  // each tile is least-squares aligned to the global map and only its fine
-  // detail (leaf gaps, branches, crisp outlines) is merged — the global pass
-  // keeps deciding what is near and far.
-  const W2 = img.width, H2 = img.height;
-  const Gf = resample(gDisp, gw, gh, W2, H2);
-  let disp = Gf;
-  let ow = W2, oh = H2;
-  if (detailTiles && Math.max(W2, H2) > 600) {
+  // The depth network is the heaviest step of opening a photo; phones' WebGPU can
+  // fail on it (4-bit weights, memory). Then it runs on the CPU, and if that fails
+  // too the photo opens without depth (flat distance) instead of breaking.
+  const runDepth = async (backend: Backend) => {
     t = performance.now();
-    const tw = Math.min(W2, Math.ceil((W2 * 0.6) / 14) * 14), th = Math.min(H2, Math.ceil((H2 * 0.6) / 14) * 14);
-    const tiles: Array<[number, number, number, number]> = [];
-    for (const y of [0, H2 - th]) for (const x of [0, W2 - tw]) tiles.push([x, y, tw, th]);
-    const detail = new Float32Array(W2 * H2), wsum = new Float32Array(W2 * H2);
-    for (const [x0, y0] of tiles) {
-      const tIn = new ort.Tensor("float32", cropsTensor(img, [[x0, y0, tw, th]], tw, th), [1, 3, th, tw]);
-      const tOut = await dSession.run({ [dSession.inputNames[0]]: tIn });
-      const tp = tOut[dSession.outputNames[0]];
-      const tdims = tp.dims as number[];
-      const otw = tdims[tdims.length - 1], oth = tdims[tdims.length - 2];
-      const tile = resample((await tp.getData()) as Float32Array, otw, oth, tw, th);
-      tp.dispose();
-      // Least-squares scale/offset to the global disparity over the tile.
-      let st = 0, sg = 0, stt = 0, stg = 0;
-      const N = tw * th;
-      for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
-        const tv = tile[y * tw + x], gv = Gf[(y0 + y) * W2 + x0 + x];
-        st += tv; sg += gv; stt += tv * tv; stg += tv * gv;
+    const dSession = await neural.session(MODELS.depth, false, backend);
+    timings["depth.load"] = performance.now() - t;
+    try {
+      // Global pass: the whole scene at 518 px — correct layout and ordering.
+      const [dw, dh] = fitDims(img.width, img.height, 518, 14);
+      t = performance.now();
+      const dIn = new ort.Tensor("float32", cropsTensor(img, [[0, 0, img.width, img.height]], dw, dh), [1, 3, dh, dw]);
+      const dOut = await dSession.run({ [dSession.inputNames[0]]: dIn });
+      const pd = dOut[dSession.outputNames[0]];
+      const gDisp = Float32Array.from((await pd.getData()) as Float32Array);
+      const pdDims = pd.dims as number[];
+      const gw = pdDims[pdDims.length - 1], gh = pdDims[pdDims.length - 2];
+      timings["depth.global"] = performance.now() - t;
+      // Detail tiles: 2×2 overlapping tiles at the analysis image's full resolution
+      // (twice the global pass). Relative depth has an arbitrary scale per run, so
+      // each tile is least-squares aligned to the global map and only its fine
+      // detail (leaf gaps, branches, crisp outlines) is merged — the global pass
+      // keeps deciding what is near and far.
+      const W2 = img.width, H2 = img.height;
+      const Gf = resample(gDisp, gw, gh, W2, H2);
+      let disp = Gf;
+      let ow = W2, oh = H2;
+      if (detailTiles && Math.max(W2, H2) > 600) {
+        t = performance.now();
+        const tw = Math.min(W2, Math.ceil((W2 * 0.6) / 14) * 14), th = Math.min(H2, Math.ceil((H2 * 0.6) / 14) * 14);
+        const tiles: Array<[number, number, number, number]> = [];
+        for (const y of [0, H2 - th]) for (const x of [0, W2 - tw]) tiles.push([x, y, tw, th]);
+        const detail = new Float32Array(W2 * H2), wsum = new Float32Array(W2 * H2);
+        for (const [x0, y0] of tiles) {
+          const tIn = new ort.Tensor("float32", cropsTensor(img, [[x0, y0, tw, th]], tw, th), [1, 3, th, tw]);
+          const tOut = await dSession.run({ [dSession.inputNames[0]]: tIn });
+          const tp = tOut[dSession.outputNames[0]];
+          const tdims = tp.dims as number[];
+          const otw = tdims[tdims.length - 1], oth = tdims[tdims.length - 2];
+          const tile = resample((await tp.getData()) as Float32Array, otw, oth, tw, th);
+          tp.dispose();
+          // Least-squares scale/offset to the global disparity over the tile.
+          let st = 0, sg = 0, stt = 0, stg = 0;
+          const N = tw * th;
+          for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
+            const tv = tile[y * tw + x], gv = Gf[(y0 + y) * W2 + x0 + x];
+            st += tv; sg += gv; stt += tv * tv; stg += tv * gv;
+          }
+          const vt = stt / N - (st / N) ** 2;
+          const a = vt > 1e-9 ? (stg / N - (st / N) * (sg / N)) / vt : 0;
+          const b = sg / N - a * (st / N);
+          const aligned = tile.map((v) => a * v + b);
+          // Fine detail only: σ ≈ 1% of the long edge.
+          const low = gaussBlur(aligned, tw, th, Math.max(3, Math.max(W2, H2) * 0.01));
+          for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
+            const w = feather(x, tw, tw * 0.25) * feather(y, th, th * 0.25);
+            const k = (y0 + y) * W2 + x0 + x;
+            detail[k] += w * (aligned[y * tw + x] - low[y * tw + x]);
+            wsum[k] += w;
+          }
+        }
+        // Remove the same band from the global map so detail is replaced, not doubled.
+        const gLow = gaussBlur(Gf, W2, H2, Math.max(3, Math.max(W2, H2) * 0.01));
+        disp = new Float32Array(W2 * H2);
+        for (let k = 0; k < W2 * H2; k++) disp[k] = wsum[k] > 0 ? gLow[k] + detail[k] / wsum[k] : Gf[k];
+        timings["depth.tiles"] = performance.now() - t;
+        log.push(`Depth detail: ${tiles.length} tiles ${tw}×${th} aligned to the global map, merged at ${W2}×${H2}`);
+      } else {
+        ow = gw; oh = gh;
+        disp = gDisp;
       }
-      const vt = stt / N - (st / N) ** 2;
-      const a = vt > 1e-9 ? (stg / N - (st / N) * (sg / N)) / vt : 0;
-      const b = sg / N - a * (st / N);
-      const aligned = tile.map((v) => a * v + b);
-      // Fine detail only: σ ≈ 1% of the long edge.
-      const low = gaussBlur(aligned, tw, th, Math.max(3, Math.max(W2, H2) * 0.01));
-      for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
-        const w = feather(x, tw, tw * 0.25) * feather(y, th, th * 0.25);
-        const k = (y0 + y) * W2 + x0 + x;
-        detail[k] += w * (aligned[y * tw + x] - low[y * tw + x]);
-        wsum[k] += w;
-      }
+      return { disp, ow, oh, dw, dh };
+    } finally {
+      await dSession.release().catch(() => undefined);
     }
-    // Remove the same band from the global map so detail is replaced, not doubled.
-    const gLow = gaussBlur(Gf, W2, H2, Math.max(3, Math.max(W2, H2) * 0.01));
-    disp = new Float32Array(W2 * H2);
-    for (let k = 0; k < W2 * H2; k++) disp[k] = wsum[k] > 0 ? gLow[k] + detail[k] / wsum[k] : Gf[k];
-    timings["depth.tiles"] = performance.now() - t;
-    log.push(`Depth detail: ${tiles.length} tiles ${tw}×${th} aligned to the global map, merged at ${W2}×${H2}`);
-  } else {
-    ow = gw; oh = gh;
-    disp = gDisp;
+  };
+  let depthRun: Awaited<ReturnType<typeof runDepth>> | undefined;
+  for (const backend of neural.backend === "webgpu" ? (["webgpu", "wasm"] as const) : (["wasm"] as const)) {
+    try {
+      depthRun = await runDepth(backend);
+      if (backend !== neural.backend) log.push("Depth ran on WASM (WebGPU failed)");
+      break;
+    } catch (e) {
+      log.push(`Depth on ${backend} failed: ${e instanceof Error ? e.message : e}`);
+    }
   }
-  await dSession.release();
+  if (!depthRun) {
+    log.push("Depth unavailable: the photo opens with a flat distance map (no automatic depth effects)");
+    return { seg: { width: lw, height: lh, probs }, depth: { width: 1, height: 1, dist: new Float32Array(1).fill(0.5), raw: new Float32Array(1) }, coverage, timings, log };
+  }
+  const { disp, ow, oh, dw, dh } = depthRun;
   // Relative inverse depth → robust 0..1 distance (0 = nearest, 1 = farthest).
   const lo = percentile(disp, 0.02), hi = percentile(disp, 0.98);
   const dist = new Float32Array(disp.length);
