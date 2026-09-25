@@ -34,14 +34,20 @@ export class CurveEditor {
    *  level: x is lightness (black → white), y = 0.5 is "no change". */
   private mode: Mode = "curve";
   onChange?: (pts: Pt[]) => void;
+  /** Histogram drawn behind the curve (intensity along x), or none. */
+  private hist?: ArrayLike<number>;
 
-  constructor(size = 220) {
+  /** Fills its container's width (a square, sized by CSS) instead of a fixed size. */
+  private fluid: boolean;
+
+  constructor(size = 220, fluid = false) {
     this.el = document.createElement("canvas");
-    this.el.className = "curve-editor";
+    this.el.className = "curve-editor" + (fluid ? " big" : "");
+    this.fluid = fluid;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     this.el.width = size * dpr;
     this.el.height = size * dpr;
-    this.el.style.width = this.el.style.height = size + "px";
+    if (!fluid) this.el.style.width = this.el.style.height = size + "px";
     this.el.addEventListener("pointerdown", (e) => this.down(e));
     this.el.addEventListener("pointermove", (e) => this.move(e));
     this.el.addEventListener("pointerup", () => this.up());
@@ -53,7 +59,7 @@ export class CurveEditor {
     this.color = color;
     this.mode = mode;
     const wide = mode !== "curve";
-    this.el.style.height = wide ? Math.round(parseInt(this.el.style.width) * 0.6) + "px" : this.el.style.width;
+    if (!this.fluid) this.el.style.height = wide ? Math.round(parseInt(this.el.style.width) * 0.6) + "px" : this.el.style.width;
     this.el.height = wide ? Math.round(this.el.width * 0.6) : this.el.width;
     this.draw();
   }
@@ -103,6 +109,12 @@ export class CurveEditor {
 
   private up() { this.drag = -1; this.draw(); }
 
+  /** Shows how the pixels are spread over intensity (x) behind the curve; undefined hides it. */
+  setHistogram(h?: ArrayLike<number>) {
+    this.hist = h;
+    this.draw();
+  }
+
   private emit() { this.onChange?.(this.pts.map((p) => [Math.round(p[0] * 1000) / 1000, Math.round(p[1] * 1000) / 1000] as Pt)); }
 
   private draw() {
@@ -135,6 +147,22 @@ export class CurveEditor {
       c.beginPath(); c.moveTo(0, H / 2); c.lineTo(W, H / 2); c.stroke();
       c.setLineDash([]);
     }
+    if (this.mode === "curve" && this.hist && this.hist.length > 1) {
+      // Intensity histogram: height relative to a robust maximum (one spike — a
+      // clipped sky, a black frame — must not flatten everything else).
+      const h = Array.from(this.hist);
+      const sorted = [...h].sort((a, b) => b - a);
+      const top = Math.max(sorted[Math.min(2, sorted.length - 1)], 1e-9);
+      c.beginPath();
+      c.moveTo(0, H);
+      h.forEach((v, i) => c.lineTo(((i + 0.5) / h.length) * W, H - Math.min(1, v / top) * H * 0.92));
+      c.lineTo(W, H);
+      c.closePath();
+      c.fillStyle = this.color;
+      c.globalAlpha = 0.2;
+      c.fill();
+      c.globalAlpha = 1;
+    }
     c.strokeStyle = "rgba(255,255,255,0.08)";
     c.lineWidth = 1;
     for (let i = 1; i < 4; i++) {
@@ -144,6 +172,16 @@ export class CurveEditor {
     if (this.mode === "curve") {
       c.strokeStyle = "rgba(255,255,255,0.18)";
       c.beginPath(); c.moveTo(0, H); c.lineTo(W, 0); c.stroke();
+      // Intensity ramps like any curves window: input along the bottom, output up
+      // the left side — black to white for the master curve, black to the
+      // channel's colour for R, G, B.
+      const bar = Math.round(6 * (W / 220));
+      const gx = c.createLinearGradient(0, 0, W, 0);
+      gx.addColorStop(0, "#000"); gx.addColorStop(1, this.color);
+      c.fillStyle = gx; c.fillRect(0, H - bar, W, bar);
+      const gy = c.createLinearGradient(0, H, 0, 0);
+      gy.addColorStop(0, "#000"); gy.addColorStop(1, this.color);
+      c.fillStyle = gy; c.fillRect(0, 0, bar, H);
     }
     const f = this.mode === "rainbow" ? periodicCurve(this.pts) : monotoneCurve(this.pts.map(([x, y]) => ({ x, y })));
     c.strokeStyle = this.color;

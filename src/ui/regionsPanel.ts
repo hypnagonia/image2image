@@ -14,6 +14,8 @@ type Ctx = {
   params: () => Params | undefined;
   auto: () => Params | undefined;
   coverage: () => Record<string, number> | undefined;
+  /** Intensity histogram of a region, per channel (drawn behind its curve). */
+  histogram?: (region: Region, chan: "l" | "r" | "g" | "b") => ArrayLike<number> | undefined;
   changed: () => void;
   /** Highlight a region on the photo (or undefined to stop). */
   highlight: (index: number | undefined) => void;
@@ -96,9 +98,9 @@ export function createRegionsPanel(root: HTMLElement, ctx: Ctx) {
 
   // This region's own curves, blended by its soft mask.
   const curves = createToneCurves({
+    histogram: (c) => ctx.histogram?.(selected, c),
     get: () => ctx.params()?.regionCurves[selected],
     set: (c) => { const p = ctx.params(); if (p) p.regionCurves[selected] = c; },
-    key: () => selected,
     changed: () => ctx.changed(),
     enabled: () => !!ctx.params(),
   });
@@ -170,6 +172,8 @@ export function createRegionsPanel(root: HTMLElement, ctx: Ctx) {
 
   return {
     render,
+    /** Redraws only the curve box (new histograms), leaving the sliders alone. */
+    refreshCurves: () => curves.refreshHistogram(),
     setVisible(v: boolean) { visible = v; applyHighlight(); if (v) render(); },
   };
 }

@@ -33,6 +33,7 @@ import type { AnalysisReport } from "../analysis/types.ts";
 import { decide, type DecisionResult } from "../decision/engine.ts";
 import { autoFocus } from "../decision/focus.ts";
 import { depthZones } from "../decision/zones.ts";
+import { previewHistograms } from "../analysis/previewHist.ts";
 import { applyAutoCurves, autoCurves } from "../decision/autoCurves.ts";
 import type { Params } from "../decision/params.ts";
 import { Renderer, type RenderSource } from "../render/renderer.ts";
@@ -670,7 +671,15 @@ export class Engine {
     const dof = p.enable.dof && p.dof.strength > 0;
     const r = await this.renderer.render(src, s.maps, p, { wb: this.wbFor(p), gain: s.gain, lightLinear: s.lightLinear, output: "p38", debugView: this.view, region: this.region, zoneRange: this.zoneRange() }, dof);
     const data = await this.gpu.readTexture(r.tex, 0, 0, src.width, src.height, 4);
+    // Histograms for the curve boxes (the edit as rendered; not for "before" or debug views),
+    // computed after the preview is on its way so they never delay it.
+    const wantHist = final && !draft && !this.before && this.view === 0;
+    const pixels = wantHist ? new Uint8Array(data.slice(0)) : undefined;
     this.post({ type: "preview", width: src.width, height: src.height, data, space: "p3", final, ms: performance.now() - t0 }, [data]);
+    if (pixels) {
+      const hist = previewHistograms(pixels, src.width, src.height, s.scene.seg, s.distCPU, p.depthBands ?? [0.33, 0.66]);
+      this.post({ type: "histograms", data: hist }, [hist.buffer]);
+    }
   }
 
   setParams(p: Params, draft = false) {

@@ -76,6 +76,8 @@ export type FromWorker =
   | { type: "preview"; width: number; height: number; data: ArrayBuffer; space: "p3" | "srgb"; final: boolean; ms: number }
   | { type: "analysis"; summary: Summary; decisions: Decision[]; auto: Params; params: Params; dof: { justified: boolean; focus: number; strength: number; reason: string; x?: number; y?: number; zoneEdges?: number[]; zones?: Array<{ share: number; label: string; lo: number; hi: number }>; bands?: Array<{ share: number; label: string; lo: number; hi: number }> }; exposureSuggestion: number; autoCurves?: AutoCurveBands }
   | { type: "params"; params: Params }
+  /** Intensity histograms of the rendered preview (previewHist.ts), for the curve boxes. */
+  | { type: "histograms"; data: Float32Array }
   | { type: "log"; text: string }
   | { type: "profile"; stages: StageProfile[] }
   | { type: "exported"; blob: Blob; name: string; ms: number }

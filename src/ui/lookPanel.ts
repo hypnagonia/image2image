@@ -116,6 +116,8 @@ export function createLookPanel(root: HTMLElement, ctx: Ctx) {
     const order = [...CATEGORIES];
     browser.replaceChildren(...order.filter((c) => groups.has(c)).map((c) =>
       el("div", { class: "look-group" }, el("div", { class: "group-title", text: t(`cat.${c}`) }), el("div", { class: "look-row" }, ...groups.get(c)!.map(card)))));
+    // No ready-made looks: say where the user's own come from.
+    if (!custom.length) browser.append(el("p", { class: "muted", text: t("look.empty") }));
     renderBrowserSelection();
   }
   function renderBrowserSelection() {
@@ -238,7 +240,7 @@ export function createLookPanel(root: HTMLElement, ctx: Ctx) {
     if (!p || isBuiltin(p.id)) return;
     custom = custom.filter((c) => c.id !== p.id);
     saveCustom();
-    selectProfile(BUILTIN_PROFILES.find((b) => b.id === "clean")!);
+    selectProfile(BUILTIN_PROFILES[0]); // back to Neutral
     renderBrowser();
   };
 

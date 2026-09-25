@@ -1,17 +1,16 @@
 /**
- * Tone-range curve sliders (L, R, G, B) for one set of curves — the photo's
- * own (Adjust) or one region's (Regions). One slider per tone range instead
- * of dragging points: black level, shadows, darks, midtones, lights,
- * highlights, white level. They are a view of the point curves
- * (curves.ts: bandsFromCurve / curveFromBands), so curves set elsewhere (an
- * older edit, an Ask-AI answer) show up here; the small curve is a preview.
+ * Curves (L, R, G, B) for one set of curves — the photo's own (Adjust), one
+ * region's or skin's (Regions), or one distance band's (Depth). A big curve
+ * window: tap to add a point, drag to move, drag a point out of the box to
+ * remove it. Behind the curve: what it acts on (the intensity histogram of
+ * the rendered photo, region or band) and intensity ramps along both axes.
  */
 import type { CurvePoint, Curves } from "../decision/params.ts";
-import { bandsFromCurve, curveFromBands, isFlat, type CurveBands } from "../render/curves.ts";
+import { isFlat } from "../render/curves.ts";
 import { CurveEditor } from "./curveEditor.ts";
 import { t } from "./i18n.ts";
 
-type Chan = "l" | "r" | "g" | "b";
+export type Chan = "l" | "r" | "g" | "b";
 const CHANS: Chan[] = ["l", "r", "g", "b"];
 const COLOURS = { l: "#ece9e3", r: "#ff6b6b", g: "#6bdc7a", b: "#6b9bff" } as const;
 export const FLAT: CurvePoint[] = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
@@ -33,65 +32,25 @@ export interface ToneCurvesOptions {
   get: () => Curves | undefined;
   /** Stores edited curves (all four channels). */
   set: (c: Curves) => void;
-  /** Identity of what is edited (e.g. the region), so remembered slider values never leak between targets. */
-  key: () => string;
   changed: () => void;
   /** Whether there is anything to edit (a photo is open). */
   enabled: () => boolean;
+  /** Histogram of what these curves act on, per channel (drawn behind the curve). */
+  histogram?: (chan: Chan) => ArrayLike<number> | undefined;
 }
 
 export function createToneCurves(o: ToneCurvesOptions) {
   let chan: Chan = "l";
-  const preview = new CurveEditor(150);
-  preview.el.style.pointerEvents = "none";
+  const editor = new CurveEditor(420, true);
   const chips = el("div", { class: "chips" });
-  // The slider values last set, per target and channel, while the curve is still
-  // the one they made: a curve cannot hold contradictory settings (it is never
-  // inverted), and reading them back from it would make one slider move another.
-  const memo = new Map<string, { key: string; bands: CurveBands }>();
   const cur = (): Curves => o.get() ?? flatCurves();
-  const bandsOf = (c: Chan): CurveBands => {
-    const pts = cur()[c] ?? FLAT;
-    const m = memo.get(o.key() + "|" + c);
-    return m && m.key === JSON.stringify(pts) ? structuredClone(m.bands) : bandsFromCurve(pts);
-  };
-  const store = (c: Chan, b: CurveBands) => {
-    const pts = curveFromBands(b);
-    o.set({ ...cur(), [c]: pts });
-    memo.set(o.key() + "|" + c, { key: JSON.stringify(pts), bands: structuredClone(b) });
-  };
 
-  const rows: Array<{ input: HTMLInputElement; out: HTMLOutputElement; get: (b: CurveBands) => number }> = [];
-  function row(label: string, min: number, max: number, get: (b: CurveBands) => number, put: (b: CurveBands, v: number) => void): HTMLElement {
-    const input = el("input", { type: "range", min: String(min), max: String(max), step: "0.01" });
-    const out = el("output");
-    const r = el("div", { class: "row" }, el("label", { text: label }), input, out);
-    input.oninput = () => {
-      if (!o.enabled()) return;
-      const b = bandsOf(chan);
-      put(b, parseFloat(input.value));
-      store(chan, b);
-      render();
-      o.changed();
-    };
-    // Double-tap the label: this range back to unchanged.
-    r.querySelector("label")!.addEventListener("dblclick", () => {
-      if (!o.enabled()) return;
-      const b = bandsOf(chan);
-      put(b, 0);
-      store(chan, b);
-      render();
-      o.changed();
-    });
-    rows.push({ input, out, get });
-    return r;
-  }
-  const sliders = el("div", {},
-    row(t("curve.blackLevel"), 0, 1, (b) => b.black, (b, v) => { b.black = v; }),
-    ...[t("curve.shadows"), t("curve.darks"), t("curve.midtones"), t("curve.lights"), t("curve.highlights")].map((label, i) =>
-      row(label, -1, 1, (b) => b.bands[i], (b, v) => { b.bands[i] = v; })),
-    row(t("curve.whiteLevel"), -1, 0, (b) => b.white, (b, v) => { b.white = v; }),
-  );
+  editor.onChange = (pts) => {
+    if (!o.enabled()) return;
+    o.set({ ...cur(), [chan]: pts.map(([x, y]) => ({ x, y })) });
+    renderChips();
+    o.changed();
+  };
   const reset = el("button", { class: "btn small", text: t("adj.curvesReset") });
   reset.onclick = () => {
     if (!o.enabled()) return;
@@ -100,7 +59,7 @@ export function createToneCurves(o: ToneCurvesOptions) {
     o.changed();
   };
 
-  function render() {
+  function renderChips() {
     const c = cur();
     chips.replaceChildren(...CHANS.map((k) => {
       const changed = !isFlat(c[k] ?? FLAT);
@@ -108,18 +67,17 @@ export function createToneCurves(o: ToneCurvesOptions) {
       b.onclick = () => { chan = k; render(); };
       return b;
     }));
-    const pts = c[chan] ?? FLAT;
-    preview.set(pts.map((q) => [q.x, q.y] as [number, number]), COLOURS[chan]);
-    const b = bandsOf(chan);
-    for (const r of rows) {
-      const v = r.get(b);
-      r.input.value = String(v);
-      r.out.textContent = `${v > 0 ? "+" : ""}${Math.round(v * 100)}`;
-      r.out.classList.toggle("auto", Math.abs(v) < 1e-3);
-    }
   }
+  function render() {
+    renderChips();
+    const pts = cur()[chan] ?? FLAT;
+    editor.set(pts.map((q) => [q.x, q.y] as [number, number]), COLOURS[chan]);
+    editor.setHistogram(o.histogram?.(chan));
+  }
+  /** New histograms only: redraw behind the curve without touching the points (safe mid-drag). */
+  function refreshHistogram() { editor.setHistogram(o.histogram?.(chan)); }
 
-  const root = el("div", {}, chips, sliders, el("div", { class: "curve-wrap" }, preview.el), el("div", { class: "actions" }, reset));
+  const root = el("div", {}, chips, el("div", { class: "curve-wrap" }, editor.el), el("div", { class: "actions" }, reset));
   render();
-  return { el: root, render };
+  return { el: root, render, refreshHistogram };
 }

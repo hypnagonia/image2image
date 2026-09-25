@@ -10,6 +10,7 @@ import { createRegionsPanel } from "./ui/regionsPanel.ts";
 import { createLlmPanel } from "./ui/llmPanel.ts";
 import { normalizeProfile } from "./looks/profile.ts";
 import { createToneCurves } from "./ui/toneCurves.ts";
+import { histogramOf } from "./analysis/previewHist.ts";
 import { applyAutoCurves, type AutoCurveBands } from "./decision/autoCurves.ts";
 import { isFlat } from "./render/curves.ts";
 import { crashedWhileProcessing, lastStage, markCompleted, markInflight, noteStage, rememberParams, rememberPhoto, restorablePhoto } from "./ui/session.ts";
@@ -573,10 +574,11 @@ adjustPane.append(
 );
 // Curves for this photo (L, R, G, B), independent of the look's own curves and of
 // the per-region curves (Regions tab): tone-range sliders (src/ui/toneCurves.ts).
+let histograms: Float32Array | undefined;
 const photoCurves = createToneCurves({
+  histogram: (c) => histogramOf(histograms, "photo", c),
   get: () => params?.curves,
   set: (c) => { if (params) params.curves = c; },
-  key: () => "photo",
   changed: () => { lookPanel.invalidate(); pushParams(); },
   enabled: () => !!params,
 });
@@ -647,6 +649,7 @@ const regionsPanel = createRegionsPanel(regionsPane, {
   params: () => params,
   auto: () => autoParams,
   coverage: () => summary?.coverage,
+  histogram: (region, c) => histogramOf(histograms, region, c),
   changed: () => { lookPanel.invalidate(); pushParams(); },
   highlight: (i) => send(i === undefined ? { type: "view", view: currentView } : { type: "view", view: 4, region: i }),
 });
@@ -772,9 +775,9 @@ function setBandShown(on: boolean) {
   renderBands();
 }
 const depthCurves = createToneCurves({
+  histogram: (c) => histogramOf(histograms, curveBand, c),
   get: () => params?.depthCurves[curveBand],
   set: (c) => { if (params) params.depthCurves[curveBand] = c; },
-  key: () => curveBand,
   changed: () => { lookPanel.invalidate(); pushParams(); },
   enabled: () => !!params,
 });
@@ -1055,6 +1058,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case "analysis":
       summary = m.summary; decisions = m.decisions; autoParams = m.auto; params = m.params; dofInfo = m.dof;
       autoCurveBands = m.autoCurves;
+      histograms = undefined; // the previous photo's; the first final preview brings new ones
       exposureSuggestion = m.exposureSuggestion;
       aeNote.textContent = exposureSuggestion ? t("adj.suggests", { ev: `${exposureSuggestion > 0 ? "+" : ""}${exposureSuggestion.toFixed(2)}` }) : t("adj.noCorrection");
       // The reason itself comes from the decision engine and stays in English.
@@ -1077,6 +1081,12 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
         syncControls();
         pushParams();
       }
+      break;
+    case "histograms":
+      histograms = m.data;
+      photoCurves.refreshHistogram();
+      regionsPanel.refreshCurves();
+      depthCurves.refreshHistogram();
       break;
     case "params":
       params = m.params;
