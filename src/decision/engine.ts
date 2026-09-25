@@ -46,7 +46,13 @@ export interface EngineContext {
   referred: "scene" | "display";
   isProRaw: boolean;
   iso?: number;
-  /** Apply the suggested exposure correction (off by default: the camera's exposure is kept). */
+  /**
+   * Scene brightness from the camera settings, EV at ISO 100 (log2(N²/t) − log2(ISO/100)):
+   * ≈ 13–15 sunlit, 8–11 overcast / shade, 5–7 lit interior, ≤ 4 night. The honest
+   * measure of "dim": the file's own values depend on how the phone exposed them.
+   */
+  sceneEV?: number;
+  /** Apply the suggested exposure correction. */
   autoExposure?: boolean;
   /** Camera neutral → rendering temperature/tint (DNG colour model). */
   solveNeutral?: (neutral: number[]) => { temp: number; tint: number };
@@ -93,8 +99,11 @@ export function decide(ctx: EngineContext): DecisionResult {
   const keyY = Math.pow(2, keyEV);
   // Dim scenes keep their mood: only part of the gap to middle grey is closed.
   const p95 = R.lum.p95;
-  const dim = smooth(-2.5, -5.5, Math.log2(p95)); // 0 = normal, 1 = genuinely dark scene
-  const night = dim > 0.5 && R.lum.p999 / Math.max(R.lum.p50, 1e-6) > 64;
+  // 0 = normal, 1 = genuinely dark scene. From the camera's settings when known
+  // (a sunlit square is not "dim" because the phone exposed it conservatively),
+  // else from the file's own luminance.
+  const dim = ctx.sceneEV !== undefined ? smooth(9, 5, ctx.sceneEV) : smooth(-2.5, -5.5, Math.log2(p95));
+  const night = ctx.sceneEV !== undefined ? ctx.sceneEV < 4 : dim > 0.5 && R.lum.p999 / Math.max(R.lum.p50, 1e-6) > 64;
   let exposureSuggestion = 0;
   // Exposure is the camera's call. A ProRAW already carries Apple's metered
   // exposure (BaselineExposure), and re-targeting every frame to middle grey
@@ -104,6 +113,9 @@ export function decide(ctx: EngineContext): DecisionResult {
   const bandLo = Math.log2(MIDDLE_GREY) - 1.6, bandHi = Math.log2(MIDDLE_GREY) + 1.0;
   let sug = keyEV < bandLo ? (bandLo - keyEV) * 0.5 : keyEV > bandHi ? (bandHi - keyEV) * 0.5 : 0;
   sug *= 1 - 0.6 * dim; // dim scenes keep their mood
+  if (night) sug = Math.min(sug, 0); // a night photograph stays a night photograph
+  // A HEIC/JPEG was already exposed and rendered by the camera: only half the correction.
+  if (ctx.referred === "display") sug *= 0.5;
   const headroomEV = 2.3 - Math.log2(Math.max(R.lum.p999, 1e-6));
   if (sug > 0) sug = Math.min(sug, Math.max(headroomEV + 1.0, 0)); // don't blow highlights to lift shadows
   sug = clamp(sug, -1, 1);
@@ -125,7 +137,7 @@ export function decide(ctx: EngineContext): DecisionResult {
     (ctx.autoExposure ? "auto exposure on: " : "camera exposure kept; ") +
     `subject key ${keyEV.toFixed(2)} EV (comfortable band ${bandLo.toFixed(1)}…${bandHi.toFixed(1)} EV)` +
     (exposureSuggestion !== 0 ? `; suggested ${exposureSuggestion > 0 ? "+" : ""}${exposureSuggestion} EV` : "; no correction needed") +
-    (dim > 0.05 ? `; dim scene (${(dim * 100).toFixed(0)}%)` : "") + (night ? "; night scene" : ""),
+    (dim > 0.05 ? `; dim scene (${(dim * 100).toFixed(0)}%)` : "") + (night ? "; night scene" : "") + (ctx.sceneEV !== undefined ? `; scene EV ${ctx.sceneEV.toFixed(1)}` : ""),
     { keyEV: r2(keyEV), p50EV: r2(Math.log2(R.lum.p50)), p95EV: r2(Math.log2(p95)), p999EV: r2(Math.log2(R.lum.p999)), dim: r2(dim), suggested: exposureSuggestion });
 
   // ----------------------------------------------------------- white balance
@@ -244,10 +256,17 @@ export function decide(ctx: EngineContext): DecisionResult {
   note("local.texture", p.local.texture, `fine texture boost limited by noise σ ${(R.noise.mid * 255).toFixed(2)}/255`, { noise255: r2(R.noise.mid * 255) });
 
   // ------------------------------------------------------------------- colour
+  // Mean displayed chroma of a real photograph (greys, skin, sky, foliage together)
+  // is ≈ 0.03–0.05; only a genuinely dull frame gets help, and never much. Already
+  // rendered files (HEIC/JPEG: the camera applied its own colour) and dim, lamp-lit
+  // scenes (strong casts that turn garish when pushed) get less; an overly vivid
+  // frame is calmed a little.
   const C = R.global.chroma;
-  p.color.vibrance = r2(clamp((0.075 - C) / 0.075, -0.3, 1) * 0.35);
-  p.color.saturation = r2(clamp((0.06 - C) * 1.5, -0.1, 0.06));
-  note("color.vibrance", p.color.vibrance, `mean displayed chroma ${C.toFixed(3)} (natural target ≈ 0.075)`, { chroma: r3(C) });
+  const cScale = (ctx.referred === "display" ? 0.35 : 1) * (1 - 0.6 * dim);
+  p.color.vibrance = r2(clamp((0.035 - C) / 0.035, -0.5, 1) * 0.16 * (C > 0.035 ? 1 : cScale));
+  p.color.saturation = r2(C > 0.09 ? -clamp((C - 0.09) * 1.5, 0, 0.08) : 0);
+  note("color.vibrance", [p.color.vibrance, p.color.saturation], `mean displayed chroma ${C.toFixed(3)} (a natural photograph ≈ 0.03–0.05)` +
+    (ctx.referred === "display" ? "; already rendered by the camera → less" : "") + (dim > 0.05 ? `; dim scene → less (${(dim * 100).toFixed(0)}%)` : ""), { chroma: r3(C), dim: r2(dim) });
 
   // --------------------------------------------------------------- denoise
   // Visibility of noise after the chosen exposure: σ scales with 2^EV in linear,

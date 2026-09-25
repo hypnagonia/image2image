@@ -616,6 +616,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(gain_out, tp, vec4<f32>(select(tone_gain(log2(Y)), 1.0, dbg), 0.0, 0.0, 0.0));
   }
   var cd = c * (Yd / Y);
+  // Lifted shadows keep their colour ratio, so a near-black blue or red would come
+  // up vivid (and chroma noise with it). Film and good raw converters quieten
+  // colour in opened-up shadows: pull toward grey in proportion to the lift,
+  // only in the dark tones.
+  let lifted = max(Lp - L, 0.0);
+  cd = mix(cd, vec3<f32>(Yd), clamp(lifted / 2.5, 0.0, 1.0) * 0.6 * (1.0 - smoothstep(0.08, 0.4, Yd)));
   // Path to white: chroma rolls off as display luminance approaches 1.
   let wmix = smoothstep(0.82, 1.0, Yd);
   cd = mix(cd, vec3<f32>(Yd), wmix * 0.85);

@@ -321,6 +321,13 @@ export class Engine {
       referred: work.referred,
       isProRaw: report.isProRaw,
       iso: decoded.meta.iso,
+      sceneEV: (() => {
+        // Only physically sensible settings (resized or re-saved files can carry junk).
+        const m = decoded.meta;
+        const ok = m.fNumber && m.exposureTime && m.iso && m.fNumber >= 0.9 && m.fNumber <= 32 && m.exposureTime >= 1 / 32000 && m.exposureTime <= 60 && m.iso >= 12 && m.iso <= 409600;
+        const ev = ok ? Math.log2((m.fNumber! * m.fNumber!) / m.exposureTime!) - Math.log2(m.iso! / 100) : NaN;
+        return ev >= -6 && ev <= 21 ? ev : undefined;
+      })(),
       autoExposure,
       solveNeutral: colorInput ? (n) => neutralToTempTint(colorInput, n) : undefined,
     }));

@@ -154,7 +154,8 @@ stage.append(fsExit);
 
 let resolution: "auto" | "full" | "half" = "auto";
 let exposureSuggestion = 0;
-let autoExposure = (() => { try { return localStorage.getItem("autoExposure") === "1"; } catch { return false; } })();
+// On unless the user turned it off (a damped, measured correction; see the decision engine).
+let autoExposure = (() => { try { return localStorage.getItem("autoExposure") !== "0"; } catch { return true; } })();
 let autoDof = (() => { try { return localStorage.getItem("autoDof") === "1"; } catch { return false; } })();
 let upscaleMode: UpscaleMode = (() => { try { const v = localStorage.getItem("upscaleMode"); return v === "always" || v === "off" ? v : "auto"; } catch { return "auto"; } })();
 /** The open photo (for "back to original size", which reopens it at 1×). */
@@ -589,6 +590,9 @@ adjustPane.append(
 // Curves for this photo (L, R, G, B), independent of the look's own curves and of
 // the per-region curves (Regions tab): tone-range sliders (src/ui/toneCurves.ts).
 let histograms: Float32Array | undefined;
+/** Dev builds only: a read-only view of the state for the automated photo checks (scripts, not the UI). */
+let finalPreviews = 0;
+if (import.meta.env.DEV) (globalThis as unknown as { __shk: unknown }).__shk = () => ({ summary, decisions, params, autoParams, finalPreviews, busy, log: logLines });
 /** Share of the frame (%) of each region at each distance. */
 let cellCov: Record<string, number> | undefined;
 const photoCurves = createToneCurves({
@@ -1076,6 +1080,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       noteStage(stageText(m.stage, m.detail));
       break;
     case "preview":
+      if (m.final) finalPreviews++;
       drawPreview(m);
       if (m.final && !holding) setProgress(undefined);
       if (m.final) markCompleted();

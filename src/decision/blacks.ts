@@ -39,9 +39,11 @@ export interface BlackReport {
 }
 
 /** Target code value for the darkest 0.1%, and the floor for the darkest 1%. */
-const DEEP_TARGET = 2.5;
-const DEEP_OK = 5;
-const LOW_FLOOR = 4;
+// Deep but not crushed: the darkest 0.1% near 4/255, the darkest 1% kept at 9/255 or
+// above so the shadows keep their separation.
+const DEEP_TARGET = 4;
+const DEEP_OK = 7;
+const LOW_FLOOR = 9;
 
 /**
  * Whether the scene has black is judged on the scene itself; whether it comes
