@@ -389,6 +389,11 @@ export function decide(ctx: EngineContext): DecisionResult {
     if (why.length) note(`semantic.${g}`, JSON.stringify(a), why.join("; "), { area: r2(s.area), meanEV: r2(s.meanEV), chroma: r3(lch.C), hue: Math.round(lch.h), dist: r2(s.dist) });
   }
 
+  // Skin starts from the people's settings (it replaces them where there is skin):
+  // their protections — less texture, clarity and vibrance, the fill light — stay.
+  // Its colour is checked on the skin itself once the image is refined (skinTone.ts).
+  p.skin = { ...p.semantic.person };
+
   // --------------------------------------------------------------- DoF suggestion
   let dof = { justified: false, focus: 0.3, strength: 0, reason: "" };
   {

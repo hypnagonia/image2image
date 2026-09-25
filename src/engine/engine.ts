@@ -33,6 +33,7 @@ import { autoFocus } from "../decision/focus.ts";
 import { depthZones } from "../decision/zones.ts";
 import { cellCoverage, previewHistograms } from "../analysis/previewHist.ts";
 import { applyAutoCurves, autoCurves } from "../decision/autoCurves.ts";
+import { measureSkin, naturalSkin } from "../decision/skinTone.ts";
 import type { Params } from "../decision/params.ts";
 import { Renderer, type RenderSource } from "../render/renderer.ts";
 import { wbMatrix, neutralToTempTint } from "../color/wb.ts";
@@ -356,6 +357,21 @@ export class Engine {
       decision.cellCoverage = cellCoverage(scene.seg, s.distCPU!, [b1, b2]);
       this.log("distance bands for curves: " + z3.map((z, i) => `${["near", "middle", "far"][i]} ${z.lo.toFixed(2)}–${z.hi.toFixed(2)} ${Math.round(z.share * 100)}% ${z.label}`).join(" | "));
 
+      // Natural skin: measured on the skin itself; pulled back only when overdriven.
+      {
+        const m = s.maps;
+        const lin = new Float32Array(m.w * m.h * 4);
+        halvesToFloats(new Uint16Array(await this.gpu.readTexture(m.lin, 0, 0, m.w, m.h, 8)), lin);
+        const apple = decoded.masks?.find((k) => k.kind === "skin");
+        const st = measureSkin(lin, m.w, m.h, { ...scene.seg, plane: GROUPS.indexOf("person") * scene.seg.width * scene.seg.height }, apple);
+        if (st) {
+          const fix = naturalSkin(st, params, params.skin);
+          if (fix.reasons.length) {
+            for (const p of [decision.params, params]) p.skin = { ...p.skin, saturation: Math.round((p.skin.saturation + fix.saturation) * 100) / 100, hue: Math.round((p.skin.hue + fix.hue) * 10) / 10 };
+            decision.decisions.push({ id: "skin", value: [params.skin.saturation, params.skin.hue], reason: fix.reasons.join("; "), inputs: { share: Math.round(st.share * 1000) / 10, L: Math.round(st.L * 100) / 100, C: Math.round(st.C * 1000) / 1000, hue: Math.round(st.hue) } });
+          } else decision.decisions.push({ id: "skin", value: "natural", reason: `skin already natural (chroma ${st.C.toFixed(3)}, hue ${st.hue.toFixed(0)}°) — left alone`, inputs: {} });
+        }
+      }
       // Automatic curves: the photo, regions, skin and distance, measured through the rendering.
       const bandHist = await this.depthBandHistograms(s, b1, b2);
       const st = (g: Group) => ({ hist: report.groups[g].hist, area: report.groups[g].area, localContrast: report.groups[g].localContrast });
