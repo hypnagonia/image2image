@@ -1,25 +1,51 @@
 import { defineConfig, type Plugin } from "vite";
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** Dev-only: POST /__debug/save?name=… writes the body to .samples/out (export validation). */
-const debugSave: Plugin = {
-  name: "debug-save",
-  apply: "serve",
-  configureServer(server) {
-    server.middlewares.use("/__debug/save", (req, res) => {
-      const name = new URL(req.url ?? "", "http://x").searchParams.get("name")?.replace(/[^\w.\-]/g, "_") ?? "out.bin";
-      const chunks: Buffer[] = [];
-      req.on("data", (c: Buffer) => chunks.push(c));
-      req.on("end", () => {
-        mkdirSync(".samples/out", { recursive: true });
-        writeFileSync(`.samples/out/${name}`, Buffer.concat(chunks));
-        res.end("ok");
-      });
+/**
+ * Local testing only (dev server and `vite preview`, never in a deployed build):
+ *   POST /__debug/save?name=…   writes the body to .samples/out (export validation)
+ *   GET  /__samples/<file>      a sample photo from .samples (autotest, scripts/memcheck.mjs)
+ *   POST /__debug/report        appends one JSON line to .samples/out/autotest.jsonl
+ */
+type Mw = (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse, next: () => void) => void;
+const localTesting: Array<[string, Mw]> = [
+  ["/__debug/save", (req, res) => {
+    const name = new URL(req.url ?? "", "http://x").searchParams.get("name")?.replace(/[^\w.\-]/g, "_") ?? "out.bin";
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      mkdirSync(".samples/out", { recursive: true });
+      writeFileSync(`.samples/out/${name}`, Buffer.concat(chunks));
+      res.end("ok");
     });
-  },
+  }],
+  ["/__samples", (req, res, next) => {
+    const name = decodeURIComponent((req.url ?? "").split("?")[0].replace(/^\//, ""));
+    if (!/^[\w.\-]+$/.test(name)) return next();
+    try {
+      const data = readFileSync(join(".samples", name));
+      res.setHeader("Content-Type", "application/octet-stream");
+      res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+      res.end(data);
+    } catch { res.statusCode = 404; res.end(); }
+  }],
+  ["/__debug/report", (req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      mkdirSync(".samples/out", { recursive: true });
+      appendFileSync(".samples/out/autotest.jsonl", Buffer.concat(chunks).toString("utf8").replace(/\n/g, " ") + "\n");
+      res.end("ok");
+    });
+  }],
+];
+const debugSave: Plugin = {
+  name: "local-testing",
+  configureServer(server) { for (const [path, mw] of localTesting) server.middlewares.use(path, mw); },
+  configurePreviewServer(server) { for (const [path, mw] of localTesting) server.middlewares.use(path, mw); },
 };
 
 /**

@@ -53,6 +53,7 @@ import type { CameraColor } from "../color/dng.ts";
 import { srgbEotf, srgbOetf } from "../color/transfer.ts";
 import { linSrgbToOklab } from "../color/oklab.ts";
 import { SamSelector } from "../neural/sam.ts";
+import { isPhone, phoneForced } from "../device.ts";
 import { levelsByArea, selectionMask } from "../refine/selection.ts";
 import { selectKey, type MaskShape } from "../layers/model.ts";
 import { liveLayers } from "../layers/gpu.ts";
@@ -123,7 +124,7 @@ const ANALYSIS_LONG = 1036;
 /** Phones: exactly one 512 px segmentation window, no sliding. */
 const ANALYSIS_LONG_LIGHT = 512;
 
-const isMobile = () => /iPhone|iPad|iPod|Android/i.test(globalThis.navigator?.userAgent ?? "") || ((globalThis.navigator as Navigator & { maxTouchPoints?: number })?.maxTouchPoints ?? 0) > 1;
+const isMobile = isPhone;
 
 export class Engine {
   private gpu!: Gpu;
@@ -239,7 +240,7 @@ export class Engine {
       throw new Error(this.initError);
     }
     this.gpu = gpu;
-    if (isMobile()) gpu.stagingLimitMB = 16;
+    if (isMobile()) { gpu.stagingLimitMB = 16; this.previewLong = 1600; }
     gpu.onError = (m) => this.log("GPU error: " + m);
     gpu.onLost = (m) => this.post({ type: "gpu-lost", reason: m });
     this.renderer = new Renderer(gpu);
@@ -366,7 +367,7 @@ export class Engine {
     const detailTiles = lvl === "full" && !isMobile(); // 4 more depth passes, too heavy for phones
     const inHere = () => analyseScene(this.neural, { rgba: analysisRgba, width: gw, height: gh }, (s) => this.progress(s), withDepth, detailTiles, safeAnalysis || isMobile() ? "wasm" : this.neural.backend, depthLong);
     const img = { rgba: analysisRgba, width: gw, height: gh };
-    const inWorker = () => analyseSceneIsolated(img, this.base, detailTiles, (s) => this.progress(s), withDepth, depthLong);
+    const inWorker = () => analyseSceneIsolated(img, this.base, detailTiles, (s) => this.progress(s), withDepth, depthLong, phoneForced());
     if (lvl !== "full") this.log(`scene analysis level: ${lvl}${lvl === "none" ? " (the tab stopped during segmentation before on this device)" : lvl === "seg" ? " (the tab stopped during depth before on this device)" : ""}`);
     const scene = await P.time("segmentation + depth", async () => {
       if (lvl === "none") return neutralScene(img, "skipped on this device");
@@ -1291,7 +1292,7 @@ export class Engine {
     const sel = s.sel;
     if (!keys.length && !sel?.keys.length) return;
     if (sel && keys.length === sel.keys.length && keys.every((k, i) => k === sel.keys[i])) return;
-    const st: Selections = (s.sel ??= { sam: new SamSelector(this.base, s.work.width, s.work.height), cache: new Map(), failed: new Set(), keys: [], version: 0 });
+    const st: Selections = (s.sel ??= { sam: new SamSelector(this.base, s.work.width, s.work.height, phoneForced()), cache: new Map(), failed: new Set(), keys: [], version: 0 });
     for (const m of want) {
       const k = selectKey(m);
       if (st.cache.has(k) || st.failed.has(k)) continue;

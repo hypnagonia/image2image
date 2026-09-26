@@ -9,13 +9,15 @@
  * In:  { img: AnalysisImage, base, detailTiles, withDepth, depthLong }   Out: { maps: SceneMaps } | { error }
  */
 import { Neural } from "./ort.ts";
+import { forcePhone } from "../device.ts";
 import { analyseScene, type AnalysisImage, type SceneMaps } from "./scene.ts";
 
 const post = (m: unknown, transfer: Transferable[] = []) => (self as unknown as DedicatedWorkerGlobalScope).postMessage(m, transfer);
 
-self.onmessage = async (ev: MessageEvent<{ img: AnalysisImage; base: string; detailTiles: boolean; withDepth: boolean; depthLong: number }>) => {
+self.onmessage = async (ev: MessageEvent<{ img: AnalysisImage; base: string; detailTiles: boolean; withDepth: boolean; depthLong: number; phone?: boolean }>) => {
   try {
-    const { img, base, detailTiles, withDepth, depthLong } = ev.data;
+    const { img, base, detailTiles, withDepth, depthLong, phone } = ev.data;
+    if (phone) forcePhone(true);
     const neural = await Neural.create(undefined, base, true);
     const maps: SceneMaps = await analyseScene(neural, img, (stage) => post({ stage }), withDepth, detailTiles, "wasm", depthLong);
     post({ maps }, [maps.seg.probs.buffer, maps.depth.dist.buffer, maps.depth.raw.buffer]);

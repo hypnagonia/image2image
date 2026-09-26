@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 /** Worker entry: all decoding, GPU work and inference happen here, off the UI thread. */
 import { Engine } from "./engine.ts";
+import { forcePhone } from "../device.ts";
 import type { FromWorker, ToWorker } from "./protocol.ts";
 import { MAX_FOCUS_POINTS } from "../decision/params.ts";
 
@@ -33,6 +34,7 @@ async function handle(m: ToWorker) {
   }
   switch (m.type) {
     case "init": {
+      if (m.phone) forcePhone(true);
       const caps = await engine.init(m.base, m.forceCpu);
       post({ type: "ready", caps, looks: engine.looks() });
       break;

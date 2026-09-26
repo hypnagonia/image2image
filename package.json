@@ -11,7 +11,8 @@
     "build:libraw": "bash native/libraw/build.sh",
     "build:cpu": "wasm-pack build native/cpu --target web --out-dir ../../src/cpu/pkg --release && rm -f src/cpu/pkg/.gitignore",
     "predev": "node scripts/copy-ort.mjs",
-    "prebuild": "node scripts/copy-ort.mjs"
+    "prebuild": "node scripts/copy-ort.mjs",
+    "memcheck": "node scripts/memcheck.mjs"
   },
   "dependencies": {
     "libheif-js": "^1.19.8",

@@ -9,10 +9,11 @@
  *   and the embeddings; each tap is one ≈ 20 ms decode.
  */
 import { Neural, MODELS, ort } from "./ort.ts";
+import { forcePhone } from "../device.ts";
 
 type In =
-  | { type: "encode"; base: string; image: Float32Array; w: number; h: number }
-  | { type: "init"; base: string; emb: Float32Array }
+  | { type: "encode"; base: string; phone?: boolean; image: Float32Array; w: number; h: number }
+  | { type: "init"; base: string; phone?: boolean; emb: Float32Array }
   | { type: "decode"; id: number; coords: Float32Array; labels: Float32Array; w: number; h: number };
 
 const post = (m: unknown, transfer: Transferable[] = []) => (self as unknown as DedicatedWorkerGlobalScope).postMessage(m, transfer);
@@ -22,6 +23,7 @@ let emb: ort.Tensor | undefined;
 
 self.onmessage = async (ev: MessageEvent<In>) => {
   const m = ev.data;
+  if ("phone" in m && m.phone) forcePhone(true);
   try {
     if (m.type === "encode") {
       const neural = await Neural.create(undefined, m.base, true);

@@ -55,7 +55,7 @@ export interface UpscaleInfo {
 }
 
 export type ToWorker =
-  | { type: "init"; base: string; forceCpu?: boolean }
+  | { type: "init"; base: string; forceCpu?: boolean; /** Behave as on a phone (local autotest only). */ phone?: boolean }
   | { type: "open"; file: File; resolution: "auto" | "full" | "half"; autoExposure: boolean; autoDof: boolean; upscale: UpscaleMode; /** Scene analysis on the CPU (it crashed this device's GPU before). */ safeAnalysis?: boolean; /** Less scene analysis: the tab died during it on this device before. */ analysis?: AnalysisLevel }
   | { type: "upscale-now" }
   | { type: "params"; params: Params; draft?: boolean }

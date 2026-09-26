@@ -20,6 +20,8 @@ import { isFlat } from "./render/curves.ts";
 import { crashedInAnalysis, crashedWhileProcessing, forgetPendingParams, lastStage, markCompleted, markInflight, noteAnalysis, noteStage, rememberParams, rememberPhoto, restorablePhoto } from "./ui/session.ts";
 import { LANGS, LANG_NAMES, lang, setLang, storedLang, t, tOr, type Lang } from "./ui/i18n.ts";
 import { el } from "./ui/dom.ts";
+import { autotestAllowed } from "./autotest.ts";
+import { forcePhone, isPhone } from "./device.ts";
 import type { AnalysisLevel } from "./neural/scene.ts";
 import type { ColorStats } from "./looks/palette.ts";
 import { installTouchSliders } from "./ui/touchSlider.ts";
@@ -27,6 +29,9 @@ import { makeLayer } from "./layers/model.ts";
 
 const worker = new Worker(new URL("./engine/worker.ts", import.meta.url), { type: "module" });
 const send = (m: ToWorker) => worker.postMessage(m);
+// The local autotest can ask for phone behaviour on a desktop browser (?autotest&phone).
+const autotestPhone = autotestAllowed() && new URLSearchParams(location.search).has("phone");
+if (autotestPhone) forcePhone(true);
 
 // --------------------------------------------------------------------------- DOM helpers
 
@@ -482,7 +487,8 @@ let press: { x0: number; y0: number; px0: number; py0: number; moved: boolean; t
 let lastTap = { t: 0, x: 0, y: 0 };
 let zoomTimer = 0;
 let sentPreviewLong = 0;
-const basePreviewLong = () => Math.max(window.innerWidth, window.innerHeight) * Math.min(2, window.devicePixelRatio || 1);
+// (The phone autotest measures an iPhone 16 Pro's screen, 874 pt tall, not the desktop window.)
+const basePreviewLong = () => (autotestPhone ? 874 : Math.max(window.innerWidth, window.innerHeight)) * Math.min(2, window.devicePixelRatio || 1);
 
 function applyZoom() {
   const st = stage.getBoundingClientRect();
@@ -495,7 +501,7 @@ function applyZoom() {
   renderRings();
   clearTimeout(zoomTimer);
   zoomTimer = window.setTimeout(() => {
-    const cap = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || navigator.maxTouchPoints > 1 ? 2560 : 4096;
+    const cap = isPhone() ? 2560 : 4096;
     // Two steps only (not one size per zoom level): every size is a new proxy and render targets.
     const want = Math.round(zoom > 2.2 ? cap : zoom > 1.2 ? Math.min(cap, basePreviewLong() * 1.8) : basePreviewLong());
     if (params && Math.abs(want - sentPreviewLong) > 64) { sentPreviewLong = want; send({ type: "preview-zoom", long: want }); }
@@ -1325,8 +1331,11 @@ function showError(text: string) {
 }
 
 // --------------------------------------------------------------------------- worker messages
+/** Listeners of every engine message (the local autotest only). */
+const engineListeners = new Set<(m: FromWorker) => void>();
 worker.onmessage = (ev: MessageEvent<FromWorker>) => {
   const m = ev.data;
+  for (const f of engineListeners) f(m);
   switch (m.type) {
     case "display":
       if (!m.ok) { logLines.push(`GPU display unavailable (${m.message ?? "?"}): previews drawn by the page`); takeCanvasBack(); }
@@ -1554,5 +1563,23 @@ worker.onerror = (e) => {
 
 const long = Math.max(window.innerWidth, window.innerHeight) * Math.min(2, window.devicePixelRatio || 1);
 send({ type: "preview-size", long });
-send({ type: "init", base: import.meta.env.BASE_URL });
+send({ type: "init", base: import.meta.env.BASE_URL, phone: autotestPhone || undefined });
 fmtSel.onchange?.(new Event("change"));
+
+// Local autotest (scripts/memcheck.mjs): never on the site.
+if (autotestAllowed()) {
+  // Reported before anything else, so a page that never gets ready still says why.
+  void (async () => {
+    const adapter = await (navigator as Navigator & { gpu?: GPU }).gpu?.requestAdapter().catch(() => null);
+    void fetch("/__debug/report", { method: "POST", body: JSON.stringify({ t: 0, stage: "boot", gpu: !!(navigator as Navigator & { gpu?: GPU }).gpu, adapter: !!adapter, isolated: crossOriginIsolated, ua: navigator.userAgent }) }).catch(() => undefined);
+  })();
+  engineListeners.add((m) => { if (m.type === "error" && !caps) void fetch("/__debug/report", { method: "POST", body: JSON.stringify({ stage: "failed", message: `engine did not start: ${m.message}` }) }).catch(() => undefined); });
+  void import("./autotest.ts").then(({ runAutotest }) => {
+    const start = () => runAutotest({
+      openFile: (f) => openFile(f), params: () => params, pushParams, send,
+      on: (fn) => { engineListeners.add(fn); return () => engineListeners.delete(fn); },
+    });
+    // After the engine is ready (the first "ready" message).
+    if (caps) void start(); else { const f = (m: FromWorker) => { if (m.type === "ready") { engineListeners.delete(f); setTimeout(() => void start(), 500); } }; engineListeners.add(f); }
+  });
+}

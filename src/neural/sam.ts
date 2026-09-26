@@ -50,7 +50,7 @@ export class SamSelector {
   /** The decoder worker is closed after this long without a tap (its memory back; reopening takes ≈ 1 s). */
   private idle = 0;
 
-  constructor(private base: string, photoW: number, photoH: number) {
+  constructor(private base: string, photoW: number, photoH: number, private phone = false) {
     this.dims = samDims(photoW, photoH);
   }
 
@@ -63,7 +63,7 @@ export class SamSelector {
       const w = spawn();
       try {
         const [pw, ph] = this.dims;
-        const r = await ask(w, { type: "encode", base: this.base, image: px, w: pw, h: ph }, "embedding", undefined, [px.buffer]);
+        const r = await ask(w, { type: "encode", base: this.base, phone: this.phone, image: px, w: pw, h: ph }, "embedding", undefined, [px.buffer]);
         this.emb = r.emb;
       } finally {
         w.terminate(); // all of the encoder's memory, returned at once
@@ -77,7 +77,7 @@ export class SamSelector {
     if (!this.emb) throw new Error("photo not encoded for selection");
     if (!this.decoder) {
       this.decoder = spawn();
-      this.decoderReady = ask(this.decoder, { type: "init", base: this.base, emb: this.emb.slice() }, "ready");
+      this.decoderReady = ask(this.decoder, { type: "init", base: this.base, phone: this.phone, emb: this.emb.slice() }, "ready");
     }
     await this.decoderReady;
     const [pw, ph] = this.dims;

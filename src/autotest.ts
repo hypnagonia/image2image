@@ -1,0 +1,94 @@
+/**
+ * Autotest (local only: ?autotest on localhost / a LAN address; never on the site).
+ * Opens a sample photo by itself and runs the heavy steps a person would, one after
+ * the other, reporting each to the local server (/__debug/report → .samples/out/
+ * autotest.jsonl). scripts/memcheck.mjs runs it in the iPhone simulator's Safari and
+ * measures the tab's memory per step: the guard that keeps updates from breaking
+ * phones.
+ *
+ *   ?autotest&photo=IMG_1514.DNG&steps=open,select,blur,export,reopen
+ */
+import type { FromWorker, ToWorker } from "./engine/protocol.ts";
+import type { Params } from "./decision/params.ts";
+import { makeLayer } from "./layers/model.ts";
+
+export interface AutotestApp {
+  openFile: (f: File) => void;
+  params: () => Params | undefined;
+  pushParams: () => void;
+  send: (m: ToWorker) => void;
+  /** Every message from the engine; returns an unsubscribe. */
+  on: (fn: (m: FromWorker) => void) => () => void;
+}
+
+export const autotestAllowed = () =>
+  new URLSearchParams(location.search).has("autotest") && /^(localhost|127\.|10\.|192\.168\.|\[::1\])/.test(location.hostname);
+
+export async function runAutotest(app: AutotestApp) {
+  const q = new URLSearchParams(location.search);
+  const photo = q.get("photo") ?? "IMG_1514.DNG";
+  const steps = (q.get("steps") ?? "open,select,blur,export,reopen").split(",").filter(Boolean);
+  const t0 = performance.now();
+  let lastProfile: unknown;
+  const report = (stage: string, extra: Record<string, unknown> = {}) =>
+    fetch("/__debug/report", { method: "POST", body: JSON.stringify({ t: Math.round(performance.now() - t0), stage, photo, ...extra }) }).catch(() => undefined);
+  app.on((m) => {
+    if (m.type === "profile") lastProfile = m.stages;
+    if (m.type === "progress") void report(`progress:${m.stage}`, { detail: m.detail });
+    if (m.type === "error") void report("error", { message: m.message });
+  });
+  const waitFor = (pred: (m: FromWorker) => boolean, what: string, ms = 240_000) => new Promise<FromWorker>((resolve, reject) => {
+    const timer = setTimeout(() => { off(); reject(new Error(`timeout waiting for ${what}`)); }, ms);
+    const off = app.on((m) => {
+      if (m.type === "error") { clearTimeout(timer); off(); reject(new Error(m.message)); }
+      else if (pred(m)) { clearTimeout(timer); off(); resolve(m); }
+    });
+  });
+  const finalPreview = (what: string) => waitFor((m) => m.type === "preview" && !!m.final, what);
+  const settle = (ms = 1500) => new Promise((r) => setTimeout(r, ms));
+  const open = async (label: string) => {
+    await report(`${label}:start`);
+    const res = await fetch(`/__samples/${encodeURIComponent(photo)}`);
+    if (!res.ok) throw new Error(`sample ${photo}: ${res.status}`);
+    const f = new File([await res.blob()], photo);
+    const done = finalPreview(label);
+    app.openFile(f);
+    await done;
+    await settle(3000); // restoration / quality stages after the first final preview
+    await report(`${label}:done`, { profile: lastProfile });
+  };
+  const addLayer = async (label: string, layer: ReturnType<typeof makeLayer>) => {
+    const p = app.params();
+    if (!p) throw new Error("no photo");
+    await report(`${label}:start`);
+    const done = finalPreview(label);
+    p.layers = [...(p.layers ?? []), layer];
+    app.pushParams();
+    await done;
+    await settle();
+    await report(`${label}:done`);
+  };
+  const center = { kind: "select" as const, points: [[0.5, 0.5, 1]] as Array<[number, number, 0 | 1]>, invert: false, feather: 1, density: 1 };
+  try {
+    await report("start", { ua: navigator.userAgent, gpu: "gpu" in navigator, isolated: crossOriginIsolated });
+    for (const s of steps) {
+      if (s === "open") await open("open");
+      else if (s === "reopen") await open("reopen");
+      else if (s === "select") await addLayer("select", makeLayer("basic", "Autotest select", { mask: center, params: { exposure: 0.4, temp: 0, tint: 0, saturation: 0, vibrance: 0, hue: 0 } }));
+      else if (s === "blur") await addLayer("blur", makeLayer("blur", "Autotest blur", { mask: { ...center, invert: true }, params: { amount: 0.5 } }));
+      else if (s === "export") {
+        await report("export:start");
+        const done = waitFor((m) => m.type === "exported", "export");
+        app.send({ type: "export", format: "jpeg", quality: 0.92, space: "p3" });
+        await done;
+        await report("export:done");
+      }
+    }
+    await report("done");
+    // ?close: leave the page (the memcheck script's tab gives its memory back).
+    if (q.has("close")) setTimeout(() => { location.href = "about:blank"; }, 500);
+  } catch (e) {
+    await report("failed", { message: e instanceof Error ? e.message : String(e) });
+    if (q.has("close")) setTimeout(() => { location.href = "about:blank"; }, 500);
+  }
+}

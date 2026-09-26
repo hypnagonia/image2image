@@ -238,7 +238,7 @@ export function neutralScene(img: AnalysisImage, why: string): SceneMaps {
  * analyseScene in a worker of its own (sceneWorker.ts), terminated when it answers:
  * the model runtime's memory is returned at once. `onStage` gets its progress.
  */
-export function analyseSceneIsolated(img: AnalysisImage, base: string, detailTiles: boolean, onStage?: (s: string) => void, withDepth = true, depthLong = 518): Promise<SceneMaps> {
+export function analyseSceneIsolated(img: AnalysisImage, base: string, detailTiles: boolean, onStage?: (s: string) => void, withDepth = true, depthLong = 518, phone = false): Promise<SceneMaps> {
   return new Promise((resolve, reject) => {
     const w = new Worker(new URL("./sceneWorker.ts", import.meta.url), { type: "module" });
     const done = () => w.terminate();
@@ -250,7 +250,7 @@ export function analyseSceneIsolated(img: AnalysisImage, base: string, detailTil
       else { done(); reject(new Error(m.error ?? "Scene analysis failed")); }
     };
     // The analysis image moves to the worker (it is not needed here meanwhile).
-    w.postMessage({ img, base, detailTiles, withDepth, depthLong });
+    w.postMessage({ img, base, detailTiles, withDepth, depthLong, phone });
   });
 }
 
