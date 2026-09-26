@@ -217,6 +217,26 @@ async function withSession<T>(neural: Neural, spec: Parameters<Neural["session"]
  * `prefer`: the backend to try first for both networks ("wasm" after the page
  * crashed during analysis on this device).
  */
+/**
+ * analyseScene in a worker of its own (sceneWorker.ts), terminated when it answers:
+ * the model runtime's memory is returned at once. `onStage` gets its progress.
+ */
+export function analyseSceneIsolated(img: AnalysisImage, base: string, detailTiles: boolean, onStage?: (s: string) => void): Promise<SceneMaps> {
+  return new Promise((resolve, reject) => {
+    const w = new Worker(new URL("./sceneWorker.ts", import.meta.url), { type: "module" });
+    const done = () => w.terminate();
+    w.onerror = (e) => { e.preventDefault(); done(); reject(new Error(e.message || "Scene analysis stopped")); };
+    w.onmessage = (ev: MessageEvent<{ stage?: string; maps?: SceneMaps; error?: string }>) => {
+      const m = ev.data;
+      if (m.stage) onStage?.(m.stage);
+      else if (m.maps) { done(); resolve(m.maps); }
+      else { done(); reject(new Error(m.error ?? "Scene analysis failed")); }
+    };
+    // The analysis image moves to the worker (it is not needed here meanwhile).
+    w.postMessage({ img, base, detailTiles });
+  });
+}
+
 export async function analyseScene(neural: Neural, img: AnalysisImage, onStage?: (s: string) => void, withDepth = true, detailTiles = true, prefer: Backend = neural.backend): Promise<SceneMaps> {
   const timings: Record<string, number> = {};
   const log: string[] = [];

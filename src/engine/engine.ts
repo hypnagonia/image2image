@@ -21,7 +21,7 @@ import { decodeFile } from "../decode/decode.ts";
 import type { DecodedImage } from "../decode/types.ts";
 import { develop, type WorkingImage } from "../raw/develop.ts";
 import { Neural, MODELS } from "../neural/ort.ts";
-import { analyseScene, applyAppleMattes, type SceneMaps } from "../neural/scene.ts";
+import { analyseScene, analyseSceneIsolated, applyAppleMattes, type SceneMaps } from "../neural/scene.ts";
 import { denoiseGPU } from "../restore/denoise.ts";
 import { UpscaleJob, probeUpscaler } from "../restore/upscale.ts";
 import { decideUpscale, measureQuality, type ImageQualityReport, type UpscaleMode } from "../analysis/quality.ts";
@@ -199,6 +199,8 @@ export class Engine {
   initError?: string;
   get ready(): boolean { return !!this.gpu; }
 
+  /** Where the app's files are served from (models, ORT runtime): for the analysis worker too. */
+  private base = "";
   async init(base: string, forceCpu = false): Promise<Capabilities> {
     let gpu: Gpu | undefined;
     try { gpu = forceCpu ? undefined : await Gpu.create(); }
@@ -212,6 +214,7 @@ export class Engine {
     gpu.onError = (m) => this.log("GPU error: " + m);
     gpu.onLost = (m) => this.post({ type: "gpu-lost", reason: m });
     this.renderer = new Renderer(gpu);
+    this.base = base;
     this.neural = await Neural.create(gpu, base);
     this.neural.onProgress = (id, loaded, total) => this.post({ type: "progress", stage: `download ${id}`, frac: loaded / total, detail: `${(loaded / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB` });
     const heic = await canEncodeHeic();
@@ -300,7 +303,14 @@ export class Engine {
     this.log(`analysis image ${gw}×${gh}; normalisation gain ${gain.toFixed(3)} (${Math.log2(gain).toFixed(2)} EV)`);
 
     // --- semantic segmentation + depth (reduced image only) ------------------------
-    const scene = await P.time("segmentation + depth", () => analyseScene(this.neural, { rgba: analysisRgba, width: gw, height: gh }, (s) => this.progress(s), true, !isMobile() /* detail tiles: 4 more depth passes, too heavy for phones */, safeAnalysis || isMobile() ? "wasm" : this.neural.backend /* phones: ORT keeps its GPU buffers for the tab's life on our device */), (s) => Object.entries(s.timings).map(([k, v]) => `${k} ${v.toFixed(0)}ms`).join(", "));
+    // Phones (and devices where analysis crashed before): on the CPU in a worker of its
+    // own that is terminated afterwards — the model runtime's memory is returned at
+    // once instead of staying for the tab's life. Elsewhere: WebGPU, in this worker.
+    const isolated = isMobile() || safeAnalysis;
+    const inHere = () => analyseScene(this.neural, { rgba: analysisRgba, width: gw, height: gh }, (s) => this.progress(s), true, !isMobile() /* detail tiles: 4 more depth passes, too heavy for phones */, safeAnalysis || isMobile() ? "wasm" : this.neural.backend);
+    const scene = await P.time("segmentation + depth", () => isolated
+      ? analyseSceneIsolated({ rgba: analysisRgba, width: gw, height: gh }, this.base, !isMobile(), (s) => this.progress(s)).catch((e) => { this.log(`analysis worker failed (${e instanceof Error ? e.message : e}); analysing here`); return inHere(); })
+      : inHere(), (s) => Object.entries(s.timings).map(([k, v]) => `${k} ${v.toFixed(0)}ms`).join(", "));
     if (import.meta.env.DEV) {
       // Dev only: dump the analysis image and distance map (PGM) for offline inspection.
       const pgm = (w: number, h: number, v: (i: number) => number) => {
