@@ -261,12 +261,10 @@ export class Engine {
     const src = decoded.source;
     const mp = (src.width * src.height) / 1e6;
     let factor = 1;
-    if (src.kind !== "rgb") {
-      if (resolution === "half") factor = 2;
-      else if (resolution === "auto") factor = isMobile() && mp > 16 ? 2 : 1;
-      const maxDim = gpu.info.maxTextureDimension2D;
-      while (Math.max(src.width, src.height) / factor > maxDim) factor++;
-    }
+    if (resolution === "half") factor = 2;
+    else if (resolution === "auto") factor = isMobile() && mp > 16 ? 2 : 1;
+    const maxDim = gpu.info.maxTextureDimension2D;
+    while (Math.max(src.width, src.height) / factor > maxDim) factor++;
     this.progress("develop", `${src.width}×${src.height}${factor > 1 ? ` → 1/${factor}` : ""}`);
     const work = await P.time("raw development", () => develop(gpu, decoded, { factor }), (w) => `${w.width}×${w.height}`);
     work.log.forEach((l) => this.log(l));

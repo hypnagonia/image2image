@@ -75,7 +75,12 @@ export interface RawSource {
   /** Offset of the active area inside the stored buffer, in pixels. */
   left: number;
   top: number;
-  data: Uint16Array; // view into the decoder heap — valid until the decoder is closed
+  data: Uint16Array; // view into the decoder heap — valid until the decoder is closed (empty when `rows` is set)
+  /**
+   * Rows [first, first + count) of the stored buffer (absolute rows, `pitch`
+   * samples each), when the decoder lives in another worker (rawWorker.ts).
+   */
+  rows?: (first: number, count: number) => Promise<Uint16Array>;
   /** 2×2 CFA colour indices (0=R,1=G,2=B,3=G2) at (row%2,col%2) relative to `top/left`. */
   cfa: [number, number, number, number];
   /** Black level per CFA position (Bayer) or per channel (LinearRaw), in raw units. */

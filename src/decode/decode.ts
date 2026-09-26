@@ -10,7 +10,7 @@
 import { decodeRaw } from "./libraw.ts";
 import { appleHdrHeadroom, findHeifExif, findJpegExif, readExif, tiffCompressions } from "./exif.ts";
 import { decodeHeifFull, hasAppleGainMap } from "./heif.ts";
-import type { DecodedImage, PhotoMetadata, RgbSource } from "./types.ts";
+import type { DecodedImage, PhotoMetadata, RawSource, RgbSource } from "./types.ts";
 
 export type Sniffed = "tiff" | "heif" | "jpeg" | "png" | "webp" | "unknown";
 
@@ -37,10 +37,46 @@ export async function decodeFile(bytes: Uint8Array, name: string, mime: string):
     if (tiffCompressions(bytes).includes(52546)) {
       throw new Error("This DNG is compressed with JPEG-XL (iPhone \u201cProRAW Max\u201d lossy option), which this app cannot decode yet. Shoot ProRAW with lossless compression, or export the photo as HEIC.");
     }
-    return decodeRaw(bytes, name);
+    return typeof Worker !== "undefined" ? decodeRawIsolated(bytes, name) : decodeRaw(bytes, name);
   }
   if (kind === "heif") return decodeHeif(bytes, mime);
   return decodeNative(bytes, mime, kind === "jpeg" ? "jpeg" : kind === "png" ? "png" : "other");
+}
+
+/**
+ * LibRaw in a short-lived worker (rawWorker.ts): its heap is returned the moment
+ * the image is developed and `close()` terminates it, instead of whenever the
+ * garbage collector runs. Falls back to decoding here if the worker cannot start.
+ */
+async function decodeRawIsolated(bytes: Uint8Array, name: string): Promise<DecodedImage> {
+  let w: Worker;
+  try { w = new Worker(new URL("./rawWorker.ts", import.meta.url), { type: "module" }); }
+  catch { return decodeRaw(bytes, name); }
+  const waiting = new Map<number, (d: Uint16Array) => void>();
+  let failed: ((e: Error) => void) | undefined;
+  let nextId = 0;
+  const image = await new Promise<DecodedImage>((resolve, reject) => {
+    failed = reject;
+    w.onerror = (e) => { e.preventDefault(); failed?.(new Error(e.message || "The RAW decoder stopped")); };
+    w.onmessage = (ev: MessageEvent) => {
+      const m = ev.data as { type: "decoded"; image: DecodedImage } | { type: "rows"; id: number; data: Uint16Array } | { type: "error"; message: string };
+      if (m.type === "decoded") resolve(m.image);
+      else if (m.type === "rows") { waiting.get(m.id)?.(m.data); waiting.delete(m.id); }
+      else failed?.(new Error(m.message));
+    };
+    // The file's bytes move to the decoder (no copy is kept here).
+    const buf = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer;
+    w.postMessage({ type: "decode", bytes: buf, name }, [buf as ArrayBuffer]);
+  });
+  const src = image.source as RawSource;
+  src.rows = (first, count) => new Promise<Uint16Array>((resolve, reject) => {
+    const id = nextId++;
+    waiting.set(id, resolve);
+    failed = reject;
+    w.postMessage({ type: "rows", id, first, count });
+  });
+  image.close = () => { w.terminate(); waiting.clear(); };
+  return image;
 }
 
 function metaFrom(exif: Uint8Array | undefined): PhotoMetadata {

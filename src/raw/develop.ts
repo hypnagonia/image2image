@@ -14,6 +14,7 @@ import { solveCameraColor, type CameraColor } from "../color/dng.ts";
 import { P3_TO_REC2020, SRGB_TO_REC2020 } from "../color/spaces.ts";
 import { IDENTITY } from "../color/mat3.ts";
 import type { DecodedImage, RawSource, RgbSource } from "../decode/types.ts";
+import { downsample } from "../refine/refine.ts";
 
 export interface WorkingImage {
   tex: GPUTexture;
@@ -36,7 +37,7 @@ export interface DevelopOptions {
 const STRIP_ROWS = 256;
 
 export async function develop(gpu: Gpu, img: DecodedImage, opt: DevelopOptions): Promise<WorkingImage> {
-  return img.source.kind === "rgb" ? linearize(gpu, img.source) : developRaw(gpu, img.source, img.meta.orientation, opt);
+  return img.source.kind === "rgb" ? linearize(gpu, img.source, opt.factor) : developRaw(gpu, img.source, img.meta.orientation, opt);
 }
 
 async function developRaw(gpu: Gpu, src: RawSource, orientation: number, opt: DevelopOptions): Promise<WorkingImage> {
@@ -69,15 +70,17 @@ async function developRaw(gpu: Gpu, src: RawSource, orientation: number, opt: De
     const first = Math.max(0, y0 - apron);
     const last = Math.min(H, own1 + apron);
     const rows = last - first;
-    // Upload rows [first, last) of the active area.
+    // Upload rows [first, last) of the active area — from the decoder's heap, or
+    // fetched from the decoder's own worker strip by strip (src.rows).
     const rowSamples = src.pitch;
-    const base = (src.top + first) * rowSamples + src.left * src.channels;
+    const chunk = src.rows ? await src.rows(src.top + first, rows) : src.data;
+    const base = (src.rows ? 0 : (src.top + first) * rowSamples) + src.left * src.channels;
     if (src.channels === 3 && expand) {
       for (let r = 0; r < rows; r++) {
         const so = base + r * rowSamples;
         for (let x = 0; x < W; x++) {
           const d = (r * W + x) * 4, s = so + x * 3;
-          expand[d] = src.data[s]; expand[d + 1] = src.data[s + 1]; expand[d + 2] = src.data[s + 2]; expand[d + 3] = 0;
+          expand[d] = chunk[s]; expand[d + 1] = chunk[s + 1]; expand[d + 2] = chunk[s + 2]; expand[d + 3] = 0;
         }
       }
       gpu.device.queue.writeTexture({ texture: stripTex }, expand, { bytesPerRow: W * 8, rowsPerImage: rows }, { width: W, height: rows });
@@ -85,8 +88,8 @@ async function developRaw(gpu: Gpu, src: RawSource, orientation: number, opt: De
       const bpp = src.channels * 2;
       gpu.device.queue.writeTexture(
         { texture: stripTex },
-        src.data.buffer as ArrayBuffer,
-        { offset: src.data.byteOffset + base * 2, bytesPerRow: rowSamples * 2, rowsPerImage: rows },
+        chunk.buffer as ArrayBuffer,
+        { offset: chunk.byteOffset + base * 2, bytesPerRow: rowSamples * 2, rowsPerImage: rows },
         { width: W, height: rows },
       );
       void bpp;
@@ -115,7 +118,7 @@ async function developRaw(gpu: Gpu, src: RawSource, orientation: number, opt: De
   return { tex, width: rot ? outH : outW, height: rot ? outW : outH, referred: "scene", camera: cam, factor: f, log };
 }
 
-async function linearize(gpu: Gpu, src: RgbSource): Promise<WorkingImage> {
+async function linearize(gpu: Gpu, src: RgbSource, factor = 1): Promise<WorkingImage> {
   const W = src.width, H = src.height;
   let primaries = src.colorSpace === "display-p3" ? P3_TO_REC2020 : src.colorSpace === "rec2020" ? IDENTITY : SRGB_TO_REC2020;
   const wide = !("close" in src.pixels) && src.pixels.data instanceof Uint16Array;
@@ -148,8 +151,17 @@ async function linearize(gpu: Gpu, src: RgbSource): Promise<WorkingImage> {
       Math.ceil(W / 16), Math.ceil(H / 16));
   }, true);
   gpu.release(input, gainTex);
+  // Large photos on phones work at a reduced size (as RAW files do): the working
+  // image and its denoised copy are each a quarter of the memory.
+  const f = Math.max(1, Math.floor(factor));
+  let work = tex, w = W, h = H;
+  if (f > 1) {
+    w = Math.floor(W / f); h = Math.floor(H / f);
+    work = await downsample(gpu, tex, W, H, w, h, false, 1, "working");
+    gpu.release(tex);
+  }
   return {
-    tex, width: W, height: H, referred: "display", factor: 1,
+    tex: work, width: w, height: h, referred: "display", factor: f,
     log: [`${src.decoder === "native" ? "Native" : "libheif"} decode ${W}×${H} at ${bits} bit, ${src.colorSpace} → linear Rec.2020` +
       (g ? `; HDR gain map ${g.width}×${g.height}, headroom ${g.headroom.toFixed(2)}× (+${Math.log2(g.headroom).toFixed(2)} EV)` : " (display-referred: no highlight headroom above the encoded white)")],
   };
