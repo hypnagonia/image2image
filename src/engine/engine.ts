@@ -55,6 +55,7 @@ import { linSrgbToOklab } from "../color/oklab.ts";
 import { SamSelector } from "../neural/sam.ts";
 import { levelsByArea, selectionMask } from "../refine/selection.ts";
 import { selectKey, type MaskShape } from "../layers/model.ts";
+import { liveLayers } from "../layers/gpu.ts";
 import { inverse, mul, mulVec } from "../color/mat3.ts";
 import { P3_D65, SRGB, rgbToXYZ } from "../color/spaces.ts";
 import type { Region } from "../decision/params.ts";
@@ -1190,7 +1191,7 @@ export class Engine {
    * 3×3 around the tap), the distance and the tapped object's depth range (as focus
    * points use), and the colour before the layers (median of 5×5 at 384 px) in OkLab.
    */
-  async pickAt(x: number, y: number): Promise<PickInfo | undefined> {
+  async pickAt(x: number, y: number, layer?: number, object = false): Promise<PickInfo | undefined> {
     const s = this.s;
     const f = this.focusRangeAt(x, y);
     if (!s || !f) return undefined;
@@ -1223,7 +1224,59 @@ export class Engine {
     // Surfaces running from near to far (ground, sky, a wall over a third of the frame) get
     // only a thin depth slice for focus; as a mask, "this object" is then the whole region.
     const range: [number, number] = f.range[1] - f.range[0] <= 0.0401 ? [0, 1] : f.range;
-    return { x, y, region, prob: score[GROUPS.indexOf(region === "skin" ? "person" : region)], dist: f.dist, range, color: [med(0), med(1), med(2)] };
+    const info: PickInfo = { x, y, region, prob: score[GROUPS.indexOf(region === "skin" ? "person" : region)], dist: f.dist, range, color: [med(0), med(1), med(2)] };
+    if (layer !== undefined && layer >= 0) Object.assign(info, await this.maskUnderTap(s, x, y, layer, object));
+    return info;
+  }
+
+  /**
+   * Is the tap on something the layer's mask already covers? Read from the mask
+   * itself (view 7 at 384 px, median of 3×3). If so and the tap selects objects:
+   * is the tapped object one of the layer's own selections (its mask overlaps the
+   * new tap's by IoU > 0.5)? Then that selection is what a tap removes.
+   */
+  private async maskUnderTap(s: Session, x: number, y: number, layer: number, object: boolean): Promise<{ inMask: number; sameAs?: string }> {
+    await this.ensureSelections(s, s.params);
+    const t = await this.ensureThumb(384);
+    const r = await this.renderer.render({ base: t.base, denoised: t.denoised, width: t.w, height: t.h, fullWidth: s.work.width }, s.maps, s.params,
+      { wb: this.wbFor(s.params), gain: s.gain, lightLinear: s.lightLinear, output: "p38", dither: false, debugView: 7, region: layer }, false);
+    const px = new Uint8Array(await this.gpu.readTexture(r.tex, 0, 0, t.w, t.h, 4));
+    const tx = Math.round(x * (t.w - 1)), ty = Math.round(y * (t.h - 1));
+    const v: number[] = [];
+    for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) v.push(px[(Math.min(t.h - 1, Math.max(0, ty + j)) * t.w + Math.min(t.w - 1, Math.max(0, tx + i))) * 4 + 1]);
+    let inMask = v.sort((a, b) => a - b)[4] / 255;
+    const st = s.sel;
+    if (!object || !st) return { inMask };
+    // An object tap is judged by the whole object, not the pixel under the finger (thin
+    // things and soft mask edges read half-selected there): how much of the tapped
+    // object the mask already covers.
+    const { w: gw, h: gh } = s.maps;
+    const tapObj = await this.selectionMask(s, st, { kind: "select", points: [[x, y, 1]], invert: false, feather: 1 });
+    let n = 0, covered = 0;
+    for (let gy = 0; gy < gh; gy += 2) for (let gx = 0; gx < gw; gx += 2) {
+      if (tapObj[gy * gw + gx] <= 127) continue;
+      n++;
+      const k = (Math.min(t.h - 1, Math.round((gy / (gh - 1)) * (t.h - 1))) * t.w + Math.min(t.w - 1, Math.round((gx / (gw - 1)) * (t.w - 1)))) * 4 + 1;
+      covered += px[k] / 255;
+    }
+    if (n > 8) inMask = covered / n;
+    if (inMask <= 0.5) return { inMask };
+    // The layer's own added selections that cover the tap.
+    const L = liveLayers(s.params.layers ?? [], s.params.autoCurves ?? 1, s.params.enable)[layer];
+    const w = gw, h = gh;
+    const at = (mask: Uint8Array) => mask[Math.min(h - 1, Math.round(y * (h - 1))) * w + Math.min(w - 1, Math.round(x * (w - 1)))];
+    const cands = L ? [L.mask, ...(L.mask.parts ?? []).filter((q) => q.op === "add")].filter((m) => m.kind === "select" && !m.invert && st.cache.get(selectKey(m)) && at(st.cache.get(selectKey(m))!) > 127) : [];
+    if (!cands.length) return { inMask };
+    const tap = tapObj;
+    let best: string | undefined, bestIou = 0.5;
+    for (const m of cands) {
+      const c = st.cache.get(selectKey(m))!;
+      let inter = 0, uni = 0;
+      for (let i = 0; i < c.length; i++) { const a = c[i] > 127, b = tap[i] > 127; if (a && b) inter++; if (a || b) uni++; }
+      const iou = uni ? inter / uni : 0;
+      if (iou > bestIou) { bestIou = iou; best = selectKey(m); }
+    }
+    return { inMask, sameAs: best };
   }
 
   /**

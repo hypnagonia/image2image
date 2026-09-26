@@ -14,7 +14,7 @@ import type { Params, Region, DepthBand } from "../../decision/params.ts";
 import { DEPTH_BANDS } from "../../decision/params.ts";
 import { GROUPS } from "../../neural/scene.ts";
 import type { HistTarget } from "../../analysis/previewHist.ts";
-import { BLEND_MODES, HUE_RANGES, MASK_OPS, MAX_MASK_PARTS, RANGE_CENTRE, makeLayer, newLayerDefaults, newId, type HueRange, type Layer, type LayerParams, type LayerType, type MaskKind, type MaskOp, type MaskPart, type MaskShape, type SmartMask } from "../../layers/model.ts";
+import { BLEND_MODES, HUE_RANGES, MASK_OPS, MAX_MASK_PARTS, RANGE_CENTRE, makeLayer, newLayerDefaults, newId, type HueRange, type Layer, type LayerParams, type LayerType, type MaskKind, type MaskOp, type MaskPart, type MaskShape, type SmartMask, selectKey } from "../../layers/model.ts";
 import type { PickInfo } from "../../engine/protocol.ts";
 import { oklabToLinSrgb } from "../../color/oklab.ts";
 import { createToneCurves } from "../toneCurves.ts";
@@ -42,6 +42,8 @@ type Ctx = {
   leftBlur?: () => void;
   /** Taps on the photo pick what to mask (on, with a hint for the photo) or do what they normally do (off). */
   pickMode: (on: boolean, hint?: string) => void;
+  /** A short message on the photo. */
+  notice?: (text: string) => void;
   /** The photo's main colours (hex), for "From photo" in gradients. */
   photoColors?: () => Promise<string[]>;
 };
@@ -322,19 +324,19 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
     if (m.kind === "cell" && m.region && m.band && m.region !== "skin") return `${m.region}.${m.band}` as HistTarget;
     return "photo";
   }
-  // Picking on the photo: while a layer's Mask tab is open, a tap selects. What a tap
-  // selects (object / colour / distance) and whether it adds or removes are the two
-  // choices at the top; each tap becomes a piece of the mask (the main shape first,
-  // then parts), listed below with its few settings.
+  // Picking on the photo: while a layer's Mask tab is open, a tap selects. A tap on
+  // something not in the mask adds it; a tap on something already in it removes it
+  // (the same object tapped again is deselected; something inside a selection is cut
+  // out of it). What a tap selects (object / colour / distance) is the one choice.
+  // Each tap becomes a piece of the mask, listed below with its few settings.
   let picking = false;
-  let pickOp: "add" | "subtract" = "add";
   let pickAs: "object" | "color" | "depth" = "object";
   /** The piece whose settings are open ("main" or a part's index). */
   let open: "main" | number | undefined;
   function setPicking(on: boolean) {
     if (on === picking) return;
     picking = on;
-    ctx.pickMode(on, t(pickOp === "add" ? "mask.tapAdd" : "mask.tapRemove"));
+    ctx.pickMode(on, t("mask.tapHint"));
   }
   function shapeFromPick(info: PickInfo, as: typeof pickAs): Partial<MaskShape> {
     if (as === "color") return { kind: "color", color: info.color, tol: 0.08 };
@@ -353,12 +355,35 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
     open = parts.length - 1;
     return true;
   }
-  function onPick(info: PickInfo) {
+  function onPick(info: PickInfo): boolean {
     const l = sel();
-    if (!l || !picking) return;
-    if (!addPiece(l, shapeFromPick(info, pickAs), pickOp)) return;
-    edit(t("hist.mask", { name: layerName(l) }));
+    if (!l || !picking) return false;
+    const m = l.mask;
+    // Nothing chosen yet (the mask is the whole photo): a tap always adds.
+    const empty = m.kind === "all" && !(m.parts ?? []).length;
+    const inside = !empty && (info.inMask ?? 0) > 0.5;
+    if (inside && info.sameAs) {
+      // The same object tapped again: deselect it.
+      if (m.kind === "select" && selectKey(m) === info.sameAs) removePiece(l, "main");
+      else { const i = (m.parts ?? []).findIndex((q) => q.op === "add" && q.kind === "select" && selectKey(q) === info.sameAs); if (i >= 0) removePiece(l, i); }
+      edit(t("hist.maskRemove", { name: layerName(l) }));
+      renderProps();
+      return true;
+    }
+    if (!addPiece(l, shapeFromPick(info, pickAs), inside ? "subtract" : "add")) { ctx.notice?.(t("mask.full")); return false; }
+    edit(t(inside ? "hist.maskRemove" : "hist.maskAdd", { name: layerName(l) }));
     renderProps();
+    return true;
+  }
+  /** Removes one piece; the next added part takes the main place (a mask of only removals keeps "everything" under them). */
+  function removePiece(l: Layer, key: "main" | number) {
+    const m = l.mask;
+    const parts = m.parts ?? [];
+    if (key === "main") {
+      const next = parts[0]?.op === "add" ? parts.shift()! : undefined;
+      l.mask = next ? ({ ...m, ...next, op: undefined, parts } as SmartMask) : { ...m, kind: "all", invert: false, feather: 1, points: undefined, parts };
+    } else parts.splice(key, 1);
+    open = undefined;
   }
 
   const levelName = (lv: MaskShape["level"]) => t(lv === undefined ? "mask.level.auto" : `mask.level.${lv}`);
@@ -429,12 +454,38 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
     const parts = m.parts ?? [];
     const changed = () => { edit(t("hist.mask", { name: layerName(l) })); renderProps(); };
 
-    // What a tap does.
+    // What a tap selects (the only choice: adding or removing follows from where you tap).
     const out: HTMLElement[] = [
       el("div", { class: "mask-mode" },
-        chips<"add" | "subtract">([{ id: "add", label: t("mask.mode.add") }, { id: "subtract", label: t("mask.mode.remove") }], pickOp, (o) => { pickOp = o; ctx.pickMode(true, t(o === "add" ? "mask.tapAdd" : "mask.tapRemove")); renderProps(); }),
+        el("span", { class: "muted", text: t("mask.tapSelects") }),
         chips<typeof pickAs>([{ id: "object", label: t("mask.pick.object") }, { id: "color", label: t("mask.pick.color") }, { id: "depth", label: t("mask.pick.depth") }], pickAs, (a) => { pickAs = a; renderProps(); })),
     ];
+
+    // The photo's regions (the scene analysis), one tap each: on adds the region, off removes it.
+    {
+      const cov = ctx.coverage() ?? {};
+      const regions: Region[] = GROUPS.filter((g) => (cov[g] ?? 0) >= 0.5);
+      if ((cov.person ?? 0) >= 0.5) regions.splice(regions.indexOf("person") + 1, 0, "skin");
+      const findRegion = (r: Region): "main" | number | undefined => {
+        if (m.kind === "region" && m.region === r && !m.invert) return "main";
+        const i = parts.findIndex((q) => q.kind === "region" && q.region === r && q.op === "add" && !q.invert);
+        return i >= 0 ? i : undefined;
+      };
+      if (regions.length) out.push(el("div", { class: "mask-regions" },
+        el("span", { class: "muted", text: t("mask.regions") }),
+        chips<Region>(regions.map((r) => ({ id: r, label: tOr(`group.${r}`, r), extra: cov[r] !== undefined ? `${Math.round(cov[r])}%` : "" })), undefined, (r) => {
+          const k = findRegion(r);
+          if (k !== undefined) removePiece(l, k);
+          else if (!addPiece(l, { kind: "region", region: r }, "add")) { ctx.notice?.(t("mask.full")); return; }
+          changed();
+        })));
+      // Chips that are on show as on.
+      const last = out[out.length - 1];
+      if (regions.length) for (const b of last.querySelectorAll<HTMLElement>(".chip")) {
+        const r = regions[[...last.querySelectorAll(".chip")].indexOf(b)];
+        b.classList.toggle("on", findRegion(r) !== undefined);
+      }
+    }
 
     // The pieces.
     type Key = "main" | number;
@@ -450,16 +501,7 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
         changed();
       };
       const remove = el("button", { class: "mask-x", title: t("mask.remove"), "aria-label": t("mask.remove") }, icon("close", 15));
-      remove.onclick = (e) => {
-        e.stopPropagation();
-        if (key === "main") {
-          // The next added part takes the main place; a mask of only removals keeps "everything" underneath.
-          const next = parts[0]?.op === "add" ? parts.shift()! : undefined;
-          l.mask = next ? { ...m, ...next, op: undefined, parts } as SmartMask : { ...m, kind: "all", invert: false, feather: 1, parts };
-        } else parts.splice(key, 1);
-        open = undefined;
-        changed();
-      };
+      remove.onclick = (e) => { e.stopPropagation(); removePiece(l, key); changed(); };
       const sign = el("span", { class: "mask-sign", text: key === "main" ? "+" : op === "subtract" ? "−" : op === "intersect" ? "∩" : "+" });
       const row = el("div", { class: "mask-piece" + (open === key ? " open" : "") + (sh.invert ? " inv" : "") }, sign, el("span", { class: "mask-what" }, ...pieceSummary(sh)), remove);
       row.onclick = () => { open = open === key ? undefined : key; renderProps(); };
@@ -475,10 +517,10 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
 
     // More: masks by type (no tap needed), and the whole mask's strength.
     const more = el("details", { class: "mask-more" }, el("summary", { text: t("mask.more") }));
-    const addBy = chips<MaskKind>((["region", "luminance", "distance", "cell"] as MaskKind[]).map((k) => ({ id: k, label: t(`mask.${k}`) })), undefined, (k) => {
+    const addBy = chips<MaskKind>((["luminance", "distance", "cell"] as MaskKind[]).map((k) => ({ id: k, label: t(`mask.${k}`) })), undefined, (k) => {
       const cov = ctx.coverage() ?? {};
       const region = (GROUPS.find((g) => (cov[g] ?? 0) >= 5) ?? "sky") as Region;
-      if (addPiece(l, { kind: k, region, band: "near", lum: [0, 0.3, 0.08] }, pickOp)) changed();
+      if (addPiece(l, { kind: k, region, band: "near", lum: [0, 0.3, 0.08] }, "add")) changed();
     });
     const clear = el("button", { class: "btn small", text: t("mask.clear") });
     clear.onclick = () => { l.mask = { kind: "all", invert: false, feather: 1, density: m.density, exceptSkin: m.exceptSkin }; open = undefined; changed(); };
@@ -575,7 +617,13 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
     setVisible(v: boolean) { visible = v; applyMaskView(); },
     selectDevelop() { selected = "develop"; render(); },
     /** The engine's answer to a tap in pick mode. */
-    onPick(info: PickInfo) { onPick(info); },
+    onPick(info: PickInfo): boolean { return onPick(info); },
+    /** What a tap on the photo edits now: the selected layer (index among the live layers) and whether taps select objects. */
+    pickTarget(): { layer: number; object: boolean } | undefined {
+      const l = sel();
+      if (!picking || !l) return undefined;
+      return { layer: liveIndex(l.id), object: pickAs === "object" };
+    },
     /** Pick mode ended from outside (another photo tool took the taps). */
     stopPicking() { if (picking) { setPicking(false); renderProps(); } },
   };

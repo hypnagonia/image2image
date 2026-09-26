@@ -97,8 +97,9 @@ async function handle(m: ToWorker) {
       post({ type: "thumbs", items: await engine.thumbnails(m.profiles, m.long) });
       break;
     case "pick": {
-      const info = await engine.pickAt(m.x, m.y);
-      if (info) post({ type: "pick", info });
+      // Always answered (the page waits for it before taking the next tap).
+      const info = await engine.pickAt(m.x, m.y, m.layer, m.object).catch((e) => { post({ type: "log", text: `pick failed: ${e instanceof Error ? e.message : e}` }); return undefined; });
+      post({ type: "pick", info });
       break;
     }
     case "palette":

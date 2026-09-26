@@ -670,6 +670,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let mw = layer_mask(Lm, skin_w, e, e_pre, uv);
     e = mix(mix(e, vec3<f32>(1.0, 0.12, 0.12), 0.55), e, mw);
   }
+  // View 7: a layer's mask value itself, as grey (read back under a tap: is it selected there?).
+  if (u.flags.w == 7u && u.lay.x > 0u) {
+    let Lm = layers[min(u32(u.color.z), u.lay.x - 1u)];
+    layer_setup(maps.g, dist);
+    e = vec3<f32>(layer_mask(Lm, skin_w, e, e_pre, uv));
+  }
 
   // --- creative layer --------------------------------------------------------------------
   if (prof.f.x > 0.5) {

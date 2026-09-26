@@ -69,7 +69,7 @@ export type ToWorker =
   | { type: "thumbs"; profiles: LookProfile[]; long: number }
   | { type: "palette" }
   /** What is under a tap on the photo (x, y: 0…1 of the picture), for building a mask from it. */
-  | { type: "pick"; x: number; y: number }
+  | { type: "pick"; x: number; y: number; /** The layer (index among the live layers) whose mask the tap edits. */ layer?: number; /** A tap selects an object (tap-to-select). */ object?: boolean }
   | { type: "reference"; file: File; mode: "create" | "match"; amount: number }
   | { type: "preview-size"; long: number }
   /** The page's canvas, handed over: previews are drawn into it on the GPU (no readback per frame). */
@@ -96,7 +96,7 @@ export type FromWorker =
   | { type: "looks"; looks: Array<{ id: string; name: string; description: string }> }
   | { type: "thumbs"; items: Array<{ id: string; width: number; height: number; data: ArrayBuffer }> }
   | { type: "palette"; stats: ColorStats }
-  | { type: "pick"; info: PickInfo }
+  | { type: "pick"; info?: PickInfo }
   | { type: "lookProfile"; profile: LookProfile; reference: ColorStats; message: string }
   | { type: "gpu-lost"; reason: string }
   | { type: "upscale"; info: UpscaleInfo }
@@ -111,4 +111,8 @@ export interface PickInfo {
   dist: number; range: [number, number];
   /** OkLab of the colour before the layers (what colour masks compare with). */
   color: [number, number, number];
+  /** How much the layer's mask already covers the tap (0…1): a tap on something selected removes it. */
+  inMask?: number;
+  /** The selection (selectKey) the tapped object already is, when it is one: that piece is deselected. */
+  sameAs?: string;
 }

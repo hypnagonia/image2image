@@ -155,6 +155,44 @@ let dofInfo: { justified: boolean; focus: number; strength: number; reason: stri
 let focusMode = false;
 /** Taps on the photo pick what a layer's mask selects (the layer's Mask tab turns this on). */
 let maskPicking = false;
+/**
+ * A tap that edits a mask. One at a time: taps while one is being worked out (the
+ * first selection on a photo takes seconds on a phone), and a second tap of a quick
+ * double tap, are ignored — so a tap never adds and then removes by accident. The tap
+ * is marked on the photo at once and "Selecting…" shows until the mask is back.
+ */
+let pickBusy = false, lastPickAt = 0, pickTimer = 0, pickAwaitsPreview = false;
+let pickMark: HTMLElement | undefined;
+function maskTap(x: number, y: number, cx: number, cy: number) {
+  const now = performance.now();
+  if (pickBusy || now - lastPickAt < 400) return;
+  const target = layersPanel.pickTarget();
+  if (!target) return;
+  pickBusy = true;
+  lastPickAt = now;
+  pickMark?.remove();
+  const st = stage.getBoundingClientRect();
+  pickMark = el("div", { class: "tap-mark busy" });
+  pickMark.style.left = `${cx - st.left}px`;
+  pickMark.style.top = `${cy - st.top}px`;
+  stage.append(pickMark);
+  badge.textContent = t("mask.selecting");
+  badge.classList.add("on");
+  // Never stuck: if no answer comes, taps work again after a while.
+  clearTimeout(pickTimer);
+  pickTimer = window.setTimeout(pickDone, 30_000);
+  send({ type: "pick", x, y, layer: target.layer, object: target.object });
+}
+function pickDone() {
+  clearTimeout(pickTimer);
+  pickAwaitsPreview = false;
+  pickBusy = false;
+  lastPickAt = performance.now();
+  const m = pickMark;
+  pickMark = undefined;
+  if (m) { m.classList.remove("busy"); m.classList.add("done"); setTimeout(() => m.remove(), 450); }
+  if (maskPicking) { badge.textContent = t("mask.tapHint"); badge.classList.add("on"); }
+}
 /** Callers waiting for the photo's colours (the engine's next "palette" answer). */
 const paletteWaiters: Array<(s: ColorStats) => void> = [];
 /** A ring being dragged: which one, where it started, where it is now. */
@@ -603,7 +641,11 @@ function pointerEnd(e: PointerEvent) {
   const p = press;
   press = undefined;
   if (!p || p.moved || e.type === "pointercancel") return;
-  if (p.tap) { send(maskPicking ? { type: "pick", x: p.tap.x, y: p.tap.y } : { type: "focus", action: "toggle", x: p.tap.x, y: p.tap.y }); return; }
+  if (p.tap) {
+    if (maskPicking) maskTap(p.tap.x, p.tap.y, e.clientX, e.clientY);
+    else send({ type: "focus", action: "toggle", x: p.tap.x, y: p.tap.y });
+    return;
+  }
   if (focusMode) return;
   // Double-tap: zoom in to 2.5× there, or back out.
   const now = performance.now();
@@ -886,8 +928,10 @@ const layersPanel = createLayersPanel(dockEl, propsEl, {
     paletteWaiters.push((s) => resolve(s.palette.map((w) => w.hex)));
     send({ type: "palette" });
   }),
+  notice: (text) => { badge.textContent = text; badge.classList.add("on"); },
   pickMode: (on, hint) => {
     maskPicking = on;
+    if (!on) { pickMark?.remove(); pickMark = undefined; }
     if (on && focusMode) setFocusMode(false);
     badge.textContent = on ? (hint ?? t("mask.pickBadge")) : "";
     badge.classList.toggle("on", on);
@@ -1338,6 +1382,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       drawPreview(m);
       if (m.final && !holding) setProgress(undefined);
       if (m.final) markCompleted();
+      if (m.final && pickAwaitsPreview) pickDone();
       if (m.final) exportTop.disabled = exportBtn.disabled || !params;
       void 0; // look thumbnails: the Look panel is hidden for now
       busy = false;
@@ -1469,12 +1514,16 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       for (const f of paletteWaiters.splice(0)) f(m.stats);
       break;
     case "pick":
-      layersPanel.onPick(m.info);
+      // A changed mask is "done" when the photo shows it (a first selection is worked
+      // out while rendering: seconds on a phone); otherwise now.
+      if (m.info && layersPanel.onPick(m.info)) pickAwaitsPreview = true;
+      else pickDone();
       break;
     case "lookProfile":
       lookPanel.onProfile(m.profile, m.reference, m.message);
       break;
     case "error":
+      if (pickBusy) pickDone();
       noteAnalysisStage();
       opening = false;
       showError(m.message);

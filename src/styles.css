@@ -442,3 +442,13 @@ header.top .push { margin-left: auto; }
 .grad-edit > summary::before { content: "+ "; }
 .grad-edit[open] > summary::before { content: "− "; }
 .grad-edit > summary::-webkit-details-marker { display: none; }
+
+/* Where a mask tap landed: at once, pulsing while the selection is worked out. */
+.tap-mark { position: absolute; width: 36px; height: 36px; margin: -18px 0 0 -18px; border: 2px solid #fff; border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.6), inset 0 0 0 1px rgba(0,0,0,.6); pointer-events: none; z-index: 3; }
+.tap-mark.busy { animation: tapPulse .9s ease-in-out infinite; }
+.tap-mark.done { animation: tapDone .45s ease-out forwards; }
+@keyframes tapPulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(.72); opacity: .7; } }
+@keyframes tapDone { to { transform: scale(1.6); opacity: 0; } }
+.mask-regions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0 0 8px; }
+.mask-regions .chips { margin: 0; }
