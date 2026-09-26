@@ -6,18 +6,18 @@
  * life of the tab and phones ran out of memory right after the first preview.
  * Here it runs, answers once, and the worker is terminated: all of it returned.
  *
- * In:  { img: AnalysisImage, base, detailTiles }   Out: { maps: SceneMaps } | { error }
+ * In:  { img: AnalysisImage, base, detailTiles, withDepth, depthLong }   Out: { maps: SceneMaps } | { error }
  */
 import { Neural } from "./ort.ts";
 import { analyseScene, type AnalysisImage, type SceneMaps } from "./scene.ts";
 
 const post = (m: unknown, transfer: Transferable[] = []) => (self as unknown as DedicatedWorkerGlobalScope).postMessage(m, transfer);
 
-self.onmessage = async (ev: MessageEvent<{ img: AnalysisImage; base: string; detailTiles: boolean }>) => {
+self.onmessage = async (ev: MessageEvent<{ img: AnalysisImage; base: string; detailTiles: boolean; withDepth: boolean; depthLong: number }>) => {
   try {
-    const { img, base, detailTiles } = ev.data;
+    const { img, base, detailTiles, withDepth, depthLong } = ev.data;
     const neural = await Neural.create(undefined, base, true);
-    const maps: SceneMaps = await analyseScene(neural, img, (stage) => post({ stage }), true, detailTiles, "wasm");
+    const maps: SceneMaps = await analyseScene(neural, img, (stage) => post({ stage }), withDepth, detailTiles, "wasm", depthLong);
     post({ maps }, [maps.seg.probs.buffer, maps.depth.dist.buffer, maps.depth.raw.buffer]);
   } catch (e) {
     post({ error: e instanceof Error ? e.message : String(e) });

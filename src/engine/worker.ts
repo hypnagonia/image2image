@@ -38,7 +38,7 @@ async function handle(m: ToWorker) {
       break;
     }
     case "open":
-      await engine.open(m.file, m.resolution, m.autoExposure, m.autoDof, m.upscale, m.safeAnalysis);
+      await engine.open(m.file, m.resolution, m.autoExposure, m.autoDof, m.upscale, m.safeAnalysis, m.analysis);
       break;
     case "upscale-now":
       engine.forceUpscale();

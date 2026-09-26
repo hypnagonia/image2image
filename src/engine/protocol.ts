@@ -1,3 +1,4 @@
+import type { AnalysisLevel } from "../neural/scene.ts";
 import type { AutoCurveBands } from "../decision/autoCurves.ts";
 import type { Decision, Params } from "../decision/params.ts";
 import type { LookProfile } from "../looks/profile.ts";
@@ -54,7 +55,7 @@ export interface UpscaleInfo {
 
 export type ToWorker =
   | { type: "init"; base: string; forceCpu?: boolean }
-  | { type: "open"; file: File; resolution: "auto" | "full" | "half"; autoExposure: boolean; autoDof: boolean; upscale: UpscaleMode; /** Scene analysis on the CPU (it crashed this device's GPU before). */ safeAnalysis?: boolean }
+  | { type: "open"; file: File; resolution: "auto" | "full" | "half"; autoExposure: boolean; autoDof: boolean; upscale: UpscaleMode; /** Scene analysis on the CPU (it crashed this device's GPU before). */ safeAnalysis?: boolean; /** Less scene analysis: the tab died during it on this device before. */ analysis?: AnalysisLevel }
   | { type: "upscale-now" }
   | { type: "params"; params: Params; draft?: boolean }
   | { type: "view"; view: 0 | 1 | 2 | 4 | 5 | 6; before?: boolean; region?: number; range?: [number, number] }

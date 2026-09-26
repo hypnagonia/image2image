@@ -238,7 +238,7 @@ export function neutralScene(img: AnalysisImage, why: string): SceneMaps {
  * analyseScene in a worker of its own (sceneWorker.ts), terminated when it answers:
  * the model runtime's memory is returned at once. `onStage` gets its progress.
  */
-export function analyseSceneIsolated(img: AnalysisImage, base: string, detailTiles: boolean, onStage?: (s: string) => void): Promise<SceneMaps> {
+export function analyseSceneIsolated(img: AnalysisImage, base: string, detailTiles: boolean, onStage?: (s: string) => void, withDepth = true, depthLong = 518): Promise<SceneMaps> {
   return new Promise((resolve, reject) => {
     const w = new Worker(new URL("./sceneWorker.ts", import.meta.url), { type: "module" });
     const done = () => w.terminate();
@@ -250,11 +250,18 @@ export function analyseSceneIsolated(img: AnalysisImage, base: string, detailTil
       else { done(); reject(new Error(m.error ?? "Scene analysis failed")); }
     };
     // The analysis image moves to the worker (it is not needed here meanwhile).
-    w.postMessage({ img, base, detailTiles });
+    w.postMessage({ img, base, detailTiles, withDepth, depthLong });
   });
 }
 
-export async function analyseScene(neural: Neural, img: AnalysisImage, onStage?: (s: string) => void, withDepth = true, detailTiles = true, prefer: Backend = neural.backend): Promise<SceneMaps> {
+/**
+ * How much scene analysis a device gets. Phones default to "light" (one 512 px
+ * segmentation pass, depth at 392 px); a phone whose tab died during depth steps
+ * down to "seg", one that died during segmentation to "none" (see main.ts).
+ */
+export type AnalysisLevel = "full" | "light" | "seg" | "none";
+
+export async function analyseScene(neural: Neural, img: AnalysisImage, onStage?: (s: string) => void, withDepth = true, detailTiles = true, prefer: Backend = neural.backend, depthLong = 518): Promise<SceneMaps> {
   const timings: Record<string, number> = {};
   const log: string[] = [];
 
@@ -337,7 +344,8 @@ export async function analyseScene(neural: Neural, img: AnalysisImage, onStage?:
   log.push(`SegFormer-B0 ${crops.length} × ${sw}×${sh} sliding window over ${W}×${H} → ${lw}×${lh}: ` + GROUPS.filter((g) => coverage[g] > 0.01).map((g) => `${g} ${(coverage[g] * 100).toFixed(0)}%`).join(", "));
 
   if (!withDepth) {
-    return { seg: { width: lw, height: lh, probs }, depth: { width: 1, height: 1, dist: new Float32Array(1), raw: new Float32Array(1) }, coverage, timings, log };
+    log.push("Depth skipped on this device: the photo opens with a flat distance map (no automatic depth effects)");
+    return { seg: { width: lw, height: lh, probs }, depth: { width: 1, height: 1, dist: new Float32Array(1).fill(0.5), raw: new Float32Array(1), flat: true }, coverage, timings, log };
   }
   // --- Depth Anything V2 Small --------------------------------------------
   onStage?.("depth");
@@ -346,7 +354,7 @@ export async function analyseScene(neural: Neural, img: AnalysisImage, onStage?:
   // too the photo opens without depth (flat distance) instead of breaking.
   const runDepth = (backend: Backend) => withSession(neural, MODELS.depth, backend, async (dSession) => {
     // Global pass: the whole scene at 518 px — correct layout and ordering.
-    const [dw, dh] = fitDims(img.width, img.height, 518, 14);
+    const [dw, dh] = fitDims(img.width, img.height, depthLong, 14);
     t = performance.now();
     const dIn = new ort.Tensor("float32", cropsTensor(img, [[0, 0, img.width, img.height]], dw, dh), [1, 3, dh, dw]);
     const dOut = await dSession.run({ [dSession.inputNames[0]]: dIn });

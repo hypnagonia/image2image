@@ -153,6 +153,9 @@ export class Neural {
       executionProviders: backend === "webgpu" ? ["webgpu"] : ["wasm"],
       graphOptimizationLevel: "all",
       enableMemPattern: backend === "wasm",
+      // The CPU arena rounds every allocation up and keeps it: on a phone that is
+      // the difference between fitting and the tab being killed during depth.
+      enableCpuMemArena: backend !== "wasm",
     };
     if (backend === "webgpu" && gpuOutput) opts.preferredOutputLocation = "gpu-buffer";
     return ort.InferenceSession.create(bytes, opts);

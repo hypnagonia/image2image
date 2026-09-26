@@ -21,7 +21,7 @@ import { decodeFile } from "../decode/decode.ts";
 import type { DecodedImage } from "../decode/types.ts";
 import { develop, type WorkingImage } from "../raw/develop.ts";
 import { Neural, MODELS } from "../neural/ort.ts";
-import { analyseScene, analyseSceneIsolated, neutralScene, applyAppleMattes, type SceneMaps } from "../neural/scene.ts";
+import { analyseScene, analyseSceneIsolated, neutralScene, applyAppleMattes, type AnalysisLevel, type SceneMaps } from "../neural/scene.ts";
 import { denoiseGPU } from "../restore/denoise.ts";
 import { UpscaleJob, probeUpscaler } from "../restore/upscale.ts";
 import { decideUpscale, measureQuality, type ImageQualityReport, type UpscaleMode } from "../analysis/quality.ts";
@@ -93,6 +93,8 @@ const UPSCALE_MAX_MP = () => (isMobile() ? 16 : 48);
 
 /** Long edge of the image the analysis networks see. */
 const ANALYSIS_LONG = 1036;
+/** Phones: exactly one 512 px segmentation window, no sliding. */
+const ANALYSIS_LONG_LIGHT = 512;
 
 const isMobile = () => /iPhone|iPad|iPod|Android/i.test(globalThis.navigator?.userAgent ?? "") || ((globalThis.navigator as Navigator & { maxTouchPoints?: number })?.maxTouchPoints ?? 0) > 1;
 
@@ -254,17 +256,17 @@ export class Engine {
    * it is freed here — a stopped 48 MP open otherwise kept ≈ 600 MB (the decoder
    * worker, the working image, masks) and the next attempt started that far behind.
    */
-  async open(file: File, resolution: "auto" | "full" | "half", autoExposure = false, autoDof = false, upscaleMode: UpscaleMode = "auto", safeAnalysis = false) {
+  async open(file: File, resolution: "auto" | "full" | "half", autoExposure = false, autoDof = false, upscaleMode: UpscaleMode = "auto", safeAnalysis = false, level?: AnalysisLevel) {
     const cleanup: Array<() => void> = [];
     let committed = false;
     try {
-      await this.openInner(file, resolution, autoExposure, autoDof, upscaleMode, safeAnalysis, (f) => cleanup.push(f), () => { committed = true; });
+      await this.openInner(file, resolution, autoExposure, autoDof, upscaleMode, safeAnalysis, level, (f) => cleanup.push(f), () => { committed = true; });
     } finally {
       if (!committed) for (const f of cleanup.reverse()) { try { f(); } catch { /* already freed */ } }
     }
   }
 
-  private async openInner(file: File, resolution: "auto" | "full" | "half", autoExposure: boolean, autoDof: boolean, upscaleMode: UpscaleMode, safeAnalysis: boolean,
+  private async openInner(file: File, resolution: "auto" | "full" | "half", autoExposure: boolean, autoDof: boolean, upscaleMode: UpscaleMode, safeAnalysis: boolean, level: AnalysisLevel | undefined,
     track: (free: () => void) => void, commit: () => void) {
     const gen = ++this.generation;
     this.closeSession();
@@ -305,7 +307,11 @@ export class Engine {
     // The networks see a ~1036 px image: segmentation slides 512 px windows over
     // it and depth adds high-resolution detail tiles to a global pass. Still a
     // reduced image — never the 12/48 MP original.
-    const aScale = Math.min(1, ANALYSIS_LONG / Math.max(work.width, work.height));
+    // Phones: "light" at most — one 512 px segmentation pass and a 392 px depth pass
+    // (a sixth of the segmentation work, about half the depth memory). The page
+    // may ask for less after the tab died during analysis on this device.
+    const lvl: AnalysisLevel = isMobile() && (!level || level === "full") ? "light" : (level ?? "full");
+    const aScale = Math.min(1, (lvl === "full" ? ANALYSIS_LONG : ANALYSIS_LONG_LIGHT) / Math.max(work.width, work.height));
     const gw = Math.max(16, Math.round(work.width * aScale)), gh = Math.max(16, Math.round(work.height * aScale));
     const lin = await downsample(gpu, work.tex, work.width, work.height, gw, gh, false, 1, "analysis.lin");
     const linHalf = new Uint16Array(await gpu.readTexture(lin, 0, 0, gw, gh, 8));
@@ -327,10 +333,15 @@ export class Engine {
     // own that is terminated afterwards — the model runtime's memory is returned at
     // once instead of staying for the tab's life. Elsewhere: WebGPU, in this worker.
     const isolated = isMobile() || safeAnalysis;
-    const inHere = () => analyseScene(this.neural, { rgba: analysisRgba, width: gw, height: gh }, (s) => this.progress(s), true, !isMobile() /* detail tiles: 4 more depth passes, too heavy for phones */, safeAnalysis || isMobile() ? "wasm" : this.neural.backend);
+    const withDepth = lvl !== "seg";
+    const depthLong = lvl === "full" ? 518 : 392;
+    const detailTiles = lvl === "full" && !isMobile(); // 4 more depth passes, too heavy for phones
+    const inHere = () => analyseScene(this.neural, { rgba: analysisRgba, width: gw, height: gh }, (s) => this.progress(s), withDepth, detailTiles, safeAnalysis || isMobile() ? "wasm" : this.neural.backend, depthLong);
     const img = { rgba: analysisRgba, width: gw, height: gh };
-    const inWorker = () => analyseSceneIsolated(img, this.base, !isMobile(), (s) => this.progress(s));
+    const inWorker = () => analyseSceneIsolated(img, this.base, detailTiles, (s) => this.progress(s), withDepth, depthLong);
+    if (lvl !== "full") this.log(`scene analysis level: ${lvl}${lvl === "none" ? " (the tab stopped during segmentation before on this device)" : lvl === "seg" ? " (the tab stopped during depth before on this device)" : ""}`);
     const scene = await P.time("segmentation + depth", async () => {
+      if (lvl === "none") return neutralScene(img, "skipped on this device");
       if (!isolated) return inHere();
       try { return await inWorker(); }
       catch (e) {
