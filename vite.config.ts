@@ -1,5 +1,7 @@
 import { defineConfig, type Plugin } from "vite";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Dev-only: POST /__debug/save?name=… writes the body to .samples/out (export validation). */
@@ -20,6 +22,39 @@ const debugSave: Plugin = {
   },
 };
 
+/**
+ * Build-only: writes dist/sw.js from scripts/sw.template.js with this build's
+ * app shell (everything in dist except /models and /ort, which are cached at
+ * run time) and a version derived from the shell's contents.
+ */
+const serviceWorker: Plugin = {
+  name: "service-worker",
+  apply: "build",
+  closeBundle() {
+    const dist = fileURLToPath(new URL("./dist", import.meta.url));
+    const files: string[] = [];
+    const walk = (d: string) => {
+      for (const f of readdirSync(d)) {
+        const abs = join(d, f);
+        const rel = "/" + relative(dist, abs).split("\\").join("/");
+        if (rel === "/models" || rel === "/ort" || rel === "/sw.js" || rel.endsWith(".txt")) continue;
+        if (statSync(abs).isDirectory()) walk(abs); else files.push(rel);
+      }
+    };
+    walk(dist);
+    files.sort();
+    const hash = createHash("sha256");
+    for (const f of files) hash.update(f).update(readFileSync(join(dist, f)));
+    const precache = ["/", ...files.filter((f) => f !== "/index.html")];
+    const ortVersion = JSON.parse(readFileSync(new URL("./node_modules/onnxruntime-web/package.json", import.meta.url), "utf8")).version;
+    const sw = readFileSync(new URL("./scripts/sw.template.js", import.meta.url), "utf8")
+      .replace("__VERSION__", JSON.stringify(hash.digest("hex").slice(0, 12)))
+      .replace("__PRECACHE__", JSON.stringify(precache))
+      .replace("__ORT_VERSION__", JSON.stringify(ortVersion));
+    writeFileSync(join(dist, "sw.js"), sw);
+  },
+};
+
 // Cross-origin isolation enables SharedArrayBuffer, i.e. multi-threaded WASM
 // for ONNX Runtime's CPU fallback. The same headers are set on Vercel.
 const isolation = {
@@ -28,7 +63,7 @@ const isolation = {
 };
 
 export default defineConfig(({ command }) => ({
-  plugins: [debugSave],
+  plugins: [debugSave, serviceWorker],
   // Use ORT's non-bundled build: it loads its runtime from env.wasm.wasmPaths
   // (public/ort, see scripts/copy-ort.mjs) instead of inlining it.
   // Build only: the dev server serves ORT unbundled and refuses imports from /public.
