@@ -6,9 +6,11 @@
 struct LayerRec {
   a: vec4<f32>,   // type, blend, opacity, atlas row (−1 none)
   m0: vec4<f32>,  // mask kind, region (11 = skin), band, invert
-  m1: vec4<f32>,  // luminance low, high, softness, feather
-  r: vec4<f32>,   // density, except skin, _, _
+  m1: vec4<f32>,  // mask values 0–2, feather
+  r: vec4<f32>,   // density, except skin, mask values 3–4
   p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>, p3: vec4<f32>, // type parameters
+  // Extra mask parts, three vec4 each: kind (0 = none), region, band, op | values 0–3 | value 4, invert, feather, _
+  q: array<vec4<f32>, 12>,
 }
 @group(0) @binding(21) var<storage, read> layers: array<LayerRec>;
 
@@ -76,29 +78,64 @@ fn sky_mask(p: f32, e: vec3<f32>, uv: vec2<f32>, other: f32) -> f32 {
 /** This pixel's region probabilities and distance bands: set once per pixel (layer_setup), read by every layer. */
 var<private> lay_g: array<f32, 12>;
 var<private> lay_bw: vec3<f32>;
-fn layer_setup(g: array<f32, 12>, dist: f32) { lay_g = g; lay_bw = band_w(dist); }
+var<private> lay_dist: f32;
+/** OkLab of the colour before the layers, for colour masks (computed once, on first use). */
+var<private> lay_lab: vec3<f32>;
+var<private> lay_lab_ok: bool = false;
+fn layer_setup(g: array<f32, 12>, dist: f32) { lay_g = g; lay_bw = band_w(dist); lay_dist = dist; lay_lab_ok = false; }
+
+/** A range [lo, hi] with soft edges; a range starting at 0 or ending at 1 covers that end fully. */
+fn soft_range(x: f32, lo: f32, hi: f32, soft: f32) -> f32 {
+  let s = max(soft, 1e-3);
+  let a = select(smoothstep(lo - s, lo + s, x), 1.0, lo <= 0.0);
+  let b = select(1.0 - smoothstep(hi - s, hi + s, x), 1.0, hi >= 1.0);
+  return a * b;
+}
+
+/** One mask part at this pixel (0…1), before feather and invert. `v`: its values 0–3, `v4`: value 4. */
+fn mask_part(kind: u32, reg: u32, band: u32, v: vec4<f32>, skin_w: f32, e: vec3<f32>, e0: vec3<f32>, uv: vec2<f32>) -> f32 {
+  if (kind == 2u) { return lay_bw[min(band, 2u)]; }
+  if (kind == 4u) { return soft_range(dot(e, LUMAP3), v.x, v.y, v.z); }
+  if (kind == 5u) {
+    // Colour: OkLab distance to the picked colour, lightness at half weight (the same
+    // surface in light and shade still counts), fading out over half the tolerance again.
+    if (!lay_lab_ok) { lay_lab = enc_to_lab(e0); lay_lab_ok = true; }
+    let d = lay_lab - v.xyz;
+    let dist = length(vec3<f32>(d.x * 0.5, d.y, d.z));
+    let tol = max(v.w, 1e-3);
+    return 1.0 - smoothstep(tol, tol * 1.5 + 0.005, dist);
+  }
+  if (kind == 6u) { return soft_range(lay_dist, v.x, v.y, v.z); }
+  if (kind == 1u || kind == 3u || kind == 7u) {
+    var pr = clamp(lay_g[min(reg, 10u)], 0.0, 1.0);
+    if (reg == 0u) { pr = sky_mask(pr, e0, uv, max(lay_g[5], lay_g[2])); }
+    if (reg == 11u) { pr = skin_w; }
+    if (kind == 1u) { return pr; }
+    // Object: the region, only within the tapped object's depth range.
+    if (kind == 7u) { return pr * soft_range(lay_dist, v.x, v.y, v.z); }
+    return pr * lay_bw[min(band, 2u)];
+  }
+  return 1.0; // all
+}
+
+/** Feather 1 = the part's own soft edge; 0 = a hard edge at its middle. Then invert. */
+fn mask_shape(m: f32, feather: f32, invert: bool) -> f32 {
+  let f = mix(smoothstep(0.45, 0.55, m), m, clamp(feather, 0.0, 1.0));
+  return select(f, 1.0 - f, invert);
+}
 
 fn layer_mask(L: LayerRec, skin_w: f32, e: vec3<f32>, e0: vec3<f32>, uv: vec2<f32>) -> f32 {
-  let kind = u32(L.m0.x);
-  let reg = u32(L.m0.y);
-  let bw = lay_bw;
-  var m = 1.0;
-  var pr = clamp(lay_g[min(reg, 10u)], 0.0, 1.0);
-  if (reg == 0u && (kind == 1u || kind == 3u)) { pr = sky_mask(pr, e0, uv, max(lay_g[5], lay_g[2])); }
-  if (kind == 1u) { m = select(pr, skin_w, reg == 11u); }
-  else if (kind == 2u) { m = bw[min(u32(L.m0.z), 2u)]; }
-  else if (kind == 3u) { m = pr * bw[min(u32(L.m0.z), 2u)]; }
-  else if (kind == 4u) {
-    let y = dot(e, LUMAP3);
-    let s = max(L.m1.z, 1e-3);
-    // A range that starts at black or ends at white covers it fully (no half-strength edge there).
-    let lo = select(smoothstep(L.m1.x - s, L.m1.x + s, y), 1.0, L.m1.x <= 0.0);
-    let hi = select(1.0 - smoothstep(L.m1.y - s, L.m1.y + s, y), 1.0, L.m1.y >= 1.0);
-    m = lo * hi;
+  var m = mask_shape(mask_part(u32(L.m0.x), u32(L.m0.y), u32(L.m0.z), vec4<f32>(L.m1.xyz, L.r.z), skin_w, e, e0, uv), L.m1.w, L.m0.w > 0.5);
+  // Extra parts, in order: add (either), subtract (and not), intersect (both).
+  for (var k = 0u; k < 4u; k++) {
+    let h = L.q[k * 3u];
+    let kind = u32(h.x);
+    if (kind == 0u) { break; }
+    let x = L.q[k * 3u + 2u];
+    let p = mask_shape(mask_part(kind, u32(h.y), u32(h.z), L.q[k * 3u + 1u], skin_w, e, e0, uv), x.z, x.y > 0.5);
+    let op = u32(h.w);
+    if (op == 0u) { m = max(m, p); } else if (op == 1u) { m = m * (1.0 - p); } else { m = m * p; }
   }
-  // Feather 1 = the mask's own soft edge; 0 = a hard edge at its middle.
-  m = mix(smoothstep(0.45, 0.55, m), m, clamp(L.m1.w, 0.0, 1.0));
-  if (L.m0.w > 0.5) { m = 1.0 - m; }
   // Faces keep their own correction: region and distance colour do not reach skin.
   if (L.r.y > 0.5) { m *= 1.0 - skin_w; }
   return m * clamp(L.r.x, 0.0, 1.0);

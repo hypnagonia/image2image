@@ -48,9 +48,16 @@ import { matchProfile, profileFromReference, type RegionColors } from "../looks/
 import { GROUPS, type Group } from "../neural/scene.ts";
 import { canEncodeHeic, encodeGainMapJpeg, encodeHeic, encodeJpeg, encodeLinearDng, encodeTiff16 } from "../output/encoders.ts";
 import { Profiler } from "./profiler.ts";
-import type { Capabilities, ExportFormat, FromWorker, Summary, UpscaleInfo } from "./protocol.ts";
+import type { Capabilities, ExportFormat, FromWorker, PickInfo, Summary, UpscaleInfo } from "./protocol.ts";
 import type { CameraColor } from "../color/dng.ts";
 import { srgbEotf, srgbOetf } from "../color/transfer.ts";
+import { linSrgbToOklab } from "../color/oklab.ts";
+import { inverse, mul, mulVec } from "../color/mat3.ts";
+import { P3_D65, SRGB, rgbToXYZ } from "../color/spaces.ts";
+import type { Region } from "../decision/params.ts";
+
+/** Linear Display P3 → linear sRGB (as P3_TO_SRGB in common.wgsl). */
+const P3_TO_SRGB = mul(inverse(rgbToXYZ(SRGB)), rgbToXYZ(P3_D65));
 
 type Post = (m: FromWorker, transfer?: Transferable[]) => void;
 
@@ -1154,6 +1161,47 @@ export class Engine {
       out[g] = { ...st, n: Math.round(mass) };
     }
     return out;
+  }
+
+  /**
+   * What is under a tap, for a mask built from it: the region (network probabilities,
+   * 3×3 around the tap), the distance and the tapped object's depth range (as focus
+   * points use), and the colour before the layers (median of 5×5 at 384 px) in OkLab.
+   */
+  async pickAt(x: number, y: number): Promise<PickInfo | undefined> {
+    const s = this.s;
+    const f = this.focusRangeAt(x, y);
+    if (!s || !f) return undefined;
+    const seg = s.scene.seg, plane = seg.width * seg.height;
+    const cx = Math.round(x * (seg.width - 1)), cy = Math.round(y * (seg.height - 1));
+    const score = new Float64Array(GROUPS.length);
+    for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) {
+      const k = Math.min(seg.height - 1, Math.max(0, cy + j)) * seg.width + Math.min(seg.width - 1, Math.max(0, cx + i));
+      for (let g = 0; g < GROUPS.length; g++) score[g] += seg.probs[g * plane + k] / 9;
+    }
+    let best = 0;
+    for (let g = 1; g < GROUPS.length; g++) if (score[g] > score[best]) best = g;
+    let region: Region = GROUPS[best];
+    // People: Apple's skin matte (ProRAW) tells skin from clothes.
+    const skin = s.decoded.masks?.find((m) => m.kind === "skin");
+    if (region === "person" && skin && skin.data[Math.min(skin.height - 1, Math.round(y * (skin.height - 1))) * skin.width + Math.min(skin.width - 1, Math.round(x * (skin.width - 1)))] > 127) region = "skin";
+    // The colour before the layers (the layers' masks compare against exactly that).
+    const t = await this.ensureThumb(384);
+    const p: Params = { ...s.params, layers: [], enable: { ...s.params.enable, dof: false } };
+    const r = await this.renderer.render({ base: t.base, denoised: t.denoised, width: t.w, height: t.h, fullWidth: s.work.width }, s.maps, p, { wb: this.wbFor(p), gain: s.gain, lightLinear: s.lightLinear, output: "p38", dither: false }, false);
+    const px = new Uint8Array(await this.gpu.readTexture(r.tex, 0, 0, t.w, t.h, 4));
+    const tx = Math.round(x * (t.w - 1)), ty = Math.round(y * (t.h - 1));
+    const labs: Array<[number, number, number]> = [];
+    for (let j = -2; j <= 2; j++) for (let i = -2; i <= 2; i++) {
+      const k = (Math.min(t.h - 1, Math.max(0, ty + j)) * t.w + Math.min(t.w - 1, Math.max(0, tx + i))) * 4;
+      const lin = mulVec(P3_TO_SRGB, [srgbEotf(px[k] / 255), srgbEotf(px[k + 1] / 255), srgbEotf(px[k + 2] / 255)]);
+      labs.push(linSrgbToOklab(lin));
+    }
+    const med = (c: 0 | 1 | 2) => labs.map((l) => l[c]).sort((a, b) => a - b)[labs.length >> 1];
+    // Surfaces running from near to far (ground, sky, a wall over a third of the frame) get
+    // only a thin depth slice for focus; as a mask, "this object" is then the whole region.
+    const range: [number, number] = f.range[1] - f.range[0] <= 0.0401 ? [0, 1] : f.range;
+    return { x, y, region, prob: score[GROUPS.indexOf(region === "skin" ? "person" : region)], dist: f.dist, range, color: [med(0), med(1), med(2)] };
   }
 
   async palette(): Promise<ColorStats> {

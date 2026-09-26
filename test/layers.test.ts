@@ -110,3 +110,26 @@ test("gradient layers pack a table row each", () => {
   assert.equal(pk.records[0], 5);
   assert.equal(pk.records[RECORD], 6);
 });
+
+test("mask parts pack after the type parameters: kind, op and values per part", () => {
+  const l = makeLayer("basic", "M", {
+    mask: {
+      kind: "object", region: "person", depth: [0.1, 0.3, 0.03], invert: false, feather: 1, density: 1,
+      parts: [
+        { kind: "color", op: "subtract", color: [0.7, 0.02, -0.05], tol: 0.1, invert: false, feather: 0.5 },
+        { kind: "depth", op: "intersect", depth: [0, 0.4, 0.05], invert: true, feather: 1 },
+      ],
+    },
+  });
+  const r = packLayers([l]).records;
+  assert.equal(r[4], 7); // object
+  assert.ok(Math.abs(r[8] - 0.1) < 1e-6 && Math.abs(r[9] - 0.3) < 1e-6); // its depth range
+  // Part 1: colour, subtract, L a b tolerance, feather.
+  assert.equal(r[32], 5); assert.equal(r[35], 1);
+  assert.ok(Math.abs(r[36] - 0.7) < 1e-6 && Math.abs(r[39] - 0.1) < 1e-6);
+  assert.equal(r[42], 0.5);
+  // Part 2: depth, intersect, inverted.
+  assert.equal(r[44], 6); assert.equal(r[47], 2); assert.equal(r[53], 1);
+  // No third part: kind 0 ends the list.
+  assert.equal(r[56], 0);
+});

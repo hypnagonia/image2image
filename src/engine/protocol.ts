@@ -1,3 +1,4 @@
+import type { Region } from "../decision/params.ts";
 import type { AnalysisLevel } from "../neural/scene.ts";
 import type { AutoCurveBands } from "../decision/autoCurves.ts";
 import type { Decision, Params } from "../decision/params.ts";
@@ -67,6 +68,8 @@ export type ToWorker =
   | { type: "importLook"; name: string; text: string }
   | { type: "thumbs"; profiles: LookProfile[]; long: number }
   | { type: "palette" }
+  /** What is under a tap on the photo (x, y: 0…1 of the picture), for building a mask from it. */
+  | { type: "pick"; x: number; y: number }
   | { type: "reference"; file: File; mode: "create" | "match"; amount: number }
   | { type: "preview-size"; long: number }
   /** The page's canvas, handed over: previews are drawn into it on the GPU (no readback per frame). */
@@ -93,7 +96,19 @@ export type FromWorker =
   | { type: "looks"; looks: Array<{ id: string; name: string; description: string }> }
   | { type: "thumbs"; items: Array<{ id: string; width: number; height: number; data: ArrayBuffer }> }
   | { type: "palette"; stats: ColorStats }
+  | { type: "pick"; info: PickInfo }
   | { type: "lookProfile"; profile: LookProfile; reference: ColorStats; message: string }
   | { type: "gpu-lost"; reason: string }
   | { type: "upscale"; info: UpscaleInfo }
   | { type: "error"; message: string; stage?: string };
+
+/** What the photo is at a tapped point: the ingredients of "this object / this colour / this far". */
+export interface PickInfo {
+  x: number; y: number;
+  /** The most likely region there (skin where Apple's skin matte says so) and its probability. */
+  region: Region; prob: number;
+  /** Distance there (0 = nearest … 1 = farthest) and the depth range of the object under it. */
+  dist: number; range: [number, number];
+  /** OkLab of the colour before the layers (what colour masks compare with). */
+  color: [number, number, number];
+}

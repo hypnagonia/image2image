@@ -30,9 +30,9 @@ const send = (m: ToWorker) => worker.postMessage(m);
 // --------------------------------------------------------------------------- DOM helpers
 
 const app = document.getElementById("app")!;
-// The mark: a frame holding a half-lit lens (light and shadow, the whole job), in the ink colour.
+// The mark: the wanderer from jenyadoesapps.com, painted in the ink colour (a CSS mask
+// over public/logo-mark.png), so it follows the theme.
 const logo = el("span", { class: "logo", "aria-hidden": "true" });
-logo.innerHTML = `<svg viewBox="0 0 24 24" width="20" height="20"><rect x="1.5" y="1.5" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="5.75" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 6.25a5.75 5.75 0 0 1 0 11.5z" fill="currentColor"/></svg>`;
 const header = el("header", { class: "top" }, logo, el("h1", { text: "Shikarno" }));
 const capsEl = el("div", { class: "caps", text: t("app.starting") });
 header.append(capsEl);
@@ -152,6 +152,8 @@ const logLines: string[] = [];
 let looks: Array<{ id: string; name: string; description: string }> = [];
 let dofInfo: { justified: boolean; focus: number; strength: number; reason: string; x?: number; y?: number; zones?: Array<{ share: number; label: string; lo: number; hi: number }>; bands?: Array<{ share: number; label: string; lo: number; hi: number }> } | undefined;
 let focusMode = false;
+/** Taps on the photo pick what a layer's mask selects (the layer's Mask tab turns this on). */
+let maskPicking = false;
 /** A ring being dragged: which one, where it started, where it is now. */
 let drag: { index: number; x0: number; y0: number; x: number; y: number; moved: boolean; ox: number; oy: number } | undefined;
 /** Where the lone automatic ring was dropped, until the engine's reply makes it a point. */
@@ -265,6 +267,7 @@ function baseView(): { type: "view"; view: 0 | 1 | 2 | 6; region?: number } {
 let opening = false;
 function openFile(f: File, restore?: Params, upscaleOverride?: UpscaleMode) {
   opening = true;
+  layersPanel.stopPicking(); // taps on the next photo start out normal
   forgetPendingParams();
   // A mask shown for the previous photo's layer must not colour the new one's first previews.
   if (maskIndex !== undefined) { maskIndex = undefined; send(baseView()); }
@@ -494,6 +497,13 @@ stage.addEventListener("pointerdown", (e) => {
   }
   if (pointers.size > 2) return;
   press = { x0: e.clientX, y0: e.clientY, px0: panX, py0: panY, moved: false };
+  if (maskPicking) {
+    // A pick happens on release (a pan or a pinch picks nothing).
+    const r = imageRect();
+    const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+    if (x >= 0 && y >= 0 && x <= 1 && y <= 1) press.tap = { x, y };
+    return;
+  }
   if (focusMode) {
     const r = imageRect();
     const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
@@ -585,7 +595,7 @@ function pointerEnd(e: PointerEvent) {
   const p = press;
   press = undefined;
   if (!p || p.moved || e.type === "pointercancel") return;
-  if (p.tap) { send({ type: "focus", action: "toggle", x: p.tap.x, y: p.tap.y }); return; }
+  if (p.tap) { send(maskPicking ? { type: "pick", x: p.tap.x, y: p.tap.y } : { type: "focus", action: "toggle", x: p.tap.x, y: p.tap.y }); return; }
   if (focusMode) return;
   // Double-tap: zoom in to 2.5× there, or back out.
   const now = performance.now();
@@ -864,6 +874,12 @@ const layersPanel = createLayersPanel(dockEl, propsEl, {
   showMask: (i) => { maskIndex = i; send(baseView()); },
   develop: developEl,
   blur: blurEl,
+  pickMode: (on) => {
+    maskPicking = on;
+    if (on && focusMode) setFocusMode(false);
+    badge.textContent = on ? t("mask.pickBadge") : "";
+    badge.classList.toggle("on", on);
+  },
   leftBlur: () => {
     if (focusMode) setFocusMode(false);
     if (zoneHighlight !== undefined) setZoneHighlight(undefined);
@@ -1432,6 +1448,9 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case "palette":
       lookPanel.onPalette(m.stats);
+      break;
+    case "pick":
+      layersPanel.onPick(m.info);
       break;
     case "lookProfile":
       lookPanel.onProfile(m.profile, m.reference, m.message);

@@ -96,6 +96,11 @@ async function handle(m: ToWorker) {
     case "thumbs":
       post({ type: "thumbs", items: await engine.thumbnails(m.profiles, m.long) });
       break;
+    case "pick": {
+      const info = await engine.pickAt(m.x, m.y);
+      if (info) post({ type: "pick", info });
+      break;
+    }
     case "palette":
       post({ type: "palette", stats: await engine.palette() });
       break;

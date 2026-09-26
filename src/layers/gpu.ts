@@ -5,16 +5,19 @@
  *
  * Record: [0] type  [1] blend  [2] opacity (0 = hidden)  [3] atlas row (−1 none)
  *         [4] mask kind  [5] region (0…10 groups, 11 skin)  [6] band  [7] invert
- *         [8] lum low  [9] lum high  [10] lum softness  [11] feather  [12] density  [13] except skin
+ *         [8…10] mask values 0–2  [11] feather  [12] density  [13] except skin  [14…15] mask values 3–4
  *         [16…31] type parameters
+ *         [32…79] extra mask parts, 12 floats each (kind 0 = none):
+ *                 kind, region, band, op | values 0–3 | value 4, invert, feather, _
+ * Mask values by kind — luminance: low, high, soft; color: L, a, b, tolerance; depth: low, high, soft; object: region within depth low, high, soft.
  */
 import { GROUPS } from "../neural/scene.ts";
 import { DEPTH_BANDS, type Curves } from "../decision/params.ts";
 import { curveLUT, CURVE_LUT_SIZE } from "../render/curves.ts";
-import { BLEND_MODES, hueSatTable, LAYER_TYPES, type Layer, type LayerParams } from "./model.ts";
+import { BLEND_MODES, hueSatTable, LAYER_TYPES, MAX_MASK_PARTS, type Layer, type LayerParams, type MaskKind, type MaskOp, type MaskShape } from "./model.ts";
 import { gradientTable } from "./gradient.ts";
 
-export const RECORD = 32;
+export const RECORD = 80;
 
 /**
  * Atlas rows by the layer settings that make them: a slider drag changes one
@@ -31,7 +34,16 @@ function cachedRow(key: string, make: () => Float32Array): Float32Array {
   return r;
 }
 export const ATLAS_W = CURVE_LUT_SIZE; // 1024
-const MASK_KIND = { all: 0, region: 1, distance: 2, cell: 3, luminance: 4 } as const;
+const MASK_KIND: Record<MaskKind, number> = { all: 0, region: 1, distance: 2, cell: 3, luminance: 4, color: 5, depth: 6, object: 7 };
+const MASK_OP: Record<MaskOp, number> = { add: 0, subtract: 1, intersect: 2 };
+
+/** The five numbers a mask kind reads (see the record layout). */
+function maskValues(m: MaskShape): number[] {
+  if (m.kind === "color") return [...(m.color ?? [0.5, 0, 0]), m.tol ?? 0.08, 0];
+  if (m.kind === "depth" || m.kind === "object") return [...(m.depth ?? [0, 0.3, 0.05]), 0, 0];
+  return [m.lum?.[0] ?? 0, m.lum?.[1] ?? 1, m.lum?.[2] ?? 0.08, 0, 0];
+}
+const regionIndex = (m: MaskShape) => (m.region === "skin" ? 11 : m.region ? GROUPS.indexOf(m.region) : 0);
 
 export interface PackedLayers { records: Float32Array; count: number; atlas: Float32Array; rows: number }
 
@@ -70,11 +82,19 @@ export function packLayers(layers: Layer[], autoStrength = 1, enable?: { curves?
     r[3] = -1;
     const m = l.mask;
     r[4] = MASK_KIND[m.kind];
-    r[5] = m.region === "skin" ? 11 : m.region ? GROUPS.indexOf(m.region) : 0;
+    r[5] = regionIndex(m);
     r[6] = m.band ? DEPTH_BANDS.indexOf(m.band) : 0;
     r[7] = m.invert ? 1 : 0;
-    r[8] = m.lum?.[0] ?? 0; r[9] = m.lum?.[1] ?? 1; r[10] = m.lum?.[2] ?? 0.08;
+    const v = maskValues(m);
+    r[8] = v[0]; r[9] = v[1]; r[10] = v[2]; r[14] = v[3]; r[15] = v[4];
     r[11] = m.feather; r[12] = m.density; r[13] = m.exceptSkin ? 1 : 0;
+    (m.parts ?? []).slice(0, MAX_MASK_PARTS).forEach((part, k) => {
+      const q = r.subarray(32 + k * 12, 44 + k * 12);
+      const pv = maskValues(part);
+      q[0] = MASK_KIND[part.kind]; q[1] = regionIndex(part); q[2] = part.band ? DEPTH_BANDS.indexOf(part.band) : 0; q[3] = MASK_OP[part.op];
+      q[4] = pv[0]; q[5] = pv[1]; q[6] = pv[2]; q[7] = pv[3];
+      q[8] = pv[4]; q[9] = part.invert ? 1 : 0; q[10] = part.feather;
+    });
     const p = r.subarray(16);
     switch (l.type) {
       case "curves": {

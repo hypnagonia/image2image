@@ -19,15 +19,36 @@ export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "softLigh
   | "hue" | "saturation" | "color" | "luminosity";
 export const BLEND_MODES: BlendMode[] = ["normal", "multiply", "screen", "overlay", "softLight", "hardLight", "darken", "lighten", "hue", "saturation", "color", "luminosity"];
 
-export interface SmartMask {
-  kind: "all" | "region" | "distance" | "cell" | "luminance";
+export type MaskKind = "all" | "region" | "distance" | "cell" | "luminance" | "color" | "depth" | "object";
+
+/** What a mask part selects, and how softly (the fields its kind uses). */
+export interface MaskShape {
+  kind: MaskKind;
   region?: Region;
   band?: DepthBand;
   /** Brightness range (display-encoded luma): low, high, softness. */
   lum?: [number, number, number];
+  /** A colour (OkLab of the picked pixel before the layers) … */
+  color?: [number, number, number];
+  /** … and how far from it still counts (OkLab distance, lightness at half weight). */
+  tol?: number;
+  /** Distance range (0 = nearest … 1 = farthest): low, high, softness. "object" = `region` within it. */
+  depth?: [number, number, number];
   invert: boolean;
   /** 1 = the mask's natural soft edge, 0 = a hard edge at its 50 % point. */
   feather: number;
+}
+
+/** How an extra part combines with the mask so far (as Lightroom's add / subtract / intersect). */
+export type MaskOp = "add" | "subtract" | "intersect";
+export const MASK_OPS: MaskOp[] = ["add", "subtract", "intersect"];
+export interface MaskPart extends MaskShape { kind: Exclude<MaskKind, "all">; op: MaskOp }
+/** At most this many extra parts per layer (the GPU record has room for them). */
+export const MAX_MASK_PARTS = 4;
+
+export interface SmartMask extends MaskShape {
+  /** Extra parts, applied in order after the main one. */
+  parts?: MaskPart[];
   /** Mask strength 0…1 (multiplies opacity). */
   density: number;
   /** Leaves skin out (region and distance colour: faces keep their own correction). */
