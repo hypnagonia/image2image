@@ -57,7 +57,14 @@ body {
   -webkit-font-smoothing: antialiased;
   overscroll-behavior: none;
   -webkit-tap-highlight-color: transparent;
+  /* An app, not a page: a long press or a stray double tap must not select the
+     whole UI (iOS paints it all blue) or pop up the copy callout. */
+  -webkit-user-select: none; user-select: none;
+  -webkit-touch-callout: none;
 }
+/* Where text is meant to be typed or copied, it still can be. */
+input, textarea, pre.log { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
+input[type=range], input[type=checkbox] { -webkit-user-select: none; user-select: none; }
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
 ::selection { background: var(--text); color: var(--bg); }
