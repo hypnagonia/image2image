@@ -3,10 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
-    <meta name="theme-color" content="#ffffff" />
+    <meta name="theme-color" content="#0e0e0e" />
+    <script>
+      // Theme before first paint (no flash): dark unless chosen otherwise under ⋯ (main.ts).
+      (function () {
+        var t = "dark";
+        try { t = localStorage.getItem("theme") || "dark"; } catch (e) {}
+        if (t === "system") t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        document.documentElement.dataset.theme = t;
+        document.querySelector('meta[name="theme-color"]').content = t === "dark" ? "#0e0e0e" : "#ffffff";
+      })();
+    </script>
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <meta name="apple-mobile-web-app-title" content="Shikarno" />
     <meta name="description" content="RAW, ProRAW and HEIC development in the browser. Photos never leave the device." />
     <link rel="manifest" href="/manifest.webmanifest" />

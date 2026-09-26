@@ -40,6 +40,28 @@ const langSel = el("select", { "aria-label": t("app.language") },
 langSel.value = storedLang() ?? "";
 langSel.onchange = () => setLang((langSel.value || undefined) as Lang | undefined);
 const langPill = el("label", { class: "btn small lang", title: t("app.language") }, lang.toUpperCase(), langSel);
+// Theme: dark unless chosen otherwise; "System" follows the device. index.html applies
+// the stored choice before first paint; this keeps it in step when it changes.
+type Theme = "dark" | "light" | "system";
+const THEMES: Theme[] = ["dark", "light", "system"];
+const storedTheme = (): Theme => { try { const v = localStorage.getItem("theme"); return v === "light" || v === "system" ? v : "dark"; } catch { return "dark"; } };
+const lightQuery = matchMedia("(prefers-color-scheme: light)");
+function applyTheme(th: Theme) {
+  const eff = th === "system" ? (lightQuery.matches ? "light" : "dark") : th;
+  document.documentElement.dataset.theme = eff;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", eff === "dark" ? "#0e0e0e" : "#ffffff");
+}
+lightQuery.addEventListener("change", () => { if (storedTheme() === "system") applyTheme("system"); });
+const themeSel = el("select", { "aria-label": t("app.theme") }, ...THEMES.map((k) => el("option", { value: k, text: t(`theme.${k}`) })));
+themeSel.value = storedTheme();
+const themeText = document.createTextNode(t(`theme.${storedTheme()}`));
+themeSel.onchange = () => {
+  const th = themeSel.value as Theme;
+  try { localStorage.setItem("theme", th); } catch { /* private mode */ }
+  themeText.textContent = t(`theme.${th}`);
+  applyTheme(th);
+};
+const themePill = el("label", { class: "btn small lang", title: t("app.theme") }, themeText, themeSel);
 const stage = el("div", { class: "stage" });
 let canvas = el("canvas");
 const badge = el("div", { class: "badge" });
@@ -81,7 +103,7 @@ const moreClose = el("button", { class: "btn small icon ghost", title: t("ui.clo
 moreClose.append(icon("close"));
 moreClose.onclick = () => (moreEl.hidden = true);
 moreEl.onclick = (e) => { if (e.target === moreEl) moreEl.hidden = true; }; // tap outside closes
-moreEl.append(el("div", { class: "more-head" }, moreTabs, langPill, moreClose), moreBody);
+moreEl.append(el("div", { class: "more-head" }, moreTabs, themePill, langPill, moreClose), moreBody);
 app.append(moreEl);
 let moreId: (typeof MORE)[number] = "auto";
 function showPane(id: string) {
