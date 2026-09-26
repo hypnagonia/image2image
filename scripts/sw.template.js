@@ -1,15 +1,15 @@
 // Service worker (generated into dist/sw.js at build time, see vite.config.ts).
 // - App shell: precached per build; old builds' caches are removed on activate.
 // - Pages: network first, so a deploy shows up on the next load; cache when offline.
-// - /ort/ (ONNX Runtime, ~28 MB, fixed file names): cache first, keyed by the ORT version.
+// - /ort/ (ONNX Runtime, ~28 MB): not touched — the browser's HTTP cache keeps it
+//   (vercel.json). Caching it here held a second copy of the 28 MB response in memory
+//   while it was stored, on phones at the moment the analysis starts.
 // - /models/: not touched here — src/neural/ort.ts keeps them in its own Cache.
 // Everything served is same-origin and keeps its original headers, so the page
 // stays cross-origin isolated (COOP/COEP) when it comes from the cache.
 const VERSION = __VERSION__;
 const PRECACHE = __PRECACHE__;
-const ORT_VERSION = __ORT_VERSION__;
 const SHELL = `shell-${VERSION}`;
-const ORT = `ort-${ORT_VERSION}`;
 
 self.addEventListener("install", (e) => {
   e.waitUntil((async () => {
@@ -23,7 +23,7 @@ self.addEventListener("install", (e) => {
 self.addEventListener("activate", (e) => {
   e.waitUntil((async () => {
     for (const k of await caches.keys()) {
-      if ((k.startsWith("shell-") && k !== SHELL) || (k.startsWith("ort-") && k !== ORT)) await caches.delete(k);
+      if ((k.startsWith("shell-") && k !== SHELL) || k.startsWith("ort-")) await caches.delete(k);
     }
     await self.clients.claim();
   })());
@@ -35,7 +35,7 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
   const p = url.pathname;
-  if (p.startsWith("/models/") || p.startsWith("/__")) return;
+  if (p.startsWith("/models/") || p.startsWith("/ort/") || p.startsWith("/__")) return;
 
   if (req.mode === "navigate") {
     e.respondWith((async () => {
@@ -50,10 +50,6 @@ self.addEventListener("fetch", (e) => {
     return;
   }
 
-  if (p.startsWith("/ort/")) {
-    e.respondWith(cacheFirst(ORT, req));
-    return;
-  }
   if (p.startsWith("/assets/") || PRECACHE.includes(p)) {
     e.respondWith(cacheFirst(SHELL, req));
   }

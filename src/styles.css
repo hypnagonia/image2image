@@ -297,13 +297,16 @@ body.fs .fs-exit {
   border: 1px solid var(--text); padding: 12px; box-shadow: 4px 4px 0 var(--shadow); animation: pop .16s ease-out; }
 .lay-addsheet[hidden] { display: none; }
 .lay-addsheet .group-title { margin: 2px 4px 10px; }
-@keyframes pop { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-.lay-addgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
-.lay-addbtn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 12px 6px; border: 0;
-  background: transparent; font-size: 11.5px; text-align: center; min-height: 84px; line-height: 1.25; }
-.lay-addbtn:active { background: var(--panel-2); }
-@media (hover: hover) { .lay-addbtn:hover { background: var(--panel-2); } }
-.lay-addbtn .g { display: flex; align-items: center; justify-content: center; width: 42px; height: 42px; border: 1px solid var(--text); color: var(--text); }
+@keyframes pop { from { opacity: 0; } to { opacity: 1; } }
+/* Two equal columns of rows (icon, name): nothing depends on how long a name is,
+   so no row or icon sits higher than its neighbour. */
+.lay-addgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.lay-addbtn { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 48px; padding: 6px 8px; border: 1px solid var(--line);
+  background: transparent; font-size: 12px; line-height: 1.25; text-align: left; transition: background .12s, border-color .12s; }
+.lay-addbtn > span:last-child { min-width: 0; overflow-wrap: break-word; }
+.lay-addbtn:active { background: var(--panel-2); border-color: var(--text); }
+@media (hover: hover) { .lay-addbtn:hover { background: var(--panel-2); border-color: var(--text); } }
+.lay-addbtn .g { flex: none; display: flex; align-items: center; justify-content: center; width: 34px; height: 34px; border: 1px solid var(--text); color: var(--text); }
 .props { max-height: 34dvh; padding-top: 12px; }
 .sheet.tall .props { max-height: 68dvh; }
 .lay-head { display: flex; align-items: center; gap: 4px; margin: 0 0 12px; }

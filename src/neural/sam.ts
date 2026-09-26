@@ -47,6 +47,8 @@ export class SamSelector {
   private decoder?: Worker;
   private decoderReady?: Promise<unknown>;
   private nextId = 1;
+  /** The decoder worker is closed after this long without a tap (its memory back; reopening takes ≈ 1 s). */
+  private idle = 0;
 
   constructor(private base: string, photoW: number, photoH: number) {
     this.dims = samDims(photoW, photoH);
@@ -85,11 +87,17 @@ export class SamSelector {
     points.forEach(([x, y, l], i) => { coords[i * 2] = x * pw; coords[i * 2 + 1] = y * ph; labels[i] = l; });
     labels[points.length] = -1;
     const id = this.nextId++;
-    const r = await ask(this.decoder, { type: "decode", id, coords, labels, w: pw, h: ph }, "masks", id);
-    return { low: r.low, iou: r.iou };
+    clearTimeout(this.idle);
+    try {
+      const r = await ask(this.decoder, { type: "decode", id, coords, labels, w: pw, h: ph }, "masks", id);
+      return { low: r.low, iou: r.iou };
+    } finally {
+      this.idle = setTimeout(() => this.dispose(), 30_000) as unknown as number;
+    }
   }
 
   dispose() {
+    clearTimeout(this.idle);
     this.decoder?.terminate();
     this.decoder = undefined;
     this.decoderReady = undefined;

@@ -121,7 +121,9 @@ export class Neural {
         await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
       }
     }
-    try { await cache?.put(url, new Response(out.slice(), { headers: { "content-type": "application/octet-stream" } })); } catch { /* quota */ }
+    // The bytes themselves (no copy): a copy of a 28 MB model is exactly the kind of
+    // transient peak that ends a phone's tab.
+    try { await cache?.put(url, new Response(out as Uint8Array<ArrayBuffer>, { headers: { "content-type": "application/octet-stream" } })); } catch { /* quota */ }
     return out;
   }
 

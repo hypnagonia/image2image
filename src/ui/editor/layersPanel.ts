@@ -152,7 +152,7 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
   const addSheet = el("div", { class: "lay-addsheet", hidden: "" });
   addBtn.onclick = () => { addSheet.hidden = !addSheet.hidden; };
   addSheet.append(el("div", { class: "group-title", text: t("lay.add") }), el("div", { class: "lay-addgrid" }, ...ADD.map((type) => {
-    const b = el("button", { class: "lay-addbtn" }, el("span", { class: "g" }, icon(type, 22)), el("span", { text: typeName(type) }));
+    const b = el("button", { class: "lay-addbtn" }, el("span", { class: "g" }, icon(type, 19)), el("span", { text: typeName(type).replace("/", "/\u200b") }));
     b.onclick = () => {
       const p = ctx.params(); if (!p) return;
       const n = p.layers.filter((l) => l.type === type).length + 1;

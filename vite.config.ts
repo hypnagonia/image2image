@@ -46,11 +46,9 @@ const serviceWorker: Plugin = {
     const hash = createHash("sha256");
     for (const f of files) hash.update(f).update(readFileSync(join(dist, f)));
     const precache = ["/", ...files.filter((f) => f !== "/index.html")];
-    const ortVersion = JSON.parse(readFileSync(new URL("./node_modules/onnxruntime-web/package.json", import.meta.url), "utf8")).version;
     const sw = readFileSync(new URL("./scripts/sw.template.js", import.meta.url), "utf8")
       .replace("__VERSION__", JSON.stringify(hash.digest("hex").slice(0, 12)))
-      .replace("__PRECACHE__", JSON.stringify(precache))
-      .replace("__ORT_VERSION__", JSON.stringify(ortVersion));
+      .replace("__PRECACHE__", JSON.stringify(precache));
     writeFileSync(join(dist, "sw.js"), sw);
   },
 };

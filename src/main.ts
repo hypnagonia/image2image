@@ -17,7 +17,7 @@ import { AUTO_LAYERS_VERSION } from "./layers/auto.ts";
 import { histogramOf } from "./analysis/previewHist.ts";
 import { applyAutoCurves, type AutoCurveBands } from "./decision/autoCurves.ts";
 import { isFlat } from "./render/curves.ts";
-import { crashedWhileProcessing, forgetPendingParams, lastStage, markCompleted, markInflight, noteStage, rememberParams, rememberPhoto, restorablePhoto } from "./ui/session.ts";
+import { crashedInAnalysis, crashedWhileProcessing, forgetPendingParams, lastStage, markCompleted, markInflight, noteAnalysis, noteStage, rememberParams, rememberPhoto, restorablePhoto } from "./ui/session.ts";
 import { LANGS, LANG_NAMES, lang, setLang, storedLang, t, tOr, type Lang } from "./ui/i18n.ts";
 import { el } from "./ui/dom.ts";
 import type { AnalysisLevel } from "./neural/scene.ts";
@@ -216,14 +216,14 @@ let upscaleMode: UpscaleMode = (() => { try { const v = localStorage.getItem("up
 let currentFile: File | undefined;
 /** The page died while processing: don't retry automatically — offer a lighter reopen. */
 /** Scene analysis crashed this device before (the page died during segmentation or depth): it runs on the CPU from now on. */
-const SAFE_ANALYSIS = "safeAnalysis", IN_ANALYSIS = "inAnalysis";
+const SAFE_ANALYSIS = "safeAnalysis";
 const flag = (store: () => Storage, k: string, v?: boolean) => { try { if (v === undefined) return store().getItem(k) === "1"; if (v) store().setItem(k, "1"); else store().removeItem(k); } catch { /* private mode */ } return false; };
 /**
  * Scene analysis this device can take, stepped down for good when the tab died in it:
  * dying during depth → segmentation only; during segmentation → no analysis. Stepping
  * only goes down, so a crash can never repeat in a loop.
  */
-const ANALYSIS_LEVEL = "analysisLevel", ANALYSIS_STAGE = "analysisStage";
+const ANALYSIS_LEVEL = "analysisLevel";
 /** The step-down holds for a day and for this build only: a deploy (a fix) or time gets a fresh try. */
 function analysisLevel(): AnalysisLevel | undefined {
   try {
@@ -236,18 +236,15 @@ function analysisLevel(): AnalysisLevel | undefined {
 /** Forget what a crash taught (Try depth again). */
 function resetAnalysisLevel() { try { localStorage.removeItem(ANALYSIS_LEVEL); localStorage.removeItem(SAFE_ANALYSIS); } catch { /* private mode */ } }
 function stepDownAnalysis() {
-  let stage: string | null = null;
-  try { stage = sessionStorage.getItem(ANALYSIS_STAGE); } catch { /* private mode */ }
+  const stage = crashedInAnalysis();
   if (!stage) return;
   const next: AnalysisLevel = stage === "depth" && analysisLevel() !== "none" ? "seg" : "none";
-  try { localStorage.setItem(ANALYSIS_LEVEL, JSON.stringify({ level: next, build: __BUILD__, at: Date.now() })); sessionStorage.removeItem(ANALYSIS_STAGE); } catch { /* private mode */ }
+  try { localStorage.setItem(ANALYSIS_LEVEL, JSON.stringify({ level: next, build: __BUILD__, at: Date.now() })); } catch { /* private mode */ }
   logLines.push(`the tab stopped during ${stage}: scene analysis on this device is now "${next}"`);
 }
-function noteAnalysisStage(stage?: string) {
-  try { if (stage === "segmentation" || stage === "depth") sessionStorage.setItem(ANALYSIS_STAGE, stage); else sessionStorage.removeItem(ANALYSIS_STAGE); } catch { /* private mode */ }
-}
+const noteAnalysisStage = (stage?: string) => noteAnalysis(stage);
 function offerSafeReopen(file: File, saved?: Params) {
-  if (flag(() => sessionStorage, IN_ANALYSIS)) flag(() => localStorage, SAFE_ANALYSIS, true);
+  if (crashedInAnalysis()) flag(() => localStorage, SAFE_ANALYSIS, true);
   stepDownAnalysis();
   const box = el("div", { class: "empty" },
     el("h2", { text: t("reopen.title") }),
@@ -1334,7 +1331,6 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       setProgress(stageText(m.stage, m.detail), m.frac);
       noteStage(stageText(m.stage, m.detail));
       // Only a crash *inside* segmentation or depth marks the device for CPU analysis.
-      flag(() => sessionStorage, IN_ANALYSIS, m.stage === "segmentation" || m.stage === "depth");
       noteAnalysisStage(m.stage);
       break;
     case "preview":
@@ -1347,7 +1343,6 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       busy = false;
       break;
     case "analysis":
-      flag(() => sessionStorage, IN_ANALYSIS, false);
       noteAnalysisStage();
       opening = false;
       restored = false;
@@ -1480,7 +1475,6 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       lookPanel.onProfile(m.profile, m.reference, m.message);
       break;
     case "error":
-      flag(() => sessionStorage, IN_ANALYSIS, false); // a failure, not a crash of the analysis
       noteAnalysisStage();
       opening = false;
       showError(m.message);
@@ -1501,7 +1495,6 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
 // The worker itself failed: say so and let the page be used again (no endless progress).
 worker.onerror = (e) => {
   capsEl.textContent = t("err.worker", { msg: e.message });
-  flag(() => sessionStorage, IN_ANALYSIS, false);
   noteAnalysisStage();
   opening = false;
   busy = false;
