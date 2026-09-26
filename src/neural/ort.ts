@@ -34,6 +34,9 @@ export const MODELS: Record<ModelSpec["id"], ModelSpec> = {
 
 const CACHE = "image-improver2-models-v1";
 
+/** A download that retrying will not fix (wrong URL, a web page instead of the model). */
+class ModelError extends Error {}
+
 export class Neural {
   readonly backend: Backend;
   readonly f16: boolean;
@@ -101,9 +104,30 @@ export class Neural {
       if (plausible(b.byteLength)) return b;
       await cache?.delete(url);
     }
+    // Mobile networks drop connections (also mid-download): the whole download is
+    // retried a few times with a growing pause before giving up.
+    let out: Uint8Array | undefined;
+    for (let attempt = 0; !out; attempt++) {
+      try {
+        out = await this.download(url, spec);
+      } catch (e) {
+        const permanent = e instanceof ModelError;
+        if (permanent || attempt >= 3) throw e;
+        await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
+      }
+    }
+    try { await cache?.put(url, new Response(out.slice(), { headers: { "content-type": "application/octet-stream" } })); } catch { /* quota */ }
+    return out;
+  }
+
+  /** One download attempt. A wrong answer from the server (a page, a 404) is a ModelError: no retry. */
+  private async download(url: string, spec: ModelSpec): Promise<Uint8Array> {
     const res = await fetch(url);
-    if (!res.ok || !res.body) throw new Error(`Could not download ${spec.id} model (${res.status})`);
-    if ((res.headers.get("content-type") ?? "").includes("text/html")) throw new Error(`Could not download ${spec.id} model (got a web page instead)`);
+    if (!res.ok || !res.body) {
+      if (res.status >= 500) throw new Error(`Could not download ${spec.id} model (${res.status})`);
+      throw new ModelError(`Could not download ${spec.id} model (${res.status})`);
+    }
+    if ((res.headers.get("content-type") ?? "").includes("text/html")) throw new ModelError(`Could not download ${spec.id} model (got a web page instead)`);
     const total = Number(res.headers.get("content-length")) || spec.bytes;
     const reader = res.body.getReader();
     const chunks: Uint8Array[] = [];
@@ -118,8 +142,7 @@ export class Neural {
     const out = new Uint8Array(loaded);
     let o = 0;
     for (const c of chunks) { out.set(c, o); o += c.byteLength; }
-    if (!plausible(loaded)) throw new Error(`Could not download ${spec.id} model (${loaded} bytes)`);
-    try { await cache?.put(url, new Response(out.slice(), { headers: { "content-type": "application/octet-stream" } })); } catch { /* quota */ }
+    if (loaded < spec.bytes * 0.3) throw new Error(`Could not download ${spec.id} model (${loaded} bytes)`);
     return out;
   }
 

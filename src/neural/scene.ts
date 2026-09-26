@@ -218,6 +218,23 @@ async function withSession<T>(neural: Neural, spec: Parameters<Neural["session"]
  * crashed during analysis on this device).
  */
 /**
+ * No analysis at all (it could not run on this device): everything "other", one
+ * distance. The photo still opens and edits work; only the automatic region and
+ * depth refinements are missing.
+ */
+export function neutralScene(img: AnalysisImage, why: string): SceneMaps {
+  const lw = Math.max(1, Math.floor(img.width / 4)), lh = Math.max(1, Math.floor(img.height / 4));
+  const probs = new Float32Array(GROUPS.length * lw * lh);
+  probs.fill(1, GROUPS.indexOf("other") * lw * lh, (GROUPS.indexOf("other") + 1) * lw * lh);
+  const coverage = Object.fromEntries(GROUPS.map((g) => [g, g === "other" ? 1 : 0])) as Record<Group, number>;
+  return {
+    seg: { width: lw, height: lh, probs },
+    depth: { width: 1, height: 1, dist: new Float32Array(1).fill(0.5), raw: new Float32Array(1), flat: true },
+    coverage, timings: {}, log: [`Scene analysis unavailable (${why}): the photo opens without automatic region and depth refinements`],
+  };
+}
+
+/**
  * analyseScene in a worker of its own (sceneWorker.ts), terminated when it answers:
  * the model runtime's memory is returned at once. `onStage` gets its progress.
  */

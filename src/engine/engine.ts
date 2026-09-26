@@ -21,7 +21,7 @@ import { decodeFile } from "../decode/decode.ts";
 import type { DecodedImage } from "../decode/types.ts";
 import { develop, type WorkingImage } from "../raw/develop.ts";
 import { Neural, MODELS } from "../neural/ort.ts";
-import { analyseScene, analyseSceneIsolated, applyAppleMattes, type SceneMaps } from "../neural/scene.ts";
+import { analyseScene, analyseSceneIsolated, neutralScene, applyAppleMattes, type SceneMaps } from "../neural/scene.ts";
 import { denoiseGPU } from "../restore/denoise.ts";
 import { UpscaleJob, probeUpscaler } from "../restore/upscale.ts";
 import { decideUpscale, measureQuality, type ImageQualityReport, type UpscaleMode } from "../analysis/quality.ts";
@@ -248,9 +248,27 @@ export class Engine {
     this.s = undefined;
   }
 
+  /**
+   * Opens a photo. Everything an open allocates is registered; if it does not get
+   * as far as becoming the session (a newer open replaced it, or it failed), all of
+   * it is freed here — a stopped 48 MP open otherwise kept ≈ 600 MB (the decoder
+   * worker, the working image, masks) and the next attempt started that far behind.
+   */
   async open(file: File, resolution: "auto" | "full" | "half", autoExposure = false, autoDof = false, upscaleMode: UpscaleMode = "auto", safeAnalysis = false) {
+    const cleanup: Array<() => void> = [];
+    let committed = false;
+    try {
+      await this.openInner(file, resolution, autoExposure, autoDof, upscaleMode, safeAnalysis, (f) => cleanup.push(f), () => { committed = true; });
+    } finally {
+      if (!committed) for (const f of cleanup.reverse()) { try { f(); } catch { /* already freed */ } }
+    }
+  }
+
+  private async openInner(file: File, resolution: "auto" | "full" | "half", autoExposure: boolean, autoDof: boolean, upscaleMode: UpscaleMode, safeAnalysis: boolean,
+    track: (free: () => void) => void, commit: () => void) {
     const gen = ++this.generation;
     this.closeSession();
+    this.gpu.flushStaging(); // the previous photo's readback sizes
     const P = new Profiler(this.gpu);
     this.profiler = P;
     const gpu = this.gpu;
@@ -258,6 +276,7 @@ export class Engine {
     // The file bytes are only needed by the decoder (which copies them): no
     // reference is kept here, so 30–80 MB can be collected during development.
     const decoded = await P.time("decode", async () => decodeFile(new Uint8Array(await file.arrayBuffer()), file.name, file.type), (d) => `${d.format} via ${d.source.kind === "rgb" ? d.source.decoder : "LibRaw"}`);
+    track(() => decoded.close());
     for (const [k, v] of Object.entries(decoded.timings)) this.log(`  ${k}: ${v.toFixed(0)} ms`);
 
     // Working resolution: iPhone memory decides, not desktop assumptions.
@@ -270,6 +289,7 @@ export class Engine {
     while (Math.max(src.width, src.height) / factor > maxDim) factor++;
     this.progress("develop", `${src.width}×${src.height}${factor > 1 ? ` → 1/${factor}` : ""}`);
     const work = await P.time("raw development", () => develop(gpu, decoded, { factor }), (w) => `${w.width}×${w.height}`);
+    track(() => gpu.release(work.tex));
     work.log.forEach((l) => this.log(l));
     // The sensor data now lives on the GPU; free the decoder's wasm heap. The
     // raw view points into that heap, so it must be dropped as well — otherwise
@@ -308,9 +328,22 @@ export class Engine {
     // once instead of staying for the tab's life. Elsewhere: WebGPU, in this worker.
     const isolated = isMobile() || safeAnalysis;
     const inHere = () => analyseScene(this.neural, { rgba: analysisRgba, width: gw, height: gh }, (s) => this.progress(s), true, !isMobile() /* detail tiles: 4 more depth passes, too heavy for phones */, safeAnalysis || isMobile() ? "wasm" : this.neural.backend);
-    const scene = await P.time("segmentation + depth", () => isolated
-      ? analyseSceneIsolated({ rgba: analysisRgba, width: gw, height: gh }, this.base, !isMobile(), (s) => this.progress(s)).catch((e) => { this.log(`analysis worker failed (${e instanceof Error ? e.message : e}); analysing here`); return inHere(); })
-      : inHere(), (s) => Object.entries(s.timings).map(([k, v]) => `${k} ${v.toFixed(0)}ms`).join(", "));
+    const img = { rgba: analysisRgba, width: gw, height: gh };
+    const inWorker = () => analyseSceneIsolated(img, this.base, !isMobile(), (s) => this.progress(s));
+    const scene = await P.time("segmentation + depth", async () => {
+      if (!isolated) return inHere();
+      try { return await inWorker(); }
+      catch (e) {
+        this.log(`analysis worker failed (${e instanceof Error ? e.message : e}); trying once more`);
+        try { return await inWorker(); }
+        catch (e2) {
+          // On a phone a second failure is memory: analysing in this worker would keep
+          // the model runtime's memory for good. Open without the analysis instead.
+          if (isMobile()) return neutralScene(img, e2 instanceof Error ? e2.message : String(e2));
+          return inHere();
+        }
+      }
+    }, (s) => Object.entries(s.timings).map(([k, v]) => `${k} ${v.toFixed(0)}ms`).join(", "));
     if (import.meta.env.DEV) {
       // Dev only: dump the analysis image and distance map (PGM) for offline inspection.
       const pgm = (w: number, h: number, v: (i: number) => number) => {
@@ -321,8 +354,8 @@ export class Engine {
         return out;
       };
       const d = scene.depth;
-      void fetch("/__debug/save?name=depth.pgm", { method: "POST", body: pgm(d.width, d.height, (k) => d.dist[k]) });
-      void fetch("/__debug/save?name=analysis.pgm", { method: "POST", body: pgm(gw, gh, (k) => analysisRgba[k * 4 + 1]) });
+      fetch("/__debug/save?name=depth.pgm", { method: "POST", body: pgm(d.width, d.height, (k) => d.dist[k]) }).catch(() => undefined);
+      fetch("/__debug/save?name=analysis.pgm", { method: "POST", body: pgm(gw, gh, (k) => analysisRgba[k * 4 + 1]) }).catch(() => undefined);
     }
     // A ProRAW file carries Apple's own sky / skin mattes: sharper edges than
     // the network can produce on a reduced image, and already computed.
@@ -333,15 +366,18 @@ export class Engine {
     let skinTex: GPUTexture | undefined;
     if (skinMatte) {
       skinTex = gpu.tex("apple.skin", skinMatte.width, skinMatte.height, "r8unorm", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
+      const t = skinTex;
+      track(() => gpu.release(t));
       gpu.device.queue.writeTexture({ texture: skinTex }, skinMatte.data as Uint8Array<ArrayBuffer>, { bytesPerRow: skinMatte.width, rowsPerImage: skinMatte.height }, { width: skinMatte.width, height: skinMatte.height });
       this.log(`Apple skin matte ${skinMatte.width}×${skinMatte.height} drives the look's skin protection`);
     }
     scene.log.forEach((l) => this.log(l));
-    if (gen !== this.generation) { gpu.release(skinTex); return; }
+    if (gen !== this.generation) return; // (freed by open())
 
     // --- refinement ---------------------------------------------------------------
     this.progress("refine masks");
     const maps = await P.time("mask/depth refinement", () => refine(gpu, work.tex, work.width, work.height, gain, scene), (m) => `guide ${m.w}×${m.h}, r=${m.params.maskRadius}`);
+    track(() => releaseRefined(gpu, maps));
 
     // --- statistics -------------------------------------------------------------------
     this.progress("statistics");
@@ -408,6 +444,7 @@ export class Engine {
     const s: Session = { name: file.name, decoded, work, denoised: work.tex, gain, scene, maps, report, decision, params, lightLinear: A, scale: 1, skin: skinTex };
     if (reference && autoExposure) s.calib = { ref: reference.q, rounds: 0, black: false };
     this.s = s;
+    commit(); // from here closeSession() frees it
     await this.cacheDistance();
     // Automatic focus: subject from refined depth + segmentation + composition.
     const af = autoFocus(s.distCPU!, scene.seg, { blur: { bw: report.blocks.bw, bh: report.blocks.bh, data: report.blur.perBlock }, longPx: Math.max(work.width, work.height) });
