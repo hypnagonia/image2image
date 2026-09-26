@@ -14,6 +14,7 @@ struct U {
   zc: array<vec4<f32>, 2>,   // 4 inner depth-zone boundaries (zc[0]) — zone mode when f.y = 1
   zv: array<vec4<f32>, 2>,   // blur 0..1 per zone
   fociHi: array<vec4<f32>, 2>, // … and the far end (a point on a flat spot: both the same)
+  b: vec4<f32>,        // Blur layers' radius px at amount 1, depth of field on (1) / off (0), _, _
 }
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var src: texture_2d<f32>;       // mip chain of the sharpened image (linear P3)
@@ -66,8 +67,12 @@ fn coc(d: f32) -> f32 {
 @compute @workgroup_size(8, 8)
 fn coc_pass(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= u.size.x || id.y >= u.size.y) { return; }
-  let d = textureLoad(distt, vec2<i32>(id.xy), 0).r;
-  textureStore(cocdst, vec2<i32>(id.xy), vec4<f32>(d, coc(d), 0.0, 0.0));
+  // Distance in 0…1, Blur layers' amount packed above it (render_tone.wgsl).
+  let v = textureLoad(distt, vec2<i32>(id.xy), 0).r;
+  let k = floor(v / 2.0);
+  let d = v - 2.0 * k;
+  let depth_coc = select(0.0, coc(d), u.b.y > 0.5);
+  textureStore(cocdst, vec2<i32>(id.xy), vec4<f32>(d, max(depth_coc, (k / 1000.0) * u.b.x), 0.0, 0.0));
 }
 
 fn coc_at(px: vec2<f32>) -> vec2<f32> {

@@ -355,6 +355,17 @@ header.top .btn.icon { color: var(--text); }
 .grad-color { width: 60px; height: 60px; margin: -10px; border: 0; padding: 0; background: none; cursor: pointer; }
 .grad-hex { width: 100px; font-variant-numeric: tabular-nums; text-transform: uppercase; }
 .grad-spacer { flex: 1; }
+/* Palette groups and harmony rules: chip rows that scroll sideways on phones instead of wrapping into a wall. */
+.grad-groups, .grad-rules { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0 -2px 8px; padding: 0 2px; }
+.grad-groups::-webkit-scrollbar, .grad-rules::-webkit-scrollbar { display: none; }
+.grad-groups .chip, .grad-rules .chip { flex: none; }
+/* Harmony: base colour, the generated palette (tap applies), Vary. */
+.grad-harmony-preview { flex: 1; min-width: 0; border: 0; background: none; padding: 0; display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; }
+.grad-harmony-preview .grad-swatch { height: 40px; }
+.grad-harmony-preview:active .grad-swatch { transform: scale(.98); }
+.grad-harmony-foot { display: flex; align-items: flex-start; gap: 10px; margin: 6px 0 4px; }
+.grad-harmony-foot .grad-hint { flex: 1; margin: 0; }
+.grad-harmony-foot .btn { flex: none; }
 
 /* More: info, history, export, upscale, debug — a full sheet on phones, a panel on desktops. */
 .more { position: fixed; inset: 0; z-index: 20; background: var(--scrim); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); display: flex; flex-direction: column; justify-content: flex-end; }

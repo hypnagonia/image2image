@@ -11,15 +11,20 @@
 import type { CurvePoint, Curves, DepthBand, Region } from "../decision/params.ts";
 import { presetGradient, type Gradient } from "./gradient.ts";
 
-export type LayerType = "curves" | "hueSat" | "brightContrast" | "exposure" | "basic" | "gradientMap" | "gradientFill";
+export type LayerType = "curves" | "hueSat" | "brightContrast" | "exposure" | "basic" | "gradientMap" | "gradientFill" | "blur";
 /** GPU type index = position here (layers.wgsl). */
-export const LAYER_TYPES: LayerType[] = ["curves", "hueSat", "brightContrast", "exposure", "basic", "gradientMap", "gradientFill"];
+export const LAYER_TYPES: LayerType[] = ["curves", "hueSat", "brightContrast", "exposure", "basic", "gradientMap", "gradientFill", "blur"];
 
 export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "softLight" | "hardLight" | "darken" | "lighten"
   | "hue" | "saturation" | "color" | "luminosity";
 export const BLEND_MODES: BlendMode[] = ["normal", "multiply", "screen", "overlay", "softLight", "hardLight", "darken", "lighten", "hue", "saturation", "color", "luminosity"];
 
-export type MaskKind = "all" | "region" | "distance" | "cell" | "luminance" | "color" | "depth" | "object";
+export type MaskKind = "all" | "region" | "distance" | "cell" | "luminance" | "color" | "depth" | "object" | "select";
+
+/** A tap in a selection (tap-to-select, src/neural/sam.ts): x, y (0…1 of the photo) and 1 = part of it, 0 = not. */
+export type SelectPoint = [number, number, 0 | 1];
+/** A selection's identity: its taps and level (the engine caches the mask under it). */
+export const selectKey = (m: MaskShape): string => JSON.stringify([m.points ?? [], m.level ?? "auto"]);
 
 /** What a mask part selects, and how softly (the fields its kind uses). */
 export interface MaskShape {
@@ -34,6 +39,9 @@ export interface MaskShape {
   tol?: number;
   /** Distance range (0 = nearest … 1 = farthest): low, high, softness. "object" = `region` within it. */
   depth?: [number, number, number];
+  /** Selection: the tap that made it, and which of SAM's readings (0 whole, 1 part, 2 detail; none = SAM's most confident). */
+  points?: SelectPoint[];
+  level?: 0 | 1 | 2;
   invert: boolean;
   /** 1 = the mask's natural soft edge, 0 = a hard edge at its 50 % point. */
   feather: number;
@@ -77,6 +85,12 @@ export interface LayerParams {
    * `scale` 1 = the gradient spans the picture.
    */
   gradientFill: { gradient: Gradient; style: "linear" | "radial"; angle: number; scale: number; x: number; y: number; reverse: boolean; preset?: string };
+  /**
+   * Blur: a lens-like blur of what the mask covers (the depth-of-field gather, so
+   * nearer, sharper things keep clean edges). `amount` 1 = a radius of 3 % of the
+   * picture's long side.
+   */
+  blur: { amount: number };
 }
 
 export interface Layer<T extends LayerType = LayerType> {
@@ -106,6 +120,7 @@ export function defaultParams<T extends LayerType>(type: T): LayerParams[T] {
     gradientMap: { gradient: presetGradient("tealGold"), reverse: false, preset: "tealGold" },
     // Foreground to transparent from the top: a graduated filter (darker sky).
     gradientFill: { gradient: { stops: [{ pos: 0, color: "#101820", alpha: 0.75 }, { pos: 0.55, color: "#101820", alpha: 0 }] }, style: "linear", angle: 90, scale: 1, x: 0.5, y: 0.5, reverse: false },
+    blur: { amount: 0.4 },
   };
   return structuredClone(d[type]) as LayerParams[T];
 }
@@ -131,6 +146,7 @@ export function isNeutralLayer(l: Layer): boolean {
     case "brightContrast": { const b = l.params as LayerParams["brightContrast"]; return Math.abs(b.brightness) < 1e-4 && Math.abs(b.contrast) < 1e-4; }
     case "exposure": { const e = l.params as LayerParams["exposure"]; return Math.abs(e.exposure) < 1e-4 && Math.abs(e.offset) < 1e-4 && Math.abs(e.gamma - 1) < 1e-4; }
     case "basic": { const b = l.params as LayerParams["basic"]; return Object.values(b).every((v) => Math.abs(v) < 1e-4); }
+    case "blur": return (l.params as LayerParams["blur"]).amount < 1e-4;
   }
   return false;
 }

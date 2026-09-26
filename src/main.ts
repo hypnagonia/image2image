@@ -21,6 +21,7 @@ import { crashedWhileProcessing, forgetPendingParams, lastStage, markCompleted, 
 import { LANGS, LANG_NAMES, lang, setLang, storedLang, t, tOr, type Lang } from "./ui/i18n.ts";
 import { el } from "./ui/dom.ts";
 import type { AnalysisLevel } from "./neural/scene.ts";
+import type { ColorStats } from "./looks/palette.ts";
 import { installTouchSliders } from "./ui/touchSlider.ts";
 import { makeLayer } from "./layers/model.ts";
 
@@ -154,6 +155,8 @@ let dofInfo: { justified: boolean; focus: number; strength: number; reason: stri
 let focusMode = false;
 /** Taps on the photo pick what a layer's mask selects (the layer's Mask tab turns this on). */
 let maskPicking = false;
+/** Callers waiting for the photo's colours (the engine's next "palette" answer). */
+const paletteWaiters: Array<(s: ColorStats) => void> = [];
 /** A ring being dragged: which one, where it started, where it is now. */
 let drag: { index: number; x0: number; y0: number; x: number; y: number; moved: boolean; ox: number; oy: number } | undefined;
 /** Where the lone automatic ring was dropped, until the engine's reply makes it a point. */
@@ -221,15 +224,23 @@ const flag = (store: () => Storage, k: string, v?: boolean) => { try { if (v ===
  * only goes down, so a crash can never repeat in a loop.
  */
 const ANALYSIS_LEVEL = "analysisLevel", ANALYSIS_STAGE = "analysisStage";
+/** The step-down holds for a day and for this build only: a deploy (a fix) or time gets a fresh try. */
 function analysisLevel(): AnalysisLevel | undefined {
-  try { const v = localStorage.getItem(ANALYSIS_LEVEL); return v === "seg" || v === "none" ? v : undefined; } catch { return undefined; }
+  try {
+    const raw = localStorage.getItem(ANALYSIS_LEVEL);
+    const v = raw?.startsWith("{") ? (JSON.parse(raw) as { level: string; build: string; at: number }) : undefined;
+    if (!v || v.build !== __BUILD__ || Date.now() - v.at > 864e5) { if (raw) localStorage.removeItem(ANALYSIS_LEVEL); return undefined; }
+    return v.level === "seg" || v.level === "none" ? v.level : undefined;
+  } catch { return undefined; }
 }
+/** Forget what a crash taught (Try depth again). */
+function resetAnalysisLevel() { try { localStorage.removeItem(ANALYSIS_LEVEL); localStorage.removeItem(SAFE_ANALYSIS); } catch { /* private mode */ } }
 function stepDownAnalysis() {
   let stage: string | null = null;
   try { stage = sessionStorage.getItem(ANALYSIS_STAGE); } catch { /* private mode */ }
   if (!stage) return;
   const next: AnalysisLevel = stage === "depth" && analysisLevel() !== "none" ? "seg" : "none";
-  try { localStorage.setItem(ANALYSIS_LEVEL, next); sessionStorage.removeItem(ANALYSIS_STAGE); } catch { /* private mode */ }
+  try { localStorage.setItem(ANALYSIS_LEVEL, JSON.stringify({ level: next, build: __BUILD__, at: Date.now() })); sessionStorage.removeItem(ANALYSIS_STAGE); } catch { /* private mode */ }
   logLines.push(`the tab stopped during ${stage}: scene analysis on this device is now "${next}"`);
 }
 function noteAnalysisStage(stage?: string) {
@@ -874,6 +885,10 @@ const layersPanel = createLayersPanel(dockEl, propsEl, {
   showMask: (i) => { maskIndex = i; send(baseView()); },
   develop: developEl,
   blur: blurEl,
+  photoColors: () => new Promise<string[]>((resolve) => {
+    paletteWaiters.push((s) => resolve(s.palette.map((w) => w.hex)));
+    send({ type: "palette" });
+  }),
   pickMode: (on) => {
     maskPicking = on;
     if (on && focusMode) setFocusMode(false);
@@ -944,6 +959,12 @@ autoFocusBtn.onclick = () => {
   renderRings();
 };
 const dofReason = el("p", { class: "muted" });
+// This photo opened without a depth map (analysis failed, or a crash taught this device to skip it).
+const noDepthText = el("p", { class: "muted" });
+const retryDepth = el("button", { class: "btn small", text: t("dof.retryDepth") });
+retryDepth.onclick = () => { resetAnalysisLevel(); if (currentFile) openFile(currentFile, params ? structuredClone(params) : undefined); };
+const noDepthBox = el("div", { class: "no-depth", hidden: "" }, el("div", { class: "group-title", text: t("dof.noDepth") }), noDepthText, el("div", { class: "actions" }, retryDepth));
+depthPane.append(noDepthBox);
 depthPane.append(
   el("label", { class: "toggle" }, t("dof.autoToggle"), autoDofToggle),
   el("label", { class: "toggle" }, t("dof.toggle"), dofToggle),
@@ -1338,6 +1359,8 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       exposureSuggestion = m.exposureSuggestion;
       aeNote.textContent = exposureSuggestion ? t("adj.suggests", { ev: `${exposureSuggestion > 0 ? "+" : ""}${exposureSuggestion.toFixed(2)}` }) : t("adj.noCorrection");
       // The reason itself comes from the decision engine and stays in English.
+      noDepthBox.hidden = !m.noDepth;
+      noDepthText.textContent = m.noDepth ?? "";
       dofReason.textContent = t("dof.reason", { d: m.dof.focus.toFixed(2) }) + (m.dof.justified ? t("dof.suggested") : t("dof.notSuggested")) + m.dof.reason;
       syncControls();
       renderAuto();
@@ -1448,6 +1471,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case "palette":
       lookPanel.onPalette(m.stats);
+      for (const f of paletteWaiters.splice(0)) f(m.stats);
       break;
     case "pick":
       layersPanel.onPick(m.info);

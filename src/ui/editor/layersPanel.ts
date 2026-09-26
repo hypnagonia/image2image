@@ -42,13 +42,15 @@ type Ctx = {
   leftBlur?: () => void;
   /** Taps on the photo pick what to mask (on) or do what they normally do (off). */
   pickMode: (on: boolean) => void;
+  /** The photo's main colours (hex), for "From photo" in gradients. */
+  photoColors?: () => Promise<string[]>;
 };
 
 /** Layer types in the ＋ sheet (each type's icon has the type's name). */
 /** The cards that are not layers: always there, at the bottom of the stack. */
 type Fixed = "develop" | "blur";
 
-const ADD: LayerType[] = ["curves", "hueSat", "basic", "gradientMap", "gradientFill", "brightContrast", "exposure"];
+const ADD: LayerType[] = ["curves", "hueSat", "basic", "blur", "gradientMap", "gradientFill", "brightContrast", "exposure"];
 
 
 /** A layer's name as shown: automatic layers in the interface language (unless renamed). */
@@ -233,19 +235,24 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
       }
       case "gradientMap": {
         const g = l.params as LayerParams["gradientMap"];
-        return [createGradientEditor(() => g, (label) => edit(label), slider),
+        return [createGradientEditor(() => g, (label) => edit(label), slider, { photoColors: ctx.photoColors }),
           el("div", { class: "muted grad-tip", text: t("grad.mapTip") })];
       }
       case "gradientFill": {
         const g = l.params as LayerParams["gradientFill"];
         const pctv = (v: number) => `${Math.round(v * 100)}%`;
-        return [createGradientEditor(() => g, (label) => edit(label), slider),
+        return [createGradientEditor(() => g, (label) => edit(label), slider, { photoColors: ctx.photoColors }),
           el("div", { class: "group-title", text: t("grad.shape") }),
           chips([{ id: "linear", label: t("grad.linear") }, { id: "radial", label: t("grad.radial") }] as const, g.style, (v) => { g.style = v; edit(); renderProps(); }),
           ...(g.style === "linear" ? [slider(t("grad.angle"), -180, 180, 1, () => g.angle, (v) => (g.angle = v), (v) => `${Math.round(v)}°`, 90)] : []),
           slider(t("grad.scale"), 0.1, 2, 0.01, () => g.scale, (v) => (g.scale = v), pctv, 1),
           slider(t("grad.x"), 0, 1, 0.01, () => g.x, (v) => (g.x = v), pctv, 0.5),
           slider(t("grad.y"), 0, 1, 0.01, () => g.y, (v) => (g.y = v), pctv, 0.5)];
+      }
+      case "blur": {
+        const b = l.params as LayerParams["blur"];
+        return [slider(t("blurl.amount"), 0, 1, 0.01, () => b.amount, (v) => (b.amount = v), (v) => `${Math.round(v * 100)}%`, 0.4),
+          el("p", { class: "muted", text: t("blurl.hint") })];
       }
       case "brightContrast": {
         const b = l.params as LayerParams["brightContrast"];
@@ -330,7 +337,8 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
   function shapeFromPick(info: PickInfo, as: typeof pickAs): Partial<MaskShape> {
     if (as === "color") return { kind: "color", color: info.color, tol: 0.08 };
     if (as === "depth") return { kind: "depth", depth: [Math.max(0, info.dist - 0.06), Math.min(1, info.dist + 0.06), 0.04] };
-    return { kind: "object", region: info.region, depth: info.range[0] <= 0 && info.range[1] >= 1 ? [0, 1, 0.03] : [Math.max(0, info.range[0] - 0.02), Math.min(1, info.range[1] + 0.02), 0.03] };
+    // This object: a selection (tap-to-select) — one person of four, not every person.
+    return { kind: "select", points: [[info.x, info.y, 1]], level: undefined };
   }
   function applyPick(l: Layer, info: PickInfo, target: "main" | number) {
     const shape = shapeFromPick(info, pickAs);
@@ -385,6 +393,11 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
       out.push(slider(t("mask.high"), 0, 1, 0.01, () => d[1], (v) => (d[1] = v), (v) => String(Math.round(v * 100)), 0.3));
       out.push(slider(t("mask.soft"), 0.005, 0.2, 0.005, () => d[2], (v) => (d[2] = v), (v) => String(Math.round(v * 100)), 0.05));
     }
+    if (sh.kind === "select") {
+      // SAM's readings of the tap: its own most confident one, or whole / part / detail (largest first).
+      out.push(chips<"auto" | "0" | "1" | "2">([{ id: "auto", label: t("mask.level.auto") }, { id: "0", label: t("mask.level.0") }, { id: "1", label: t("mask.level.1") }, { id: "2", label: t("mask.level.2") }],
+        sh.level === undefined ? "auto" : (String(sh.level) as "0"), (v) => set({ level: v === "auto" ? undefined : (+v as 0 | 1 | 2) })));
+    }
     if (sh.kind === "color") {
       const c = sh.color ?? [0.6, 0, 0];
       // The picked colour as a swatch (OkLab → sRGB), so it is clear what is matched.
@@ -422,7 +435,8 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
 
     // The main mask.
     out.push(el("div", { class: "group-title", text: t("mask.main") }));
-    out.push(...shapeFields(m, ["all", "object", "region", "color", "depth", "distance", "cell", "luminance"], set));
+    const withSel = (ks: MaskKind[], sh: MaskShape): MaskKind[] => (sh.kind === "select" ? ["select", ...ks] : ks);
+    out.push(...shapeFields(m, withSel(["all", "object", "region", "color", "depth", "distance", "cell", "luminance"], m), set));
 
     // Extra parts: each added, subtracted or intersected, in order.
     parts.forEach((part, i) => {
@@ -431,7 +445,7 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
       remove.onclick = () => { parts.splice(i, 1); if (lastPick?.layer === l.id) lastPick = undefined; changed(); };
       out.push(el("div", { class: "group-title mask-part-title" }, el("span", { text: t("mask.part", { n: i + 1 }) }), remove));
       out.push(chips<MaskOp>(MASK_OPS.map((o) => ({ id: o, label: t(`mask.op.${o}`) })), part.op, (o) => setPart({ op: o } as Partial<MaskShape>)));
-      out.push(...shapeFields(part, ["object", "region", "color", "depth", "distance", "cell", "luminance"], setPart));
+      out.push(...shapeFields(part, withSel(["object", "region", "color", "depth", "distance", "cell", "luminance"], part), setPart));
     });
     if (parts.length < MAX_MASK_PARTS) {
       const add = el("button", { class: "btn small", text: t("mask.addPart") });

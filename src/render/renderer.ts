@@ -12,7 +12,8 @@
 import { Gpu, Uniforms } from "../gpu/gpu.ts";
 import toneWgsl from "../gpu/shaders/render_tone.wgsl?raw";
 import layersWgsl from "../gpu/shaders/layers.wgsl?raw";
-import { ATLAS_W, packLayers, RECORD } from "../layers/gpu.ts";
+import { ATLAS_W, hasBlurLayers, packLayers, RECORD } from "../layers/gpu.ts";
+import type { MaskShape } from "../layers/model.ts";
 import detailWgsl from "../gpu/shaders/render_detail.wgsl?raw";
 import dofWgsl from "../gpu/shaders/render_dof.wgsl?raw";
 import outputWgsl from "../gpu/shaders/output.wgsl?raw";
@@ -87,6 +88,17 @@ export class Renderer {
   private hueTab?: GPUTexture;
   private skinDummy?: GPUTexture;
 
+  /**
+   * Tap-to-select masks (set by the engine): an r8 texture array at the guide
+   * resolution, the layer of each selection, and a version that changes with them.
+   */
+  selection?: { tex: GPUTexture; slotOf: (m: MaskShape) => number; version: number };
+  private selDummy?: GPUTexture;
+  private noSelection(): GPUTexture {
+    this.selDummy ??= this.gpu.tex("selection.none", 1, 1, "r8unorm", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST, "2d", 1);
+    return this.selDummy;
+  }
+
   /** A 1×1 "no skin here" texture for photographs without an Apple matte. */
   private noSkin(): GPUTexture {
     this.skinDummy ??= this.gpu.tex("skin.none", 1, 1, "r8unorm", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST);
@@ -112,10 +124,10 @@ export class Renderer {
       gpu.device.queue.writeTexture({ texture: this.toneLut }, floatsToHalves(toneCurveLUT(p.tone, hdrStops)), { bytesPerRow: TONE_LUT_SIZE * 8 }, { width: TONE_LUT_SIZE, height: 1 });
     }
     // Adjustment layers: records + tables, re-uploaded only when they change.
-    const layKey = JSON.stringify([p.layers ?? [], p.autoCurves ?? 1, p.enable.curves, p.enable.semantic]);
+    const layKey = JSON.stringify([p.layers ?? [], p.autoCurves ?? 1, p.enable.curves, p.enable.semantic, this.selection?.version ?? 0]);
     if (layKey !== this.layerKey) {
       this.layerKey = layKey;
-      const pk = packLayers(p.layers ?? [], p.autoCurves ?? 1, p.enable);
+      const pk = packLayers(p.layers ?? [], p.autoCurves ?? 1, p.enable, this.selection?.slotOf);
       this.layerCount = pk.count;
       if (!this.layerBuf || this.layerBuf.size < pk.records.byteLength) {
         gpu.release(this.layerBuf);
@@ -252,6 +264,7 @@ export class Renderer {
       (src.skin ?? this.noSkin()).createView(),
       (gainT ?? this.target("gainDummy", 1, 1, "r32float")).createView(),
       this.layerBuf!,
+      (this.selection?.tex ?? this.noSelection()).createView({ dimension: "2d-array" }),
     ], Math.ceil(src.width / 8), Math.ceil(th / 8));
   }
 
@@ -267,10 +280,13 @@ export class Renderer {
     const { width: W, height: H } = src;
     const hdrStops = o.hdr ? (p.hdr?.headroom ?? 0) : 0;
     const { size: lutSize, identity } = this.ensureLuts(p, hdrStops);
-    const dof = dofOn && p.dof.strength > 0;
-    const maxRadius = p.dof.strength * 0.022 * Math.max(W, H);
+    // The blur pass: depth of field, and/or Blur layers (a radius of 3 % of the long side at amount 1).
+    const depthDof = dofOn && p.dof.strength > 0;
+    const blurR = hasBlurLayers(p.layers ?? [], p.autoCurves ?? 1, p.enable) ? 0.03 * Math.max(W, H) : 0;
+    const dof = depthDof || blurR > 0;
+    const maxRadius = depthDof ? p.dof.strength * 0.022 * Math.max(W, H) : 0;
     const y0 = strip?.y0 ?? 0, rows = strip?.rows ?? H;
-    const apron = strip ? (dof ? Math.ceil(maxRadius) + 4 : 3) : 0;
+    const apron = strip ? (dof ? Math.ceil(Math.max(maxRadius, blurR)) + 4 : 3) : 0;
     // Strip starts are aligned to 64 rows so the depth-of-field mip grid (up to
     // 2^5-row texels) lines up with the full-image grid: no seams between strips.
     // Heights are rounded up to 64 rows too (mip level sizes round down, so an
@@ -298,7 +314,7 @@ export class Renderer {
     let finalLinear = false;
     if (dof) {
       // Into the tone target: free once the detail pass has read it (saves a full-size buffer).
-      final = await this.depthOfField(t2, t1, distT, W, th, p, maxRadius, dofLevels);
+      final = await this.depthOfField(t2, t1, distT, W, th, p, maxRadius, dofLevels, blurR, depthDof);
       finalLinear = true;
     }
     const gr = p.grain;
@@ -369,7 +385,7 @@ export class Renderer {
     return out;
   }
 
-  private async depthOfField(sharp: GPUTexture, out: GPUTexture, distT: GPUTexture, W: number, H: number, p: Params, maxRadius: number, fullLevels: number): Promise<GPUTexture> {
+  private async depthOfField(sharp: GPUTexture, out: GPUTexture, distT: GPUTexture, W: number, H: number, p: Params, maxRadius: number, fullLevels: number, blurR = 0, depthOn = true): Promise<GPUTexture> {
     const gpu = this.gpu;
     // Same level count as a full-image render (a strip may be shorter), limited by what fits.
     const levels = Math.max(1, Math.min(fullLevels, Math.floor(Math.log2(Math.min(W, H))) + 1));
@@ -403,7 +419,7 @@ export class Renderer {
       const zonesOn = p.dof.mode === "zones" && p.dof.zones?.length === 5 && p.dof.zoneBounds?.length === 4;
       const zc = zonesOn ? [...p.dof.zoneBounds!, 0, 0, 0, 0] : new Array(8).fill(0);
       const zv = zonesOn ? [...p.dof.zones!, 0, 0, 0] : new Array(8).fill(0);
-      const u = gpu.uniform(new Uniforms(44).u32(W, H, 0, 0).f32(p.dof.focus, maxRadius, 0.6, span[0]).f32(pts.length, zonesOn ? 1 : 0, levels, span[1]).f32(...foci).f32(...zc).f32(...zv).f32(...fociHi).bytes());
+      const u = gpu.uniform(new Uniforms(48).u32(W, H, 0, 0).f32(p.dof.focus, maxRadius, 0.6, span[0]).f32(pts.length, zonesOn ? 1 : 0, levels, span[1]).f32(...foci).f32(...zc).f32(...zv).f32(...fociHi).f32(blurR, depthOn ? 1 : 0, 0, 0).bytes());
       temp.push(u);
       const cocT = this.target("dof.coc", W, H, "rg32float");
       gpu.dispatch(enc, gpu.pipeline("render.dof.coc", dofWgsl, "coc_pass"), [u, undefined, distT.createView(), undefined, undefined, undefined, cocT.createView()], Math.ceil(W / 8), Math.ceil(H / 8));
@@ -414,6 +430,6 @@ export class Renderer {
 
   destroy() {
     this.releaseTargets();
-    this.gpu.release(this.toneLut, this.atlas, this.layerBuf, this.look, this.profCurve, this.depthTab, this.hueTab, this.skinDummy);
+    this.gpu.release(this.toneLut, this.atlas, this.layerBuf, this.look, this.profCurve, this.depthTab, this.hueTab, this.skinDummy, this.selDummy);
   }
 }

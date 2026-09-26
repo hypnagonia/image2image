@@ -27,6 +27,13 @@ SegFormer-B0 (ADE20K 512×512) — NVIDIA Source Code License for SegFormer
   NOTE: the SegFormer license permits NON-COMMERCIAL (research/evaluation) use only.
   A commercial deployment must replace this model or obtain a license from NVIDIA.
 
+MobileSAM (tap-to-select masks) — Apache License 2.0
+  Chaoning Zhang et al., "Faster Segment Anything: Towards Lightweight SAM for Mobile
+  Applications", 2023. https://github.com/ChaoningZhang/MobileSAM
+  With the mask decoder of Segment Anything (Kirillov et al., 2023, Apache License 2.0,
+  https://github.com/facebookresearch/segment-anything).
+  ONNX export: https://huggingface.co/Acly/MobileSAM (MIT).
+
 Depth Anything V2 Small — Apache License 2.0
   Lihe Yang et al., "Depth Anything V2", 2024. https://github.com/DepthAnything/Depth-Anything-V2
   ONNX conversion: https://huggingface.co/onnx-community/depth-anything-v2-small

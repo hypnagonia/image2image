@@ -13,6 +13,8 @@ struct LayerRec {
   q: array<vec4<f32>, 12>,
 }
 @group(0) @binding(21) var<storage, read> layers: array<LayerRec>;
+/** Tap-to-select masks at the guide resolution, one array layer per selection in use. */
+@group(0) @binding(22) var sel_masks: texture_2d_array<f32>;
 
 fn atlas_at(row: f32, x: f32) -> vec4<f32> {
   return textureSampleLevel(atlas, lsamp, vec2<f32>(clamp(x, 0.0, 1.0), (row + 0.5) / f32(max(u.lay.y, 1u))), 0.0);
@@ -79,6 +81,8 @@ fn sky_mask(p: f32, e: vec3<f32>, uv: vec2<f32>, other: f32) -> f32 {
 var<private> lay_g: array<f32, 12>;
 var<private> lay_bw: vec3<f32>;
 var<private> lay_dist: f32;
+/** How much Blur layers blur this pixel (0…1, the strongest wins): handed to the blur pass. */
+var<private> lay_blur: f32 = 0.0;
 /** OkLab of the colour before the layers, for colour masks (computed once, on first use). */
 var<private> lay_lab: vec3<f32>;
 var<private> lay_lab_ok: bool = false;
@@ -106,6 +110,8 @@ fn mask_part(kind: u32, reg: u32, band: u32, v: vec4<f32>, skin_w: f32, e: vec3<
     return 1.0 - smoothstep(tol, tol * 1.5 + 0.005, dist);
   }
   if (kind == 6u) { return soft_range(lay_dist, v.x, v.y, v.z); }
+  // Selection (tap-to-select): its mask, one layer of the selection texture.
+  if (kind == 8u) { return select(0.0, textureSampleLevel(sel_masks, lsamp, uv, i32(v.x), 0.0).r, v.x >= 0.0); }
   if (kind == 1u || kind == 3u || kind == 7u) {
     var pr = clamp(lay_g[min(reg, 10u)], 0.0, 1.0);
     if (reg == 0u) { pr = sky_mask(pr, e0, uv, max(lay_g[5], lay_g[2])); }
@@ -311,6 +317,8 @@ fn apply_layers(e0: vec3<f32>, g: array<f32, 12>, dist: f32, skin_w: f32, uv: ve
     // Soft region probabilities are rarely exactly 0: below 0.002 a layer moves the
     // pixel by under half a level of 255, so it is skipped (most region layers, most pixels).
     if (w < 2e-3) { continue; }
+    // Blur: no colour change here; the blur pass does it, by this amount.
+    if (u32(L.a.x) == 7u) { lay_blur = max(lay_blur, w * L.p0.x); continue; }
     var t = e;
     switch u32(L.a.x) {
       case 0u: { t = op_curves(L, e); }

@@ -52,6 +52,9 @@ import type { Capabilities, ExportFormat, FromWorker, PickInfo, Summary, Upscale
 import type { CameraColor } from "../color/dng.ts";
 import { srgbEotf, srgbOetf } from "../color/transfer.ts";
 import { linSrgbToOklab } from "../color/oklab.ts";
+import { SamSelector } from "../neural/sam.ts";
+import { levelsByArea, selectionMask } from "../refine/selection.ts";
+import { selectKey, type MaskShape } from "../layers/model.ts";
 import { inverse, mul, mulVec } from "../color/mat3.ts";
 import { P3_D65, SRGB, rgbToXYZ } from "../color/spaces.ts";
 import type { Region } from "../decision/params.ts";
@@ -90,6 +93,22 @@ interface Session {
   skin?: GPUTexture;
   /** The quality analysis and what the upscale stage did with it. */
   upscale?: UpscaleInfo;
+  /** Tap-to-select: the photo's selector, masks by selection, and the texture the renderer samples. */
+  sel?: Selections;
+}
+
+interface Selections {
+  sam: SamSelector;
+  /** Masks at the guide resolution, by selectKey (most recently used last). */
+  cache: Map<string, Uint8Array>;
+  /** Selections that failed (not retried on every render). */
+  failed: Set<string>;
+  /** The selections in the texture, one array layer each, in order. */
+  keys: string[];
+  tex?: GPUTexture;
+  version: number;
+  /** The photo's luminance at the guide resolution (edge snapping). */
+  guide?: Float32Array;
 }
 
 /** Default blur strength whenever depth of field is switched on (scene-independent, by preference). */
@@ -249,6 +268,7 @@ export class Engine {
     const g = this.gpu;
     if (s.denoised !== s.work.tex) g.release(s.denoised);
     g.release(s.work.tex, s.skin);
+    if (s.sel) { s.sel.sam.dispose(); g.release(s.sel.tex); this.renderer.selection = undefined; }
     this.releaseProxy(s);
     releaseRefined(g, s.maps);
     this.renderer.releaseTargets();
@@ -562,7 +582,7 @@ export class Engine {
     // The automatic grade becomes layers (src/layers/auto.ts): visible, editable, removable.
     Object.assign(decision.params, buildAutoLayers(decision.params));
     Object.assign(params, buildAutoLayers(params));
-    this.post({ type: "analysis", summary: this.summary(file.name), decisions: decision.decisions, auto: decision.params, params, dof: decision.dofSuggestion, exposureSuggestion: decision.exposureSuggestion, autoCurves: decision.autoCurves, cellCoverage: decision.cellCoverage });
+    this.post({ type: "analysis", summary: this.summary(file.name), decisions: decision.decisions, auto: decision.params, params, dof: decision.dofSuggestion, exposureSuggestion: decision.exposureSuggestion, autoCurves: decision.autoCurves, cellCoverage: decision.cellCoverage, noDepth: flatDepth ? (scene.log.find((l) => /Depth skipped|Depth unavailable|Scene analysis unavailable/.test(l)) ?? "no depth map") : undefined });
     this.post({ type: "profile", stages: P.stages });
 
     // --- first preview (before neural restoration) --------------------------------------
@@ -794,6 +814,7 @@ export class Engine {
     if (!s) return;
     const t0 = performance.now();
     const p = this.effectiveParams();
+    await this.ensureSelections(s, p);
     const src = draft && s.proxy ? await this.draftSource() : this.renderSource(false);
     if (s.draft) this.scheduleDraftRelease(s);
     const dof = p.enable.dof && p.dof.strength > 0;
@@ -967,6 +988,7 @@ export class Engine {
     const gpu = this.gpu;
     const src = this.renderSource(true);
     const p = s.params;
+    await this.ensureSelections(s, p);
     const W = src.width, H = src.height;
     const base = s.name.replace(/\.[^.]+$/, "");
     const P = this.profiler;
@@ -1202,6 +1224,65 @@ export class Engine {
     // only a thin depth slice for focus; as a mask, "this object" is then the whole region.
     const range: [number, number] = f.range[1] - f.range[0] <= 0.0401 ? [0, 1] : f.range;
     return { x, y, region, prob: score[GROUPS.indexOf(region === "skin" ? "person" : region)], dist: f.dist, range, color: [med(0), med(1), med(2)] };
+  }
+
+  /**
+   * Makes sure every selection the layers use has its mask in the selection
+   * texture (encoding the photo on first use: MobileSAM, a few seconds on a
+   * phone), then points the renderer at it. Cheap when nothing changed.
+   */
+  private async ensureSelections(s: Session, p: Params) {
+    const want: MaskShape[] = [];
+    for (const l of p.layers ?? []) for (const m of [l.mask, ...(l.mask.parts ?? [])]) if (m.kind === "select" && m.points?.length) want.push(m);
+    const keys = [...new Set(want.map(selectKey))];
+    const sel = s.sel;
+    if (!keys.length && !sel?.keys.length) return;
+    if (sel && keys.length === sel.keys.length && keys.every((k, i) => k === sel.keys[i])) return;
+    const st: Selections = (s.sel ??= { sam: new SamSelector(this.base, s.work.width, s.work.height), cache: new Map(), failed: new Set(), keys: [], version: 0 });
+    for (const m of want) {
+      const k = selectKey(m);
+      if (st.cache.has(k) || st.failed.has(k)) continue;
+      try { st.cache.set(k, await this.selectionMask(s, st, m)); }
+      catch (e) { st.failed.add(k); this.log(`selection unavailable: ${e instanceof Error ? e.message : e}`); }
+    }
+    // Keep the last 16 masks (≈ 0.4 MB each): undo and switching readings are instant.
+    for (const k of [...st.cache.keys()]) if (st.cache.size > 16 && !keys.includes(k)) st.cache.delete(k);
+    const ready = keys.filter((k) => st.cache.has(k));
+    const { w, h } = s.maps;
+    this.gpu.release(st.tex);
+    st.tex = this.gpu.tex("selection", w, h, "r8unorm", GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST, "2d", Math.max(1, ready.length));
+    ready.forEach((k, z) => this.gpu.device.queue.writeTexture({ texture: st.tex!, origin: { x: 0, y: 0, z } }, st.cache.get(k)! as Uint8Array<ArrayBuffer>, { bytesPerRow: w, rowsPerImage: h }, { width: w, height: h }));
+    st.keys = keys;
+    st.version++;
+    this.renderer.selection = { tex: st.tex, slotOf: (m) => ready.indexOf(selectKey(m)), version: st.version };
+  }
+
+  /** One selection's mask at the guide resolution: SAM's reading for its taps, snapped to the photo's edges. */
+  private async selectionMask(s: Session, st: Selections, m: MaskShape): Promise<Uint8Array> {
+    const { w, h } = s.maps;
+    if (!st.sam.encoded) {
+      this.progress("selection");
+      await st.sam.encode(async () => {
+        // The photo as SAM sees it: display-encoded, long side 1024, HWC 0…255.
+        const [pw, ph] = st.sam.dims;
+        const t = await downsample(this.gpu, s.work.tex, s.work.width, s.work.height, pw, ph, true, s.gain, "sam.input");
+        const px = halvesToFloats(new Uint16Array(await this.gpu.readTexture(t, 0, 0, pw, ph, 8)));
+        this.gpu.release(t);
+        const img = new Float32Array(pw * ph * 3);
+        for (let i = 0, j = 0; i < pw * ph; i++, j += 4) for (let c = 0; c < 3; c++) img[i * 3 + c] = 255 * Math.min(1, Math.max(0, px[j + c]));
+        return img;
+      });
+      this.progress("");
+    }
+    if (!st.guide) {
+      const g = halvesToFloats(new Uint16Array(await this.gpu.readTexture(s.maps.guide, 0, 0, w, h, 8)));
+      st.guide = new Float32Array(w * h);
+      for (let i = 0; i < w * h; i++) st.guide[i] = Math.min(1, Math.max(0, 0.2126 * g[i * 4] + 0.7152 * g[i * 4 + 1] + 0.0722 * g[i * 4 + 2]));
+    }
+    const { low, iou } = await st.sam.decode(m.points!);
+    // No level chosen: SAM's own pick, its most confident of the three readings.
+    const k = m.level === undefined ? [1, 2, 3].reduce((a, b) => (iou[b] > iou[a] ? b : a)) : levelsByArea(low)[m.level];
+    return selectionMask(low, k, st.sam.dims, w, h, st.guide);
   }
 
   async palette(): Promise<ColorStats> {

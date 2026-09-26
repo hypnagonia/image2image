@@ -702,5 +702,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   var sharpen = sem.sharpen * mix(u.tone.z, u.tone.w, smoothstep(0.1, 0.9, dist));
   if ((flags & EN_SHARPEN) == 0u) { sharpen = 0.0; }
   textureStore(dst, tp, vec4<f32>(e, sharpen));
-  textureStore(dist_out, tp, vec4<f32>(dist, 0.0, 0.0, 0.0));
+  // Distance (0…1) for the blur pass, with Blur layers' amount packed above it:
+  // + 2 × amount in thousandths (decoded in render_dof.wgsl's coc_pass).
+  textureStore(dist_out, tp, vec4<f32>(dist + 2.0 * round(clamp(lay_blur, 0.0, 4.0) * 1000.0), 0.0, 0.0, 0.0));
 }

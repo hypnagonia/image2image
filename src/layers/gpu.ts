@@ -9,7 +9,8 @@
  *         [16…31] type parameters
  *         [32…79] extra mask parts, 12 floats each (kind 0 = none):
  *                 kind, region, band, op | values 0–3 | value 4, invert, feather, _
- * Mask values by kind — luminance: low, high, soft; color: L, a, b, tolerance; depth: low, high, soft; object: region within depth low, high, soft.
+ * Mask values by kind — luminance: low, high, soft; color: L, a, b, tolerance; depth: low, high, soft; object: region within depth low, high, soft;
+ *   select: layer of the selection texture (−1 = not ready: nothing).
  */
 import { GROUPS } from "../neural/scene.ts";
 import { DEPTH_BANDS, type Curves } from "../decision/params.ts";
@@ -34,11 +35,12 @@ function cachedRow(key: string, make: () => Float32Array): Float32Array {
   return r;
 }
 export const ATLAS_W = CURVE_LUT_SIZE; // 1024
-const MASK_KIND: Record<MaskKind, number> = { all: 0, region: 1, distance: 2, cell: 3, luminance: 4, color: 5, depth: 6, object: 7 };
+const MASK_KIND: Record<MaskKind, number> = { all: 0, region: 1, distance: 2, cell: 3, luminance: 4, color: 5, depth: 6, object: 7, select: 8 };
 const MASK_OP: Record<MaskOp, number> = { add: 0, subtract: 1, intersect: 2 };
 
-/** The five numbers a mask kind reads (see the record layout). */
-function maskValues(m: MaskShape): number[] {
+/** The five numbers a mask kind reads (see the record layout). `slotOf`: a selection's layer in the selection texture. */
+function maskValues(m: MaskShape, slotOf?: (m: MaskShape) => number): number[] {
+  if (m.kind === "select") return [slotOf?.(m) ?? -1, 0, 0, 0, 0];
   if (m.kind === "color") return [...(m.color ?? [0.5, 0, 0]), m.tol ?? 0.08, 0];
   if (m.kind === "depth" || m.kind === "object") return [...(m.depth ?? [0, 0.3, 0.05]), 0, 0];
   return [m.lum?.[0] ?? 0, m.lum?.[1] ?? 1, m.lum?.[2] ?? 0.08, 0, 0];
@@ -70,7 +72,7 @@ export function liveLayers(layers: Layer[], autoStrength = 1, enable?: { curves?
  * `autoStrength` (0…1) scales the opacity of every automatic layer (the "Auto strength" control);
  * `enable` (the module switches) turns layers off with their module.
  */
-export function packLayers(layers: Layer[], autoStrength = 1, enable?: { curves?: boolean; semantic?: boolean }): PackedLayers {
+export function packLayers(layers: Layer[], autoStrength = 1, enable?: { curves?: boolean; semantic?: boolean }, slotOf?: (m: MaskShape) => number): PackedLayers {
   const live = liveLayers(layers, autoStrength, enable);
   const records = new Float32Array(Math.max(1, live.length) * RECORD);
   const rows: Float32Array[] = [];
@@ -85,12 +87,12 @@ export function packLayers(layers: Layer[], autoStrength = 1, enable?: { curves?
     r[5] = regionIndex(m);
     r[6] = m.band ? DEPTH_BANDS.indexOf(m.band) : 0;
     r[7] = m.invert ? 1 : 0;
-    const v = maskValues(m);
+    const v = maskValues(m, slotOf);
     r[8] = v[0]; r[9] = v[1]; r[10] = v[2]; r[14] = v[3]; r[15] = v[4];
     r[11] = m.feather; r[12] = m.density; r[13] = m.exceptSkin ? 1 : 0;
     (m.parts ?? []).slice(0, MAX_MASK_PARTS).forEach((part, k) => {
       const q = r.subarray(32 + k * 12, 44 + k * 12);
-      const pv = maskValues(part);
+      const pv = maskValues(part, slotOf);
       q[0] = MASK_KIND[part.kind]; q[1] = regionIndex(part); q[2] = part.band ? DEPTH_BANDS.indexOf(part.band) : 0; q[3] = MASK_OP[part.op];
       q[4] = pv[0]; q[5] = pv[1]; q[6] = pv[2]; q[7] = pv[3];
       q[8] = pv[4]; q[9] = part.invert ? 1 : 0; q[10] = part.feather;
@@ -129,6 +131,7 @@ export function packLayers(layers: Layer[], autoStrength = 1, enable?: { curves?
         rows.push(cachedRow("g" + JSON.stringify(g.gradient), () => gradientTable(g.gradient, ATLAS_W)));
         break;
       }
+      case "blur": { p[0] = Math.max(0, (l.params as LayerParams["blur"]).amount); break; }
       case "brightContrast": { const b = l.params as LayerParams["brightContrast"]; p[0] = b.brightness; p[1] = b.contrast; break; }
       case "exposure": { const e = l.params as LayerParams["exposure"]; p[0] = e.exposure; p[1] = e.offset; p[2] = e.gamma; break; }
       case "basic": {
@@ -141,4 +144,9 @@ export function packLayers(layers: Layer[], autoStrength = 1, enable?: { curves?
   const atlas = new Float32Array(Math.max(1, rows.length) * ATLAS_W * 4);
   rows.forEach((row, i) => atlas.set(row, i * ATLAS_W * 4));
   return { records, count: live.length, atlas, rows: Math.max(1, rows.length) };
+}
+
+/** Whether any visible Blur layer blurs something (the renderer then runs the blur pass). */
+export function hasBlurLayers(layers: Layer[], autoStrength = 1, enable?: { curves?: boolean; semantic?: boolean }): boolean {
+  return liveLayers(layers, autoStrength, enable).some((l) => l.type === "blur" && (l.params as LayerParams["blur"]).amount > 0);
 }

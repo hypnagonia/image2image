@@ -70,7 +70,7 @@ export default defineConfig(({ command }) => ({
   resolve: command === "build"
     ? { alias: [{ find: /^onnxruntime-web$/, replacement: fileURLToPath(new URL("./node_modules/onnxruntime-web/dist/ort.min.mjs", import.meta.url)) }] }
     : {},
-  define: { __ORT_EXTERNAL__: JSON.stringify(command === "build") },
+  define: { __ORT_EXTERNAL__: JSON.stringify(command === "build"), __BUILD__: JSON.stringify(Date.now().toString(36)) },
   build: { target: "es2022", assetsInlineLimit: 0, chunkSizeWarningLimit: 4000 },
   worker: { format: "es" },
   optimizeDeps: { exclude: ["onnxruntime-web"] },

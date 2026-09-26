@@ -15,7 +15,7 @@ import type { Gpu } from "../gpu/gpu.ts";
 export type Backend = "webgpu" | "wasm";
 
 export interface ModelSpec {
-  id: "segformer" | "depth" | "swin2sr";
+  id: "segformer" | "depth" | "swin2sr" | "samEncoder" | "samDecoder";
   /** File for WebGPU with shader-f16. */
   f16: string;
   /** File for everything else. */
@@ -30,6 +30,11 @@ export const MODELS: Record<ModelSpec["id"], ModelSpec> = {
   // Fixed 256×256 input, shape logic folded (see scripts/models/swin2sr.py). fp32 on every
   // backend: an fp16 graph ran ~25% faster but produced a 2-pixel checkerboard on ORT WebGPU.
   swin2sr: { id: "swin2sr", f16: "swin2sr-lightweight-x2.onnx", f32: "swin2sr-lightweight-x2.onnx", bytes: 15.3e6 },
+  // Tap-to-select (src/neural/sam.ts): MobileSAM's image encoder (TinyViT, windowed
+  // attention only: ≈ 240 MB peak on the CPU, where SAM-B's global attention needs
+  // ≈ 2 GB) and SAM's prompt/mask decoder. Downloaded on first use of Pick.
+  samEncoder: { id: "samEncoder", f16: "mobile-sam-encoder.onnx", f32: "mobile-sam-encoder.onnx", bytes: 28.2e6 },
+  samDecoder: { id: "samDecoder", f16: "sam-decoder-multi.onnx", f32: "sam-decoder-multi.onnx", bytes: 16.5e6 },
 };
 
 const CACHE = "image-improver2-models-v1";
