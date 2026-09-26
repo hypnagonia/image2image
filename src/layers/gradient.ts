@@ -17,8 +17,8 @@ export interface Gradient {
   space?: "srgb" | "oklab";
 }
 
-export type GradientGroup = "cinematic" | "warm" | "film" | "nature" | "duotone" | "pastel" | "bold";
-export const GRADIENT_GROUPS: GradientGroup[] = ["cinematic", "warm", "film", "nature", "duotone", "pastel", "bold"];
+export type GradientGroup = "palettes" | "cinematic" | "warm" | "film" | "nature" | "duotone" | "pastel" | "bold";
+export const GRADIENT_GROUPS: GradientGroup[] = ["palettes", "cinematic", "warm", "film", "nature", "duotone", "pastel", "bold"];
 export interface GradientPreset { id: string; group: GradientGroup; colors: string[] }
 
 // ---------------------------------------------------------------- OkLCH helpers
@@ -64,6 +64,20 @@ const lch = (...cs: Array<[number, number, number]>) => cs.map(([L, C, h]) => ok
  * "Teal and Gold" palette (Skobeloff, Teal, Dark Goldenrod, Chinese Gold, Goldenrod).
  */
 export const GRADIENT_PRESETS: GradientPreset[] = [
+  // Palettes: 3–5 distinct colours that belong together, each clearly coloured (not a
+  // dark → light ramp of one or two hues), still ordered dark → light for gradient maps.
+  { id: "harbor", group: "palettes", colors: lch([0.32, 0.09, 255], [0.48, 0.1, 210], [0.63, 0.11, 170], [0.78, 0.11, 110], [0.9, 0.08, 85]) },
+  { id: "tropical", group: "palettes", colors: lch([0.36, 0.11, 260], [0.53, 0.12, 190], [0.7, 0.16, 145], [0.84, 0.16, 105], [0.93, 0.11, 90]) },
+  { id: "sunsetBlvd", group: "palettes", colors: lch([0.34, 0.13, 300], [0.5, 0.17, 350], [0.65, 0.17, 30], [0.79, 0.14, 62], [0.91, 0.1, 92]) },
+  { id: "retroPop", group: "palettes", colors: lch([0.38, 0.15, 280], [0.58, 0.2, 350], [0.78, 0.16, 75], [0.92, 0.11, 110]) },
+  { id: "berryCream", group: "palettes", colors: lch([0.32, 0.12, 335], [0.52, 0.16, 5], [0.74, 0.1, 40], [0.92, 0.05, 80]) },
+  { id: "terracotta", group: "palettes", colors: lch([0.35, 0.08, 35], [0.53, 0.13, 45], [0.7, 0.11, 70], [0.87, 0.06, 90]) },
+  { id: "citrusGrove", group: "palettes", colors: lch([0.4, 0.1, 155], [0.62, 0.15, 130], [0.8, 0.16, 105], [0.92, 0.12, 95]) },
+  { id: "lagoon", group: "palettes", colors: lch([0.35, 0.08, 230], [0.6, 0.11, 195], [0.85, 0.1, 170]) },
+  { id: "mossStone", group: "palettes", colors: lch([0.33, 0.05, 145], [0.5, 0.07, 120], [0.68, 0.06, 90], [0.85, 0.04, 70]) },
+  { id: "arctic", group: "palettes", colors: lch([0.38, 0.09, 265], [0.6, 0.1, 230], [0.82, 0.08, 200]) },
+  { id: "candyShop", group: "palettes", colors: lch([0.45, 0.16, 320], [0.62, 0.15, 260], [0.76, 0.12, 190], [0.9, 0.12, 120]) },
+  { id: "autumnWalk", group: "palettes", colors: lch([0.3, 0.07, 20], [0.48, 0.13, 35], [0.64, 0.14, 60], [0.78, 0.13, 95], [0.9, 0.07, 110]) },
   // Cinematic: cool shadows, warm or neutral highlights.
   { id: "tealGold", group: "cinematic", colors: ["#006C77", "#008182", "#B7850E", "#CC9802", "#DBA620"] },
   { id: "tealOrange", group: "cinematic", colors: ["#0E2A33", "#1D6A73", "#D9894A", "#FFD9A8"] },
@@ -95,11 +109,11 @@ export const GRADIENT_PRESETS: GradientPreset[] = [
   { id: "glacier", group: "nature", colors: lch([0.2, 0.04, 240], [0.45, 0.06, 225], [0.7, 0.06, 210], [0.88, 0.04, 200], [0.97, 0.01, 200]) },
   // Duotones: two inks.
   { id: "bw", group: "duotone", colors: ["#000000", "#FFFFFF"] },
-  { id: "duoBlueOrange", group: "duotone", colors: lch([0.2, 0.09, 265], [0.9, 0.09, 70]) },
-  { id: "duoMagentaYellow", group: "duotone", colors: lch([0.24, 0.12, 330], [0.92, 0.12, 100]) },
-  { id: "duoGreenPink", group: "duotone", colors: lch([0.25, 0.07, 160], [0.9, 0.06, 10]) },
-  { id: "duoNavyCream", group: "duotone", colors: lch([0.2, 0.06, 260], [0.94, 0.03, 90]) },
-  { id: "duoPlumPeach", group: "duotone", colors: lch([0.24, 0.08, 320], [0.9, 0.07, 55]) },
+  { id: "duoBlueOrange", group: "duotone", colors: lch([0.24, 0.1, 265], [0.58, 0.13, 20], [0.88, 0.1, 75]) },
+  { id: "duoMagentaYellow", group: "duotone", colors: lch([0.26, 0.13, 330], [0.62, 0.18, 30], [0.92, 0.13, 100]) },
+  { id: "duoGreenPink", group: "duotone", colors: lch([0.28, 0.08, 165], [0.6, 0.09, 120], [0.88, 0.07, 10]) },
+  { id: "duoNavyCream", group: "duotone", colors: lch([0.22, 0.07, 260], [0.6, 0.08, 220], [0.93, 0.04, 90]) },
+  { id: "duoPlumPeach", group: "duotone", colors: lch([0.26, 0.09, 320], [0.6, 0.12, 10], [0.88, 0.08, 55]) },
   // Pastel: lifted shadows, soft colour.
   { id: "pastel", group: "pastel", colors: ["#4E5D80", "#95AFC6", "#F1C4C0", "#FFF3DE"] },
   { id: "roseGold", group: "pastel", colors: ["#2E1A1F", "#8C585C", "#D8A49F", "#FBE8E3"] },
@@ -230,35 +244,38 @@ function rand(seed: number): () => number {
 }
 
 /**
- * A palette from `base` by `rule`, dark → light. `seed` 0 is the canonical one;
- * other seeds vary its lightness range, hue spread, chroma and stop count (4–6).
+ * A palette of `n` (3–5) colours from `base` by `rule`, dark → light. Every colour
+ * has its own hue and real colour in it (the ends are not near-black / near-white),
+ * so it reads as a set of colours that belong together, not one ramp. `seed` 0 is
+ * the canonical palette; other seeds vary the lightness range, hues and chroma.
  */
-export function harmonyPalette(base: string, rule: HarmonyRule, seed = 0): string[] {
+export function harmonyPalette(base: string, rule: HarmonyRule, seed = 0, n = 5): string[] {
+  n = Math.min(5, Math.max(3, Math.round(n)));
   const [, C0, h0raw] = hexToOklch(base);
   const grey = C0 < 0.02;
   const h0 = grey ? 250 : h0raw;
   const hash = [...base.toUpperCase()].reduce((a, c) => Math.imul(a ^ c.charCodeAt(0), 16777619), 2166136261);
-  const r = rand(hash ^ Math.imul(seed + 1, 2654435761) ^ (HARMONY_RULES.indexOf(rule) * 7919));
+  const r = rand(hash ^ Math.imul(seed + 1, 2654435761) ^ (HARMONY_RULES.indexOf(rule) * 7919) ^ (n * 104729));
   const j = (amp: number) => (seed === 0 ? 0 : (r() * 2 - 1) * amp);
-  const n = seed === 0 ? 5 : 4 + Math.floor(r() * 3);
-  const Lmin = Math.min(0.3, Math.max(0.1, 0.17 + j(0.06)));
-  const Lmax = Math.min(0.97, Math.max(0.86, 0.94 + j(0.03)));
-  const Cpk = grey ? 0.03 : Math.min(0.17, Math.max(0.05, C0 * (1 + j(0.3))));
-  // Hue anchors, shadows → highlights.
+  const Lmin = Math.min(0.4, Math.max(0.24, 0.3 + j(0.05)));
+  const Lmax = Math.min(0.94, Math.max(0.84, 0.9 + j(0.03)));
+  const Cpk = grey ? 0.06 : Math.min(0.2, Math.max(0.1, C0 * (1.1 + j(0.25))));
+  // Hue anchors, shadows → highlights (the cooler hue in the shadows).
   const coolFirst = (hs: number[]) => [...hs].sort((a, b) => coolness(b) - coolness(a));
   let anchors: number[];
   switch (rule) {
-    case "mono": anchors = [wrap(h0 + 8 + j(6)), wrap(h0 - 8 + j(6))]; break;
+    case "mono": anchors = [wrap(h0 + 14 + j(6)), wrap(h0 - 14 + j(6))]; break;
     case "analogous": {
-      const span = 50 + j(20);
+      // Wide enough that neighbours are different colours, not shades of one.
+      const span = 24 * (n - 1) + j(15);
       anchors = coolFirst([wrap(h0 - span / 2), wrap(h0 + span / 2)]);
       anchors.splice(1, 0, h0);
       break;
     }
     case "complementary": anchors = coolFirst([h0, wrap(h0 + 180 + j(15))]); break;
     case "split": {
-      const s = 150 + j(12);
-      const [a, b] = coolFirst([wrap(h0 + s), wrap(h0 - s)]);
+      const sp = 150 + j(12);
+      const [a, b] = coolFirst([wrap(h0 + sp), wrap(h0 - sp)]);
       anchors = [a, h0, b];
       break;
     }
@@ -269,16 +286,22 @@ export function harmonyPalette(base: string, rule: HarmonyRule, seed = 0): strin
   for (let i = 0; i < n; i++) {
     const t = i / (n - 1);
     const L = Lmin + (Lmax - Lmin) * t;
-    // Hue: piecewise along the anchors.
+    // One hue per stop, along the anchors (the arc between opposite hues passes through
+    // real colours on the way, not grey).
     const f = t * (anchors.length - 1);
     const k = Math.min(anchors.length - 2, Math.floor(f));
     const hue = mixHue(anchors[k], anchors[k + 1], f - k);
-    // Chroma arc; opposite hues pass through a quieter middle instead of mud.
-    let C = Cpk * (0.4 + 0.6 * Math.sin(Math.PI * t));
-    if (rule === "complementary" || rule === "warmCool") C *= 0.45 + 0.55 * Math.abs(2 * t - 1);
+    // Strong colour everywhere; a little quieter at the light end, where full chroma looks neon.
+    const C = Cpk * (0.85 + 0.15 * Math.sin(Math.PI * t)) * (1 - 0.25 * Math.max(0, t - 0.75) * 4);
     out.push(oklchToHex(L, C, hue));
   }
   return out;
+}
+
+/** CSS of a palette as separate blocks (how many colours, and which, at a glance). */
+export function paletteCss(colors: string[]): string {
+  const n = colors.length;
+  return `linear-gradient(90deg, ${colors.map((c, i) => `${c} ${((i / n) * 100).toFixed(2)}% ${(((i + 1) / n) * 100).toFixed(2)}%`).join(", ")})`;
 }
 
 /**

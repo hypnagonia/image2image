@@ -427,3 +427,18 @@ header.top .push { margin-left: auto; }
 .mask-more > summary::before { content: "+ "; }
 .mask-more[open] > summary::before { content: "− "; }
 .mask-more > summary::-webkit-details-marker { display: none; }
+
+/* Gradient editor, simple first: the bar, one row of quick actions, palette tiles, then Edit colours (folded). */
+.grad-quick { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; }
+.grad-quick .chips { flex-wrap: nowrap; gap: 4px; }
+.grad-quick .grad-count .chip { min-width: 34px; padding: 5px 0; text-align: center; }
+.grad-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 2px 0 6px; }
+.grad-tile { height: 40px; border: 1px solid var(--line); padding: 0; cursor: pointer; transition: transform .1s, box-shadow .12s; }
+.grad-tile:active { transform: scale(.96); }
+.grad-tile.on { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3px var(--text); }
+@media (min-width: 900px) { .grad-tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); } .grad-tile { height: 32px; } }
+.grad-edit { margin: 12px 0 4px; }
+.grad-edit > summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 6px 0; list-style: none; }
+.grad-edit > summary::before { content: "+ "; }
+.grad-edit[open] > summary::before { content: "− "; }
+.grad-edit > summary::-webkit-details-marker { display: none; }

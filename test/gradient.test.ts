@@ -23,12 +23,16 @@ test("OkLCH → hex keeps lightness and hue, reducing chroma to fit sRGB", () =>
   assert.ok(Math.abs(((h - 30 + 540) % 360) - 180) < 6, `h ${h}`);
 });
 
-test("harmonies: 4–6 stops, strictly dark → light, deterministic, for every rule and seed", () => {
+test("harmonies: 3–5 distinct colours, strictly dark → light, deterministic, for every rule and seed", () => {
   for (const base of ["#1D6A73", "#D9894A", "#7A2C6E", "#808080", "#FFD700", "#0000FF"]) {
     for (const rule of HARMONY_RULES) {
       for (let seed = 0; seed < 25; seed++) {
+        for (const n of [3, 4, 5]) {
+          const q = harmonyPalette(base, rule, seed, n);
+          assert.equal(q.length, n, `${base} ${rule} ${seed}: ${q.length} colours`);
+          assert.ok(rising(q), `${base} ${rule} ${seed} n${n}: ${q.join(" ")}`);
+        }
         const p = harmonyPalette(base, rule, seed);
-        assert.ok(p.length >= 4 && p.length <= 6, `${base} ${rule} ${seed}: ${p.length} stops`);
         assert.ok(rising(p), `${base} ${rule} ${seed}: ${p.join(" ")}`);
         assert.ok(p.every((c) => /^#[0-9A-F]{6}$/.test(c)));
       }
@@ -61,4 +65,19 @@ test("palette from colours: deduplicated, dark → light, full range", () => {
   const L = Ls(p);
   assert.ok(L[0] < 0.25 && L[L.length - 1] > 0.85, `range ${L[0]}…${L[L.length - 1]}`);
   assert.ok(rising(paletteFromColors(["#777777"])), "a single colour still makes a dark → light run");
+});
+
+test("palettes are colours, not a ramp to black and white", () => {
+  // Every colour of a harmony (other than mono / grey bases) carries real chroma, ends included.
+  for (const rule of HARMONY_RULES.filter((r) => r !== "mono")) {
+    const p = harmonyPalette("#3A7BD5", rule, 0, 5);
+    for (const c of p) assert.ok(hexToOklch(c)[1] > 0.05, `${rule}: ${c} is almost grey`);
+    // Neighbours are different colours (hue or lightness clearly apart).
+    for (let i = 1; i < p.length; i++) {
+      const a = hexToOklab(p[i - 1]), b = hexToOklab(p[i]);
+      assert.ok(Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) > 0.08, `${rule}: ${p[i - 1]} ≈ ${p[i]}`);
+    }
+  }
+  // The Palettes group: 3–5 colours each.
+  for (const pr of GRADIENT_PRESETS.filter((q) => q.group === "palettes")) assert.ok(pr.colors.length >= 3 && pr.colors.length <= 5, pr.id);
 });

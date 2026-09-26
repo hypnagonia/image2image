@@ -1,15 +1,16 @@
 /**
- * Gradient editor (Photopea's, made for fingers):
- *   presets   palettes by group (Cinematic, Film, …): one tap applies
- *   harmony   palettes generated from one base colour by a harmony rule; Vary for
- *             another take, tap the preview to apply (optionally: from the photo)
- *   bar       the gradient over a checkerboard; tap it to add a colour stop there
- *   stops     handles under the bar: tap selects, drag moves, drag down off the bar removes
- *   stop      the selected stop's colour (the system colour picker), hex, opacity, location
+ * Gradient editor, as easy as it can be:
+ *   bar       the gradient the layer has
+ *   quick     New palette (one tap: another set of colours that belong together),
+ *             From photo, and how many colours (3 · 4 · 5)
+ *   palettes  every preset as a tile of colour blocks: one tap applies
+ *   edit      (folded) harmony by base colour and rule; the stops under the bar
+ *             (tap the bar to add one, drag to move, drag down to remove) and the
+ *             selected stop's colour, opacity and location
  */
 import {
-  GRADIENT_GROUPS, GRADIENT_PRESETS, HARMONY_RULES, gradientAt, gradientCss, gradientFrom, harmonyPalette, hexToOklch, paletteFromColors, rgbToHex,
-  type Gradient, type GradientGroup, type HarmonyRule,
+  GRADIENT_GROUPS, GRADIENT_PRESETS, HARMONY_RULES, gradientAt, gradientCss, gradientFrom, harmonyPalette, hexToOklch, oklchToHex, paletteCss, paletteFromColors, rgbToHex,
+  type Gradient, type HarmonyRule,
 } from "../../layers/gradient.ts";
 import { t } from "../i18n.ts";
 import { icon } from "./icons.ts";
@@ -41,21 +42,14 @@ export function createGradientEditor(target: () => Target, changed: (label?: str
     render();
   };
 
-  // ---- presets, by group
-  let group: GradientGroup = GRADIENT_PRESETS.find((p) => p.id === target().preset)?.group ?? GRADIENT_GROUPS[0];
-  const groupChips = el("div", { class: "chips grad-groups" });
-  const presets = el("div", { class: "grad-presets" });
+  // ---- palettes: every preset as a tile of colour blocks, in group order (Palettes first)
+  const presets = el("div", { class: "grad-tiles" });
   function renderPresets() {
-    groupChips.replaceChildren(...GRADIENT_GROUPS.map((g) => {
-      const b = el("button", { class: "chip" + (g === group ? " on" : ""), text: t(`grad.g.${g}`) });
-      b.onclick = () => { group = g; renderPresets(); presets.scrollLeft = 0; };
-      return b;
-    }));
-    presets.replaceChildren(...GRADIENT_PRESETS.filter((p) => p.group === group).map((p) => {
+    const all = GRADIENT_GROUPS.flatMap((g) => GRADIENT_PRESETS.filter((p) => p.group === g));
+    presets.replaceChildren(...all.map((p) => {
       const name = t(`grad.p.${p.id}` as never);
-      const b = el("button", { class: "grad-preset" + (p.id === target().preset ? " on" : ""), title: name, "data-id": p.id },
-        el("span", { class: "grad-swatch" }), el("span", { class: "grad-pname", text: name }));
-      (b.firstChild as HTMLElement).style.background = gradientCss(gradientFrom(p.colors, "oklab"));
+      const b = el("button", { class: "grad-tile" + (p.id === target().preset ? " on" : ""), title: name, "aria-label": name, "data-id": p.id });
+      b.style.background = paletteCss(p.colors);
       b.onclick = () => apply(p.colors, p.id, t("grad.applied", { name }));
       return b;
     }));
@@ -70,10 +64,36 @@ export function createGradientEditor(target: () => Target, changed: (label?: str
   baseInput.oninput = () => { base = baseInput.value.toUpperCase(); seed = 0; renderHarmony(); };
   const ruleChips = el("div", { class: "chips grad-rules" });
   const preview = el("button", { class: "grad-harmony-preview", "aria-label": t("grad.tapApply") }, el("span", { class: "grad-swatch" }), el("span", { class: "grad-pname", text: t("grad.tapApply") }));
-  preview.onclick = () => apply(harmonyPalette(base, rule, seed), undefined, t("grad.harmonyApplied", { name: t(`grad.rule.${rule}`) }));
+  preview.onclick = () => apply(harmonyPalette(base, rule, seed, count), undefined, t("grad.harmonyApplied", { name: t(`grad.rule.${rule}`) }));
   const vary = el("button", { class: "btn small", text: t("grad.vary") });
   vary.onclick = () => { seed++; renderHarmony(); };
   const harmonyRow = el("div", { class: "grad-stoprow" }, el("label", { class: "grad-colorwrap", title: t("grad.base") }, baseInput), preview, vary);
+  // ---- quick: a new palette in one tap, or the photo's, in 3–5 colours
+  let count = Math.min(5, Math.max(3, target().gradient.stops.length));
+  /** What the last quick tap made, so changing the count remakes it. */
+  let last: "new" | "photo" | undefined;
+  let genSeed = Math.floor(Math.random() * 1e6);
+  const QUICK_RULES: HarmonyRule[] = ["complementary", "split", "triadic", "analogous", "warmCool"];
+  const makeNew = () => {
+    // Spread over the colour wheel (golden angle) and the harmony rules: every tap is different.
+    const hue = (genSeed * 137.508) % 360;
+    const rr = QUICK_RULES[genSeed % QUICK_RULES.length];
+    return { colors: harmonyPalette(oklchToHex(0.62, 0.14, hue), rr, genSeed % 7, count), rule: rr };
+  };
+  const newBtn = el("button", { class: "btn small primary", text: t("grad.new") });
+  newBtn.onclick = () => { genSeed++; last = "new"; const g = makeNew(); apply(g.colors, undefined, t("grad.harmonyApplied", { name: t(`grad.rule.${g.rule}`) })); };
+  const countChips = el("div", { class: "chips grad-count" });
+  function renderCount() {
+    countChips.replaceChildren(...[3, 4, 5].map((n) => {
+      const b = el("button", { class: "chip" + (n === count ? " on" : ""), text: String(n), title: t("grad.count", { n }) });
+      b.onclick = () => {
+        count = n; renderCount();
+        if (last === "new") { const g = makeNew(); apply(g.colors, undefined, t("grad.harmonyApplied", { name: t(`grad.rule.${g.rule}`) })); }
+        else if (last === "photo") photoBtn.click();
+      };
+      return b;
+    }));
+  }
   const photoBtn = el("button", { class: "btn small", text: t("grad.fromPhoto") });
   photoBtn.hidden = !opts.photoColors;
   photoBtn.onclick = async () => {
@@ -85,7 +105,8 @@ export function createGradientEditor(target: () => Target, changed: (label?: str
       // The photo's own colours as the map; its most colourful one becomes the harmony base.
       base = [...cols].sort((a, b) => hexToOklch(b)[1] - hexToOklch(a)[1])[0].toUpperCase();
       baseInput.value = base.toLowerCase(); seed = 0;
-      apply(paletteFromColors(cols), undefined, t("grad.photoApplied"));
+      last = "photo";
+      apply(paletteFromColors(cols, count), undefined, t("grad.photoApplied"));
     } finally { photoBtn.disabled = false; }
   };
   function renderHarmony() {
@@ -94,7 +115,7 @@ export function createGradientEditor(target: () => Target, changed: (label?: str
       b.onclick = () => { rule = k; seed = 0; renderHarmony(); };
       return b;
     }));
-    (preview.firstChild as HTMLElement).style.background = gradientCss(gradientFrom(harmonyPalette(base, rule, seed), "oklab"));
+    (preview.firstChild as HTMLElement).style.background = paletteCss(harmonyPalette(base, rule, seed, count));
   }
 
   // ---- bar + stops
@@ -106,13 +127,14 @@ export function createGradientEditor(target: () => Target, changed: (label?: str
   // Smooth: interpolate in OkLab (even perceived steps) instead of classic encoded sRGB.
   const smoothBtn = el("button", { class: "chip", text: t("grad.smooth"), title: t("grad.smoothTip") });
   smoothBtn.onclick = () => { const g = target().gradient; g.space = g.space === "oklab" ? "srgb" : "oklab"; changed(t("grad.smooth")); render(); };
-  const head = el("div", { class: "grad-head" }, el("div", { class: "group-title", text: t("grad.gradient") }), smoothBtn, reverseBtn);
+  const head = el("div", { class: "grad-head" }, el("div", { class: "group-title", text: t("grad.gradient") }), smoothBtn);
 
   const posOf = (clientX: number) => { const r = bar.getBoundingClientRect(); return Math.min(1, Math.max(0, (clientX - r.left) / r.width)); };
   const shown = (pos: number) => (target().reverse ? 1 - pos : pos);
 
   // Tap the bar: a new stop with the colour already there.
   bar.addEventListener("click", (e) => {
+    if (!edit.open) return; // stops are edited under "Edit colours" only
     const tg = target();
     const x = shown(posOf(e.clientX));
     const [r, g, b, a] = gradientAt(tg.gradient, x);
@@ -197,14 +219,17 @@ export function createGradientEditor(target: () => Target, changed: (label?: str
     renderStop();
   }
 
-  root.append(el("div", { class: "group-title", text: t("grad.presets") }), groupChips, presets,
+  const edit = el("details", { class: "grad-edit" }, el("summary", { text: t("grad.edit") }),
     el("div", { class: "group-title", text: t("grad.harmony") }), ruleChips, harmonyRow,
-    el("div", { class: "grad-harmony-foot" }, el("span", { class: "muted grad-hint", text: t("grad.harmonyHint") }), photoBtn),
-    head, bar, stopsRow,
-    el("div", { class: "muted grad-hint", text: t("grad.hint") }), stopBody);
+    el("div", { class: "muted grad-hint", text: t("grad.harmonyHint") }),
+    head, stopsRow, el("div", { class: "muted grad-hint", text: t("grad.hint") }), stopBody);
+  root.append(bar,
+    el("div", { class: "grad-quick" }, newBtn, photoBtn, el("span", { class: "grad-spacer" }), countChips, reverseBtn),
+    el("div", { class: "group-title", text: t("grad.palettes") }), presets, edit);
   renderPresets();
   renderHarmony();
+  renderCount();
   render();
-  requestAnimationFrame(() => presets.querySelector(".on")?.scrollIntoView({ inline: "center", block: "nearest" }));
+
   return root;
 }
