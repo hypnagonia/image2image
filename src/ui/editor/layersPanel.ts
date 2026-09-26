@@ -32,13 +32,18 @@ type Ctx = {
   changed: (label: string) => void;
   /** Shows a layer's mask on the photo (its index among the visible layers), or stops. */
   showMask: (liveIndex: number | undefined) => void;
-  /** The Develop properties (today's Adjust and depth-of-field controls). */
+  /** The Develop properties (exposure, tone, colour, detail). */
   develop: HTMLElement;
-  /** A layer (not Develop) became selected: Develop's photo tools (focus picking, zone views) end. */
-  leftDevelop?: () => void;
+  /** The Blur properties (depth of field: focus, strength, zones, depth views). */
+  blur: HTMLElement;
+  /** Something other than Blur became selected: its photo tools (focus picking, zone views) end. */
+  leftBlur?: () => void;
 };
 
 /** Layer types in the ＋ sheet (each type's icon has the type's name). */
+/** The cards that are not layers: always there, at the bottom of the stack. */
+type Fixed = "develop" | "blur";
+
 const ADD: LayerType[] = ["curves", "hueSat", "basic", "gradientMap", "gradientFill", "brightContrast", "exposure"];
 
 
@@ -72,11 +77,12 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
   const addBtn = el("button", { class: "lay-add", title: t("lay.add"), "aria-label": t("lay.add") }, icon("plus", 22));
   dock.replaceChildren(list, addBtn);
 
-  function card(l: Layer | undefined): HTMLElement {
-    const id = l?.id ?? "develop";
+  /** A layer's card, or (no layer) one of the fixed cards: Develop, Blur. */
+  function card(l: Layer | undefined, fixed: Fixed = "develop"): HTMLElement {
+    const id = l?.id ?? fixed;
     const on = id === selected;
-    const name = el("span", { class: "lay-name", text: l ? layerName(l) : t("lay.develop") });
-    const glyph = el("span", { class: "lay-glyph" }, icon(l ? l.type : "develop", 18));
+    const name = el("span", { class: "lay-name", text: l ? layerName(l) : t(`lay.${fixed}`) });
+    const glyph = el("span", { class: "lay-glyph" }, icon(l ? l.type : fixed, 18));
     const hidden = l && !l.visible;
     const c = el("div", { class: "lay-card" + (on ? " on" : "") + (l?.auto ? " auto" : "") + (l ? "" : " develop") + (hidden ? " hidden" : ""), "data-id": id }, glyph, name);
     // Automatic layers: a small dot (the full word is in the properties); hidden layers: dimmed, eye crossed.
@@ -132,7 +138,7 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
   }
 
   function renderDock() {
-    list.replaceChildren(...[...layers()].reverse().map((l) => card(l)), card(undefined));
+    list.replaceChildren(...[...layers()].reverse().map((l) => card(l)), card(undefined, "develop"), card(undefined, "blur"));
     list.querySelector(".lay-card.on")?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
 
@@ -365,12 +371,12 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
     curvesUi = undefined;
     const l = sel();
     if (!l) {
-      selected = "develop";
-      props.replaceChildren(ctx.develop);
+      if (selected !== "blur") { selected = "develop"; ctx.leftBlur?.(); }
+      props.replaceChildren(selected === "blur" ? ctx.blur : ctx.develop);
       applyMaskView();
       return;
     }
-    ctx.leftDevelop?.();
+    ctx.leftBlur?.();
     const name = el("input", { class: "lay-title", value: layerName(l), "aria-label": t("lay.name") });
     name.onchange = () => { l.name = name.value.trim() || layerName(l); (l as Layer & { renamed?: boolean }).renamed = true; edit(); renderDock(); };
     const act = (ic: Parameters<typeof icon>[0], label: string, fn: () => void) => { const b = el("button", { class: "btn small icon ghost", title: label, "aria-label": label }, icon(ic, 19)); b.onclick = fn; return b; };

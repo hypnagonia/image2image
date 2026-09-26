@@ -23,6 +23,7 @@ export const pt: Dict = {
   // ---- tabs
   "tab.auto": "Info",
   "lay.develop": "Revelação",
+  "lay.blur": "Desfoque",
   "lay.add": "Adicionar camada",
   "lay.visible": "Mostrar / ocultar",
   "lay.auto": "Auto",

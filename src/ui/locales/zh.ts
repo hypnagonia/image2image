@@ -23,6 +23,7 @@ export const zh: Dict = {
   // ---- tabs
   "tab.auto": "信息",
   "lay.develop": "冲洗",
+  "lay.blur": "虚化",
   "lay.add": "添加图层",
   "lay.visible": "显示/隐藏",
   "lay.auto": "自动",

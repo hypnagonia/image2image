@@ -28,6 +28,7 @@ export const en = {
   // ---- tabs
   "tab.auto": "Info",
   "lay.develop": "Develop",
+  "lay.blur": "Blur",
   "lay.add": "Add layer",
   "lay.visible": "Show / hide",
   "lay.auto": "Auto",

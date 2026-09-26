@@ -30,7 +30,10 @@ const send = (m: ToWorker) => worker.postMessage(m);
 // --------------------------------------------------------------------------- DOM helpers
 
 const app = document.getElementById("app")!;
-const header = el("header", { class: "top" }, el("h1", { text: "Shikarno" }));
+// The mark: a frame holding a half-lit lens (light and shadow, the whole job), in the ink colour.
+const logo = el("span", { class: "logo", "aria-hidden": "true" });
+logo.innerHTML = `<svg viewBox="0 0 24 24" width="20" height="20"><rect x="1.5" y="1.5" width="21" height="21" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="5.75" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 6.25a5.75 5.75 0 0 1 0 11.5z" fill="currentColor"/></svg>`;
+const header = el("header", { class: "top" }, logo, el("h1", { text: "Shikarno" }));
 const capsEl = el("div", { class: "caps", text: t("app.starting") });
 header.append(capsEl);
 // Language: "Auto" follows the browser; a pick is remembered on this device (the page reloads).
@@ -131,8 +134,9 @@ const exportPane = addPane("export");
 const debugPane = addPane("debug");
 const autoPane = addPane("auto");
 const historyPane = addPane("history");
-/** Develop: the RAW development (today's Adjust controls) and depth of field. */
-const developEl = el("div", { class: "develop" }, adjustPane, el("div", { class: "group-title", text: t("tab.depth") }), depthPane);
+/** Develop: the RAW development (exposure, tone, colour, detail). Blur: depth of field, its own card. */
+const developEl = el("div", { class: "develop" }, adjustPane);
+const blurEl = el("div", { class: "develop" }, depthPane);
 autoPane.append(el("p", { class: "muted", text: t("auto.hint") }));
 
 // --------------------------------------------------------------------------- state
@@ -859,7 +863,8 @@ const layersPanel = createLayersPanel(dockEl, propsEl, {
   // View 6: the layer's mask on the photo (what it does not reach, tinted red).
   showMask: (i) => { maskIndex = i; send(baseView()); },
   develop: developEl,
-  leftDevelop: () => {
+  blur: blurEl,
+  leftBlur: () => {
     if (focusMode) setFocusMode(false);
     if (zoneHighlight !== undefined) setZoneHighlight(undefined);
     if (bandShown) setBandShown(false);

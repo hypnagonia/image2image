@@ -23,6 +23,7 @@ export const ru: Dict = {
   // ---- tabs
   "tab.auto": "Инфо",
   "lay.develop": "Проявка",
+  "lay.blur": "Размытие",
   "lay.add": "Добавить слой",
   "lay.visible": "Показать / скрыть",
   "lay.auto": "Авто",
