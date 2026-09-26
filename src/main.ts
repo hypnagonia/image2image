@@ -886,10 +886,10 @@ const layersPanel = createLayersPanel(dockEl, propsEl, {
     paletteWaiters.push((s) => resolve(s.palette.map((w) => w.hex)));
     send({ type: "palette" });
   }),
-  pickMode: (on) => {
+  pickMode: (on, hint) => {
     maskPicking = on;
     if (on && focusMode) setFocusMode(false);
-    badge.textContent = on ? t("mask.pickBadge") : "";
+    badge.textContent = on ? (hint ?? t("mask.pickBadge")) : "";
     badge.classList.toggle("on", on);
   },
   leftBlur: () => {

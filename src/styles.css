@@ -409,9 +409,21 @@ header.top .push { margin-left: auto; }
   header.top h1, header.top .caps { display: none; }
 }
 
-/* Masks built from parts (layers panel, Mask tab). */
-.mask-pick { align-items: center; margin-top: 2px; }
-.mask-pick .chips { margin: 0; }
-.mask-part-title { display: flex; align-items: center; justify-content: space-between; }
-.mask-part-title .btn { margin: -6px -8px -4px 0; color: var(--muted); }
-.mask-swatch { display: block; height: 22px; border: 1px solid var(--line); }
+/* Mask tab: what a tap does, then the pieces of the mask as rows (layersPanel.ts). */
+.mask-mode { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 2px 0 10px; }
+.mask-mode .chips { margin: 0; }
+.mask-empty { margin: 4px 0 10px; }
+.mask-piece { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 0 0 10px; border: 1px solid var(--line); margin-top: 6px; cursor: pointer; }
+.mask-piece.open { border-color: var(--text); }
+.mask-sign { flex: none; width: 14px; font-weight: bold; text-align: center; }
+.mask-what { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.mask-piece.inv .mask-what::after { content: "⇄"; color: var(--muted); }
+.mask-dot { flex: none; width: 14px; height: 14px; border: 1px solid var(--line); }
+.mask-x { flex: none; align-self: stretch; width: 44px; border: 0; background: transparent; color: var(--muted); display: flex; align-items: center; justify-content: center; }
+.mask-x:active { color: var(--text); }
+.mask-piece-body { border: 1px solid var(--text); border-top: 0; padding: 8px 10px 4px; }
+.mask-more { margin: 14px 0 4px; }
+.mask-more > summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 6px 0; list-style: none; }
+.mask-more > summary::before { content: "+ "; }
+.mask-more[open] > summary::before { content: "− "; }
+.mask-more > summary::-webkit-details-marker { display: none; }

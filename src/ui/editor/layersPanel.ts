@@ -40,8 +40,8 @@ type Ctx = {
   blur: HTMLElement;
   /** Something other than Blur became selected: its photo tools (focus picking, zone views) end. */
   leftBlur?: () => void;
-  /** Taps on the photo pick what to mask (on) or do what they normally do (off). */
-  pickMode: (on: boolean) => void;
+  /** Taps on the photo pick what to mask (on, with a hint for the photo) or do what they normally do (off). */
+  pickMode: (on: boolean, hint?: string) => void;
   /** The photo's main colours (hex), for "From photo" in gradients. */
   photoColors?: () => Promise<string[]>;
 };
@@ -322,56 +322,74 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
     if (m.kind === "cell" && m.region && m.band && m.region !== "skin") return `${m.region}.${m.band}` as HistTarget;
     return "photo";
   }
-  // Pick on the photo: a tap becomes this object / this colour / this distance, as the
-  // main mask (the first tap on a layer that covers everything) or as a part added or
-  // subtracted. The last pick can be switched between the three readings afterwards.
+  // Picking on the photo: while a layer's Mask tab is open, a tap selects. What a tap
+  // selects (object / colour / distance) and whether it adds or removes are the two
+  // choices at the top; each tap becomes a piece of the mask (the main shape first,
+  // then parts), listed below with its few settings.
   let picking = false;
   let pickOp: "add" | "subtract" = "add";
   let pickAs: "object" | "color" | "depth" = "object";
-  let lastPick: { info: PickInfo; layer: string; target: "main" | number } | undefined;
+  /** The piece whose settings are open ("main" or a part's index). */
+  let open: "main" | number | undefined;
   function setPicking(on: boolean) {
     if (on === picking) return;
     picking = on;
-    ctx.pickMode(on);
+    ctx.pickMode(on, t(pickOp === "add" ? "mask.tapAdd" : "mask.tapRemove"));
   }
   function shapeFromPick(info: PickInfo, as: typeof pickAs): Partial<MaskShape> {
     if (as === "color") return { kind: "color", color: info.color, tol: 0.08 };
     if (as === "depth") return { kind: "depth", depth: [Math.max(0, info.dist - 0.06), Math.min(1, info.dist + 0.06), 0.04] };
-    // This object: a selection (tap-to-select) — one person of four, not every person.
+    // Object: a selection (tap-to-select) — one person of four, not every person.
     return { kind: "select", points: [[info.x, info.y, 1]], level: undefined };
   }
-  function applyPick(l: Layer, info: PickInfo, target: "main" | number) {
-    const shape = shapeFromPick(info, pickAs);
-    if (target === "main") l.mask = { ...l.mask, ...shape, invert: false, feather: 1 };
-    else if (l.mask.parts?.[target]) l.mask.parts[target] = { ...l.mask.parts[target], ...shape } as MaskPart;
+  /** Adds a piece: the main shape while the mask still covers everything (adding), otherwise a part. */
+  function addPiece(l: Layer, shape: Partial<MaskShape>, op: MaskOp): boolean {
+    const m = l.mask;
+    const parts = (m.parts ??= []);
+    const clean = { invert: false, feather: 1, points: undefined, color: undefined, depth: undefined, lum: undefined, region: undefined, band: undefined, level: undefined, tol: undefined };
+    if (m.kind === "all" && op === "add") { l.mask = { ...m, ...clean, ...shape } as SmartMask; open = "main"; return true; }
+    if (parts.length >= MAX_MASK_PARTS) return false;
+    parts.push({ ...clean, ...shape, op } as MaskPart);
+    open = parts.length - 1;
+    return true;
   }
   function onPick(info: PickInfo) {
     const l = sel();
     if (!l || !picking) return;
-    const m = l.mask;
-    const parts = (m.parts ??= []);
-    let target: "main" | number;
-    if (m.kind === "all" && !parts.length && pickOp === "add") target = "main";
-    else if (parts.length < MAX_MASK_PARTS) { parts.push({ kind: "object", op: pickOp, invert: false, feather: 1 }); target = parts.length - 1; }
-    else return;
-    lastPick = { info, layer: l.id, target };
-    applyPick(l, info, target);
+    if (!addPiece(l, shapeFromPick(info, pickAs), pickOp)) return;
     edit(t("hist.mask", { name: layerName(l) }));
     renderProps();
   }
 
-  /** The controls of one mask shape (the main one or a part): what it selects and how softly. */
-  function shapeFields(sh: MaskShape, kinds: MaskKind[], set: (patch: Partial<MaskShape>) => void): HTMLElement[] {
+  const levelName = (lv: MaskShape["level"]) => t(lv === undefined ? "mask.level.auto" : `mask.level.${lv}`);
+  const pct100 = (v: number) => String(Math.round(v * 100));
+  /** A piece in one line: what it selects. */
+  function pieceSummary(sh: MaskShape): Node[] {
+    const cov = ctx.coverage() ?? {};
+    const reg = (r?: Region) => (r ? tOr(`group.${r}`, r) : "");
+    switch (sh.kind) {
+      case "select": return [document.createTextNode(`${t("mask.pick.object")} · ${levelName(sh.level)}`)];
+      case "color": {
+        const lin = oklabToLinSrgb(sh.color ?? [0.6, 0, 0]).map((v) => Math.round(255 * Math.min(1, Math.max(0, v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055))));
+        return [el("span", { class: "mask-dot", style: `background: rgb(${lin.join(",")})` }), document.createTextNode(t("mask.pick.color"))];
+      }
+      case "depth": return [document.createTextNode(`${t("mask.pick.depth")} ${pct100(sh.depth?.[0] ?? 0)}–${pct100(sh.depth?.[1] ?? 1)}`)];
+      case "region": return [document.createTextNode(`${reg(sh.region)}${cov[sh.region ?? ""] !== undefined ? ` ${Math.round(cov[sh.region!])}%` : ""}`)];
+      case "object": return [document.createTextNode(`${reg(sh.region)} · ${pct100(sh.depth?.[0] ?? 0)}–${pct100(sh.depth?.[1] ?? 1)}`)];
+      case "distance": return [document.createTextNode(t(`band.${sh.band ?? "near"}`))];
+      case "cell": return [document.createTextNode(`${reg(sh.region)} · ${t(`band.${sh.band ?? "near"}`).toLowerCase()}`)];
+      case "luminance": return [document.createTextNode(`${t("mask.luminance")} ${pct100(sh.lum?.[0] ?? 0)}–${pct100(sh.lum?.[1] ?? 1)}`)];
+      default: return [document.createTextNode(t("mask.all"))];
+    }
+  }
+
+  /** A piece's settings: only what its kind has, then invert and soft edge. */
+  function shapeFields(sh: MaskShape, set: (patch: Partial<MaskShape>) => void): HTMLElement[] {
     const cov = ctx.coverage() ?? {};
     const cc = ctx.cellCoverage() ?? {};
     const regions: Region[] = GROUPS.filter((g) => (cov[g] ?? 0) >= 0.5);
     if ((cov.person ?? 0) >= 0.5) regions.splice(regions.indexOf("person") + 1, 0, "skin");
-    const out: HTMLElement[] = [
-      chips<MaskKind>(kinds.map((k) => ({ id: k, label: t(`mask.${k}`) })), sh.kind, (k) => set({
-        kind: k, region: k === "cell" && sh.region === "skin" ? "person" : sh.region ?? regions[0] ?? "sky", band: sh.band ?? "near",
-        lum: sh.lum ?? [0, 0.3, 0.08], depth: sh.depth ?? [0, 0.3, 0.05], color: sh.color ?? [0.6, 0, 0], tol: sh.tol ?? 0.08,
-      })),
-    ];
+    const out: HTMLElement[] = [];
     if (sh.kind === "region" || sh.kind === "cell" || sh.kind === "object") {
       const rs = sh.kind === "cell" ? regions.filter((r) => r !== "skin") : regions;
       if (sh.region && !rs.includes(sh.region)) rs.push(sh.region);
@@ -382,32 +400,26 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
     }
     if (sh.kind === "luminance") {
       const lum = (sh.lum ??= [0, 0.3, 0.08]);
-      out.push(slider(t("mask.low"), 0, 1, 0.01, () => lum[0], (v) => (lum[0] = v), (v) => String(Math.round(v * 100)), 0));
-      out.push(slider(t("mask.high"), 0, 1, 0.01, () => lum[1], (v) => (lum[1] = v), (v) => String(Math.round(v * 100)), 0.3));
-      out.push(slider(t("mask.soft"), 0.01, 0.3, 0.01, () => lum[2], (v) => (lum[2] = v), (v) => String(Math.round(v * 100)), 0.08));
+      out.push(slider(t("mask.low"), 0, 1, 0.01, () => lum[0], (v) => (lum[0] = v), pct100, 0));
+      out.push(slider(t("mask.high"), 0, 1, 0.01, () => lum[1], (v) => (lum[1] = v), pct100, 0.3));
+      out.push(slider(t("mask.soft"), 0.01, 0.3, 0.01, () => lum[2], (v) => (lum[2] = v), pct100, 0.08));
     }
     if (sh.kind === "depth" || sh.kind === "object") {
       const d = (sh.depth ??= [0, 0.3, 0.05]);
+      out.push(slider(t("mask.low"), 0, 1, 0.01, () => d[0], (v) => (d[0] = v), pct100, 0));
+      out.push(slider(t("mask.high"), 0, 1, 0.01, () => d[1], (v) => (d[1] = v), pct100, 0.3));
+      out.push(slider(t("mask.soft"), 0.005, 0.2, 0.005, () => d[2], (v) => (d[2] = v), pct100, 0.05));
       out.push(el("p", { class: "muted", text: t("mask.depthHint") }));
-      out.push(slider(t("mask.low"), 0, 1, 0.01, () => d[0], (v) => (d[0] = v), (v) => String(Math.round(v * 100)), 0));
-      out.push(slider(t("mask.high"), 0, 1, 0.01, () => d[1], (v) => (d[1] = v), (v) => String(Math.round(v * 100)), 0.3));
-      out.push(slider(t("mask.soft"), 0.005, 0.2, 0.005, () => d[2], (v) => (d[2] = v), (v) => String(Math.round(v * 100)), 0.05));
     }
     if (sh.kind === "select") {
-      // SAM's readings of the tap: its own most confident one, or whole / part / detail (largest first).
-      out.push(chips<"auto" | "0" | "1" | "2">([{ id: "auto", label: t("mask.level.auto") }, { id: "0", label: t("mask.level.0") }, { id: "1", label: t("mask.level.1") }, { id: "2", label: t("mask.level.2") }],
+      // How much of what was tapped: SAM's own best reading, or whole / part / detail (a person / their clothes / a piece).
+      out.push(chips<"auto" | "0" | "1" | "2">(([undefined, 0, 1, 2] as const).map((lv) => ({ id: lv === undefined ? "auto" : (String(lv) as "0"), label: levelName(lv) })),
         sh.level === undefined ? "auto" : (String(sh.level) as "0"), (v) => set({ level: v === "auto" ? undefined : (+v as 0 | 1 | 2) })));
     }
-    if (sh.kind === "color") {
-      const c = sh.color ?? [0.6, 0, 0];
-      // The picked colour as a swatch (OkLab → sRGB), so it is clear what is matched.
-      const lin = oklabToLinSrgb(c).map((v) => Math.round(255 * Math.min(1, Math.max(0, v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055))));
-      out.push(el("div", { class: "row" }, el("label", { text: t("mask.color") }), el("span", { class: "mask-swatch", style: `background: rgb(${lin.join(",")})` }), el("span")));
-      out.push(slider(t("mask.tol"), 0.01, 0.3, 0.005, () => sh.tol ?? 0.08, (v) => (sh.tol = v), (v) => String(Math.round(v * 100)), 0.08));
-    }
+    if (sh.kind === "color") out.push(slider(t("mask.tol"), 0.01, 0.3, 0.005, () => sh.tol ?? 0.08, (v) => (sh.tol = v), pct100, 0.08));
     if (sh.kind !== "all") {
-      out.push(toggle(t("mask.invert"), sh.invert, (v) => set({ invert: v })));
       out.push(slider(t("mask.feather"), 0, 1, 0.01, () => sh.feather, (v) => (sh.feather = v), (v) => `${Math.round(v * 100)}%`, 1));
+      out.push(toggle(t("mask.invert"), sh.invert, (v) => set({ invert: v })));
     }
     return out;
   }
@@ -416,56 +428,78 @@ export function createLayersPanel(dock: HTMLElement, props: HTMLElement, ctx: Ct
     const m = l.mask;
     const parts = m.parts ?? [];
     const changed = () => { edit(t("hist.mask", { name: layerName(l) })); renderProps(); };
-    const set = (patch: Partial<MaskShape>) => { l.mask = { ...m, ...patch }; changed(); };
 
-    // Pick on the photo.
-    const pickBtn = el("button", { class: "btn small" + (picking ? " primary" : ""), text: picking ? t("mask.picking") : t("mask.pick") });
-    pickBtn.onclick = () => { setPicking(!picking); renderProps(); };
+    // What a tap does.
     const out: HTMLElement[] = [
-      el("div", { class: "actions mask-pick" }, pickBtn,
-        chips<"add" | "subtract">([{ id: "add", label: t("mask.op.add") }, { id: "subtract", label: t("mask.op.subtract") }], pickOp, (o) => { pickOp = o; renderProps(); })),
+      el("div", { class: "mask-mode" },
+        chips<"add" | "subtract">([{ id: "add", label: t("mask.mode.add") }, { id: "subtract", label: t("mask.mode.remove") }], pickOp, (o) => { pickOp = o; ctx.pickMode(true, t(o === "add" ? "mask.tapAdd" : "mask.tapRemove")); renderProps(); }),
+        chips<typeof pickAs>([{ id: "object", label: t("mask.pick.object") }, { id: "color", label: t("mask.pick.color") }, { id: "depth", label: t("mask.pick.depth") }], pickAs, (a) => { pickAs = a; renderProps(); })),
     ];
-    if (picking) out.push(el("p", { class: "muted", text: t("mask.pickHint") }));
-    const lp = lastPick && lastPick.layer === l.id && (lastPick.target === "main" || parts[lastPick.target]) ? lastPick : undefined;
-    if (lp) {
-      out.push(chips<typeof pickAs>([{ id: "object", label: t("mask.asObject") }, { id: "color", label: t("mask.asColor") }, { id: "depth", label: t("mask.asDepth") }], pickAs, (a) => {
-        pickAs = a; applyPick(l, lp.info, lp.target); changed();
-      }));
+
+    // The pieces.
+    type Key = "main" | number;
+    const pieces: Array<{ key: Key; sh: MaskShape; op?: MaskOp }> = [
+      ...(m.kind !== "all" ? [{ key: "main" as Key, sh: m as MaskShape }] : []),
+      ...parts.map((p, i) => ({ key: i as Key, sh: p as MaskShape, op: p.op })),
+    ];
+    if (!pieces.length) out.push(el("p", { class: "muted mask-empty", text: t("mask.empty") }));
+    for (const { key, sh, op } of pieces) {
+      const setPiece = (patch: Partial<MaskShape>) => {
+        if (key === "main") l.mask = { ...m, ...patch };
+        else parts[key] = { ...parts[key], ...patch } as MaskPart;
+        changed();
+      };
+      const remove = el("button", { class: "mask-x", title: t("mask.remove"), "aria-label": t("mask.remove") }, icon("close", 15));
+      remove.onclick = (e) => {
+        e.stopPropagation();
+        if (key === "main") {
+          // The next added part takes the main place; a mask of only removals keeps "everything" underneath.
+          const next = parts[0]?.op === "add" ? parts.shift()! : undefined;
+          l.mask = next ? { ...m, ...next, op: undefined, parts } as SmartMask : { ...m, kind: "all", invert: false, feather: 1, parts };
+        } else parts.splice(key, 1);
+        open = undefined;
+        changed();
+      };
+      const sign = el("span", { class: "mask-sign", text: key === "main" ? "+" : op === "subtract" ? "−" : op === "intersect" ? "∩" : "+" });
+      const row = el("div", { class: "mask-piece" + (open === key ? " open" : "") + (sh.invert ? " inv" : "") }, sign, el("span", { class: "mask-what" }, ...pieceSummary(sh)), remove);
+      row.onclick = () => { open = open === key ? undefined : key; renderProps(); };
+      out.push(row);
+      if (open === key) {
+        const body = el("div", { class: "mask-piece-body" });
+        if (key !== "main") body.append(chips<MaskOp>(MASK_OPS.map((o) => ({ id: o, label: t(`mask.op.${o}`) })), op, (o) => setPiece({ op: o } as Partial<MaskShape>)));
+        body.append(...shapeFields(sh, setPiece));
+        out.push(body);
+      }
     }
+    if (parts.length >= MAX_MASK_PARTS) out.push(el("p", { class: "muted", text: t("mask.full") }));
 
-    // The main mask.
-    out.push(el("div", { class: "group-title", text: t("mask.main") }));
-    const withSel = (ks: MaskKind[], sh: MaskShape): MaskKind[] => (sh.kind === "select" ? ["select", ...ks] : ks);
-    out.push(...shapeFields(m, withSel(["all", "object", "region", "color", "depth", "distance", "cell", "luminance"], m), set));
-
-    // Extra parts: each added, subtracted or intersected, in order.
-    parts.forEach((part, i) => {
-      const setPart = (patch: Partial<MaskShape>) => { parts[i] = { ...part, ...patch } as MaskPart; changed(); };
-      const remove = el("button", { class: "btn small icon ghost", title: t("mask.remove"), "aria-label": t("mask.remove") }, icon("trash", 17));
-      remove.onclick = () => { parts.splice(i, 1); if (lastPick?.layer === l.id) lastPick = undefined; changed(); };
-      out.push(el("div", { class: "group-title mask-part-title" }, el("span", { text: t("mask.part", { n: i + 1 }) }), remove));
-      out.push(chips<MaskOp>(MASK_OPS.map((o) => ({ id: o, label: t(`mask.op.${o}`) })), part.op, (o) => setPart({ op: o } as Partial<MaskShape>)));
-      out.push(...shapeFields(part, withSel(["object", "region", "color", "depth", "distance", "cell", "luminance"], part), setPart));
+    // More: masks by type (no tap needed), and the whole mask's strength.
+    const more = el("details", { class: "mask-more" }, el("summary", { text: t("mask.more") }));
+    const addBy = chips<MaskKind>((["region", "luminance", "distance", "cell"] as MaskKind[]).map((k) => ({ id: k, label: t(`mask.${k}`) })), undefined, (k) => {
+      const cov = ctx.coverage() ?? {};
+      const region = (GROUPS.find((g) => (cov[g] ?? 0) >= 5) ?? "sky") as Region;
+      if (addPiece(l, { kind: k, region, band: "near", lum: [0, 0.3, 0.08] }, pickOp)) changed();
     });
-    if (parts.length < MAX_MASK_PARTS) {
-      const add = el("button", { class: "btn small", text: t("mask.addPart") });
-      add.onclick = () => { (m.parts ??= []).push({ kind: "region", region: "sky", op: "add", invert: false, feather: 1 }); changed(); };
-      out.push(el("div", { class: "actions" }, add));
-    }
-
-    out.push(el("div", { class: "group-title", text: t("mask.whole") }));
-    out.push(slider(t("mask.density"), 0, 1, 0.01, () => m.density, (v) => (m.density = v), (v) => `${Math.round(v * 100)}%`, 1));
+    const clear = el("button", { class: "btn small", text: t("mask.clear") });
+    clear.onclick = () => { l.mask = { kind: "all", invert: false, feather: 1, density: m.density, exceptSkin: m.exceptSkin }; open = undefined; changed(); };
+    more.append(el("div", { class: "muted", text: t("mask.addBy") }), addBy,
+      slider(t("mask.density"), 0, 1, 0.01, () => m.density, (v) => (m.density = v), (v) => `${Math.round(v * 100)}%`, 1),
+      el("div", { class: "actions" }, clear));
+    more.open = moreOpen;
+    more.ontoggle = () => { moreOpen = more.open; };
+    out.push(more);
     out.push(toggle(t("mask.show"), showMask, (v) => { showMask = v; applyMaskView(); }));
     return out;
   }
+  let moreOpen = false;
   // Only changes reach the app (each one re-renders the photo and resets other views).
   let maskSent: number | undefined | null = null;
   function applyMaskView() {
     const l = sel();
     const i = l ? liveIndex(l.id) : -1;
     const want = visible && tab === "mask" && showMask && i >= 0 ? i : undefined;
-    // Picking belongs to the Mask tab of the selected layer: anywhere else it ends.
-    if (picking && !(visible && tab === "mask" && l)) setPicking(false);
+    // Taps pick while the selected layer's Mask tab is open, and only then.
+    setPicking(visible && tab === "mask" && !!l);
     if (want === maskSent) return;
     maskSent = want;
     ctx.showMask(want);
